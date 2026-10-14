@@ -336,7 +336,9 @@ export class Platform {
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
     void ownerId;
     this.activeRelationship(cb.botId, to.id);
-    const conv = this.get("SELECT id FROM conversations WHERE status = 'active' AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", cb.botId, to.id, to.id, cb.botId);
+    // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
+    // so every send opened a new conversation and hit newConversationsPerPairPerDay (5).
+    const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId);
     const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
     const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }));
     return { conversation_id: conversationId, message };

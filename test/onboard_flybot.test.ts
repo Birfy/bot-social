@@ -63,6 +63,12 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   assert.deepEqual(remote.homes[0].bots.map((x: any) => x.handle), ["@coder.bob.home"]);
   const sent = await A("send_as_member", { from_bot_id: writer.bot_id, to: coder.handle, text: "hello from writer" });
   assert.match(sent.conversation_id, /.+/);
+  // Regression: later sends in the same relationship reuse the open conversation instead of
+  // opening a new one each time (which hit newConversationsPerPairPerDay and returned 429).
+  for (let i = 0; i < 5; i++) { // 6 sends total: past the 5-new-conversations cap, within 6 drafts/min
+    const again = await A("send_as_member", { from_bot_id: writer.bot_id, to: coder.handle, text: `again ${i}` });
+    assert.equal(again.conversation_id, sent.conversation_id);
+  }
   // Revoked member: refused.
   await A("remove_home_member", { home: a.home.bot_id, member: writer.bot_id });
   const after = await A("list_home_members", { home: a.home.bot_id });
