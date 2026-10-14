@@ -290,20 +290,42 @@ export class Platform {
     return { members: this.homeMembers(this.ownHome(ownerId, homeId).id) };
   }
 
-  /** Remote bots this home can reach: every active member (and the home itself) of each friend home. */
+  /**
+   * Remote bots this home can reach, grouped by friend home.
+   * - home ↔ home friendship: every active member of the friend home.
+   * - member-scoped friendship (an invite made for one member, joined by a home, or the reverse):
+   *   only that member is exposed. When the scoped member is one of mine, `via` names it: only it
+   *   may talk to that friend home; my other members stay hidden from them.
+   */
   remoteBots(p: Principal, homeId: string) {
     const ownerId = this.requireOwner(p);
     const home = this.ownHome(ownerId, homeId);
-    const rels = this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status = 'active'", home.id, home.id);
-    return {
-      homes: rels.map((r: any) => {
-        const peer = this.bot(r.requester_bot === home.id ? r.target_bot : r.requester_bot);
-        return {
-          relationship_id: r.id, home: { bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name, owner_display_name: this.owner(peer.owner_id).display_name },
-          bots: peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [],
-        };
-      }),
-    };
+    const mine = new Set<string>([home.id, ...this.homeMembers(home.id).map((m: any) => m.bot_id)]);
+    const ids = [...mine];
+    const marks = ids.map(() => "?").join(",");
+    const rels = this.all(`SELECT * FROM relationships WHERE (requester_bot IN (${marks}) OR target_bot IN (${marks})) AND status = 'active' ORDER BY created_at`, ...ids, ...ids);
+    const byHome = new Map<string, any>();
+    for (const r of rels) {
+      const mySide = mine.has(r.requester_bot) ? r.requester_bot : r.target_bot;
+      const peer = this.bot(mySide === r.requester_bot ? r.target_bot : r.requester_bot);
+      if (!peer || mine.has(peer.id)) continue;
+      const peerHome = this.bot(this.homeOf(peer.id));
+      const scopedPeer = peerHome.id !== peer.id;
+      const bots = scopedPeer
+        ? (peer.status === "active" ? [{ bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name }] : [])
+        : peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [];
+      const entry = byHome.get(peerHome.id) ?? {
+        relationship_id: r.id, relationship_ids: [] as string[],
+        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, owner_display_name: this.owner(peerHome.owner_id).display_name },
+        bots: [] as any[], scope: "member", via: [] as string[],
+      };
+      entry.relationship_ids.push(r.id);
+      for (const b of bots) if (!entry.bots.some((x: any) => x.bot_id === b.bot_id)) entry.bots.push(b);
+      if (!scopedPeer && mySide === home.id) entry.scope = "home"; // a home ↔ home friendship exposes everyone
+      if (mySide !== home.id) entry.via.push("@" + this.bot(mySide).handle);
+      byHome.set(peerHome.id, entry);
+    }
+    return { homes: [...byHome.values()] };
   }
 
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
@@ -691,10 +713,19 @@ export class Platform {
   }
 
   activeRelationship(a: string, b: string) {
-    // Direct (per-bot) friendship first, then home-to-home friendship for FlyBot members.
+    // Direct (per-bot) friendship first, then member-scoped (a home befriended one member of
+    // the other home, through an invite made for that member), then home-to-home.
     const ha = this.homeOf(a), hb = this.homeOf(b);
-    const rel = this.pairRelationships(a, b).find((r) => r.status === "active")
-      ?? (ha !== a || hb !== b ? this.pairRelationships(ha, hb).find((r) => r.status === "active") : undefined);
+    const pairs: [string, string][] = [[a, b], [ha, b], [a, hb], [ha, hb]];
+    const seen = new Set<string>();
+    let rel: any;
+    for (const [x, y] of pairs) {
+      const key = x + "|" + y;
+      if (seen.has(key) || x === y) continue;
+      seen.add(key);
+      rel = this.pairRelationships(x, y).find((r) => r.status === "active");
+      if (rel) break;
+    }
     if (!rel) {
       this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
       throw new ApiError(403, "no_relationship", "no active relationship between these bots");

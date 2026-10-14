@@ -74,3 +74,45 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   const approvals = await A("list_approvals");
   assert.ok(approvals.approvals.some((x: any) => x.kind === "message" || /message/.test(x.kind ?? "")));
 });
+
+test("FlyBot member-scoped invite: joining exposes only that member; other members stay hidden", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const a = (await post(s.base, "/v1/onboard/flybot", { display_name: "Danyang" })).body;
+  const b = (await post(s.base, "/v1/onboard/flybot", { display_name: "Bob" })).body;
+  const A = (name: string, args: unknown = {}) => mcp(s.base, a.connector.token, name, args);
+  const B = (name: string, args: unknown = {}) => mcp(s.base, b.connector.token, name, args);
+  const raw = async (token: string, name: string, args: unknown) => (await fetch(s.base + "/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.json()) as any).result;
+  const chief = await A("add_home_member", { home: a.home.bot_id, name: "chief" });
+  const writer = await A("add_home_member", { home: a.home.bot_id, name: "writer" });
+  const coder = await B("add_home_member", { home: b.home.bot_id, name: "coder" });
+  // Danyang invites to Chief only; Bob's home joins.
+  const inv = await A("create_invite", { bot_id: chief.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  const joined = await B("join_invite", { code: inv.code, from_bot_id: b.home.bot_id });
+  assert.equal(joined.status, "active");
+  assert.equal(joined.inviter.handle, "@chief.danyang.home");
+  // Bob sees only Chief, under Danyang's home.
+  const bobView = await B("list_remote_bots", { home: b.home.bot_id });
+  assert.equal(bobView.homes.length, 1);
+  assert.equal(bobView.homes[0].home.handle, "@danyang.home");
+  assert.equal(bobView.homes[0].scope, "member");
+  assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle), ["@chief.danyang.home"]);
+  // Danyang sees Bob's members, reachable via Chief.
+  const danView = await A("list_remote_bots", { home: a.home.bot_id });
+  assert.deepEqual(danView.homes[0].bots.map((x: any) => x.handle), ["@coder.bob.home"]);
+  assert.deepEqual(danView.homes[0].via, ["@chief.danyang.home"]);
+  // Bob's coder ↔ Chief works both ways; Writer is hidden and unreachable both ways.
+  assert.match((await B("send_as_member", { from_bot_id: coder.bot_id, to: chief.handle, text: "hi chief" })).conversation_id, /.+/);
+  assert.match((await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "hi coder" })).conversation_id, /.+/);
+  const toWriter = await raw(b.connector.token, "send_as_member", { from_bot_id: coder.bot_id, to: writer.handle, text: "hi writer" });
+  assert.equal(toWriter.isError, true);
+  assert.match(toWriter.content[0].text, /no_relationship/);
+  const fromWriter = await raw(a.connector.token, "send_as_member", { from_bot_id: writer.bot_id, to: coder.handle, text: "hi" });
+  assert.equal(fromWriter.isError, true);
+  // A second invite, for Writer, exposes Writer too (same friend-home entry).
+  const inv2 = await A("create_invite", { bot_id: writer.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  await B("join_invite", { code: inv2.code, from_bot_id: b.home.bot_id });
+  const bobView2 = await B("list_remote_bots", { home: b.home.bot_id });
+  assert.equal(bobView2.homes.length, 1);
+  assert.deepEqual(bobView2.homes[0].bots.map((x: any) => x.handle).sort(), ["@chief.danyang.home", "@writer.danyang.home"]);
+});
