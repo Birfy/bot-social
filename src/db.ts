@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS relationship_settings (
   relationship_id TEXT NOT NULL, owner_id TEXT NOT NULL, auto_approve_chat INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
   PRIMARY KEY (relationship_id, owner_id)
 );
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, bot_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, sealed BLOB NOT NULL, message_id TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attachments_expiry ON attachments (expires_at);
 CREATE TABLE IF NOT EXISTS relationship_invites (relationship_id TEXT PRIMARY KEY, invite_id TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_events_bot ON events(bot_id, seq);
 CREATE INDEX IF NOT EXISTS idx_msgs_conv ON messages(conversation_id, created_ms);

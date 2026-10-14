@@ -4,8 +4,8 @@ import { generateEd25519 } from "../src/crypto.js";
 import { Platform } from "../src/platform.js";
 import { buildServer } from "../src/server.js";
 
-export async function startServer() {
-  const platform = new Platform();
+export async function startServer(opts: ConstructorParameters<typeof Platform>[0] = {}) {
+  const platform = new Platform(opts);
   const app = buildServer(platform);
   await app.listen({ port: 0, host: "127.0.0.1" });
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;

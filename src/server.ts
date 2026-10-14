@@ -60,6 +60,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/homes/:id/members", async (req) => platform.listHomeMembers(auth(req), P(req).id));
   app.post("/v1/homes/:id/members", async (req, reply) => reply.status(201).send(platform.addHomeMember(auth(req), P(req).id, B(req))));
   app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
+  app.post("/v1/attachments", { bodyLimit: Math.ceil(platform.attachmentLimits.maxBytes / 3) * 4 + 64 * 1024 }, async (req, reply) => reply.status(201).send(platform.uploadAttachment(auth(req), B(req))));
+  app.get("/v1/attachments/:id", async (req) => platform.getAttachment(auth(req), { attachment_id: P(req).id, bot_id: Q(req)?.bot_id }));
   app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(auth(req), P(req).id));
   app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
   app.post("/v1/onboard", async (req, reply) => {

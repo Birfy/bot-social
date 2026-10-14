@@ -8,11 +8,12 @@ import { seal, unseal, publicRawFromPrivatePem } from "./custody.js";
 import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToken, jcs, payloadDigest, signString, verifyString, webhookSignature, publicKeyFromRaw } from "./crypto.js";
 import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan } from "./policy.js";
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
+import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string } | { kind: "bot"; botId: string; ownerId: string };
 
-export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions }
+export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits> }
 
 const nowIso = () => new Date().toISOString();
 const J = (s: string | null | undefined, d: any = null) => (s ? JSON.parse(s) : d);
@@ -46,7 +47,9 @@ export class Platform {
   readonly webhooks: WebhookPusher;
 
   private kmsKey: Buffer;
+  readonly attachmentLimits: AttachmentLimits;
   constructor(opts: PlatformOptions = {}) {
+    this.attachmentLimits = { ...DEFAULT_ATTACHMENT_LIMITS, ...Object.fromEntries(Object.entries(opts.attachments ?? {}).filter(([, v]) => typeof v === "number" && v > 0)) };
     this.db = openDb(opts.dbPath ?? ":memory:");
     this.audit = new AuditLog(opts.auditPath ?? ":memory:");
     this.publicBaseUrl = opts.publicBaseUrl ?? "http://localhost:8787";
@@ -304,7 +307,7 @@ export class Platform {
   }
 
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[] }) {
     const ownerId = this.requireOwner(p);
     const cb = this.custodialBot(p, body?.from_bot_id);
     const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
@@ -313,8 +316,79 @@ export class Platform {
     this.activeRelationship(cb.botId, to.id);
     const conv = this.get("SELECT id FROM conversations WHERE status = 'active' AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", cb.botId, to.id, to.id, cb.botId);
     const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
-    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text }, { conversation_id: conversationId }));
+    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }));
     return { conversation_id: conversationId, message };
+  }
+
+  // ================================================================ attachments
+  /** Upload a file for one of my bots (owner: bot_id names it; bot: itself). Stored sealed with the KMS key; expires. */
+  uploadAttachment(p: Principal, body: { bot_id?: string; name: string; mime?: string; content_base64: string }) {
+    const { botId, ownerId } = this.attachmentBot(p, body?.bot_id);
+    assert(typeof body?.content_base64 === "string", 400, "invalid_request", "content_base64 required");
+    assert(body.content_base64.length <= Math.ceil(this.attachmentLimits.maxBytes / 3) * 4 + 4, 413, "attachment_too_large", `file exceeds ${this.attachmentLimits.maxBytes} bytes`);
+    const bytes = Buffer.from(body.content_base64, "base64");
+    const check = checkFile(body.name, body.mime, bytes, this.attachmentLimits);
+    if (!check.ok) throw new ApiError(check.code === "attachment_too_large" ? 413 : 415, check.code, check.message);
+    this.cleanupAttachments();
+    const id = newId("att"), now = Date.now();
+    const sha256 = sha256Hex(bytes);
+    this.run("INSERT INTO attachments (id, owner_id, bot_id, name, mime, size, sha256, sealed, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      id, ownerId, botId, check.name, check.mime, bytes.length, sha256, sealBytes(this.kmsKey, bytes, `attachment:${id}:${sha256}`), new Date(now).toISOString(), new Date(now + this.attachmentLimits.ttlMs).toISOString());
+    this.audit.append(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
+    return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: this.attachmentLimits };
+  }
+
+  private attachmentBot(p: Principal, botId?: string) {
+    if (p.kind === "owner") {
+      const ownerId = this.requireOwner(p);
+      const b = botId ? this.ownBot(ownerId, botId) : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
+      assert(b, 404, "bot_not_found", "no bot to upload for");
+      return { botId: b.id as string, ownerId };
+    }
+    return this.requireBot(p);
+  }
+
+  /** Validates a draft's refs: each one my bot's upload, unexpired, not yet sent, and matching the stored file exactly. */
+  private checkRefs(botId: string, refs: unknown): AttachmentRef[] {
+    if (refs === undefined || refs === null) return [];
+    assert(Array.isArray(refs), 400, "invalid_request", "payload.attachments must be an array");
+    const list = refs as any[];
+    assert(list.length <= this.attachmentLimits.maxPerMessage, 400, "invalid_request", `at most ${this.attachmentLimits.maxPerMessage} attachments per message`);
+    assert(new Set(list.map((r) => r?.id)).size === list.length, 400, "invalid_request", "duplicate attachment");
+    return list.map((r) => {
+      const row = this.get("SELECT id, bot_id, name, mime, size, sha256, message_id, expires_at FROM attachments WHERE id = ?", r?.id);
+      assert(row && row.bot_id === botId, 404, "attachment_not_found", "no such attachment for this bot");
+      assert(Date.parse(row.expires_at) > Date.now(), 410, "attachment_expired", "attachment expired");
+      assert(!row.message_id, 409, "attachment_in_use", "attachment already sent; upload it again");
+      const ref = refOf(row);
+      assert(ref.name === r.name && ref.size === r.size && ref.mime === r.mime && ref.sha256 === r.sha256, 400, "attachment_mismatch", "attachment ref does not match the uploaded file");
+      return ref;
+    });
+  }
+
+  /** Download for the recipient (bot, or its owner) of a delivered message only; the hash is verified. */
+  getAttachment(p: Principal, body: { attachment_id: string; bot_id?: string }) {
+    const row = this.get("SELECT * FROM attachments WHERE id = ?", body?.attachment_id);
+    assert(row, 404, "attachment_not_found", "no such attachment");
+    const m = row.message_id ? this.get("SELECT id, recipient_bot, sender_bot, status FROM messages WHERE id = ?", row.message_id) : undefined;
+    let allowed = false;
+    if (m && m.status === "delivered") {
+      if (p.kind === "owner") allowed = this.bot(m.recipient_bot).owner_id === this.requireOwner(p) && (!body.bot_id || body.bot_id === m.recipient_bot);
+      else allowed = this.requireBot(p).botId === m.recipient_bot;
+    }
+    // Same answer whether it exists or not, so ids cannot be probed.
+    assert(allowed, 404, "attachment_not_found", "no such attachment");
+    assert(Date.parse(row.expires_at) > Date.now(), 410, "attachment_expired", "attachment expired");
+    const bytes = unsealBytes(this.kmsKey, row.sealed, `attachment:${row.id}:${row.sha256}`);
+    assert(sha256Hex(bytes) === row.sha256, 500, "attachment_corrupt", "attachment hash mismatch");
+    this.audit.append("platform", "attachment.downloaded", row.id, [row.owner_id, this.bot(m.recipient_bot).owner_id], { message_id: m.id, sha256: row.sha256 });
+    return { attachment: refOf(row), message_id: m.id, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", content_base64: bytes.toString("base64") };
+  }
+
+  /** Deletes expired files. Returns how many went. */
+  cleanupAttachments(now = Date.now()) {
+    const r = this.run("DELETE FROM attachments WHERE expires_at <= ?", new Date(now).toISOString()) as any;
+    return r?.changes ?? 0;
   }
 
   // ================================================================ custodial signing keys
@@ -1073,7 +1147,8 @@ export class Platform {
     const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, expires_at: a.expires_at };
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
-      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: J(m.payload), status: m.status };
+      const pl = J(m.payload);
+      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
     } else if (a.kind === "action") {
       const x = this.get("SELECT * FROM actions WHERE id = ?", a.subject_id);
       card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
@@ -1220,6 +1295,8 @@ export class Platform {
     this.assertConvActive(c);
     const pl: any = env.payload ?? {};
     assert(typeof pl.text === "string" && pl.text.length > 0 && pl.text.length <= 4000, 400, "invalid_request", "payload.text (1-4000 chars) required");
+    // Refs live in the signed payload, so the sender's signature covers them.
+    const refs = this.checkRefs(botId, pl.attachments);
     if (!this.findGrant(peerB.owner_id, botId, "chat.public")) {
       this.policyDecision(botId, convId, owners, "message.draft", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
@@ -1252,10 +1329,12 @@ export class Platform {
     }
     const id = newId("msg");
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
-    const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs);
+    const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
+    const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs);
     this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-      id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false }),
+      id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
       "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now());
+    for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
     this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId });
     this.refreshConversationStatus(convId);
@@ -1292,7 +1371,8 @@ export class Platform {
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     if (edited) {
-      payload = { ...payload, ...body.edited_payload };
+      payload = { ...payload, ...body.edited_payload, ...(payload.attachments ? { attachments: payload.attachments } : {}) };
+      if (!payload.attachments) delete payload.attachments;
       const blocked = this.dlp(sender.owner_id, payload).filter((f) => f.action === "block");
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
@@ -1304,6 +1384,7 @@ export class Platform {
       message_id: m.id, conversation_id: c.id, intent: { type: intent.type, summary: intent.summary },
       from: this.publicBot(sender), trust: "peer_untrusted",
       untrusted_content: { text: payload.text, structured: payload.structured ?? null },
+      ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
       expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
       security: { injection_suspected: inj.suspected }, turn: { count: turn, max: c.max_turns },
       sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
