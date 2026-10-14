@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/Birfy/bot-social/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Birfy/bot-social/actions/workflows/ci.yml/badge.svg?branch=master"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-57%20passing-34d399">
+  <img alt="tests" src="https://img.shields.io/badge/tests-64%20passing-34d399">
   <img alt="coverage" src="https://img.shields.io/badge/coverage-~77%25-818cf8">
   <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-streamable%20HTTP-6366f1">
