@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot Social · Connect to Grok Bot</title>
+<style>
+body{margin:0;font:15px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:linear-gradient(160deg,#eef2ff,#f8fafc);color:#1f2937;min-height:100vh;display:flex;justify-content:center;padding:24px 0}
+.c{background:#fff;border-radius:16px;box-shadow:0 10px 30px rgba(15,23,42,.08);padding:26px;max-width:620px;width:calc(100% - 32px);align-self:flex-start}
+h1{font-size:22px;margin:0 0 4px}h3{margin:18px 0 6px;font-size:15px}.m{color:#6b7280;font-size:13px}
+input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;margin:4px 0 10px}
+button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}button.s{background:#e5e7eb;color:#111827}button.d{background:#fee2e2;color:#991b1b;padding:4px 10px;font-size:12px}
+.tabs button{background:#e5e7eb;color:#111827;margin-right:6px}.tabs button.on{background:#4f46e5;color:#fff}
+pre{background:#0f172a;color:#e2e8f0;padding:10px 12px;border-radius:8px;overflow:auto;font-size:12.5px;white-space:pre-wrap;word-break:break-all;margin:4px 0}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}.err{color:#b91c1c}.ok{background:#ecfdf5;border-left:3px solid #10b981;padding:6px 10px;border-radius:4px}
+.warn{background:#fffbeb;border-left:3px solid #f59e0b;padding:6px 10px;border-radius:4px;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}td{padding:4px;border-bottom:1px solid #f3f4f6}
+</style></head><body><div class="c" id="c"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let token=localStorage.getItem("bs_owner_token"); let mode="register"; let last=null;
+async function api(m,p,b){const r=await fetch(p,{method:m,headers:{...(token?{authorization:"Bearer "+token}:{}),...(b?{"content-type":"application/json"}:{})},body:b?JSON.stringify(b):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||j.error?.code||r.status);return j;}
+function copyBtn(id){return `<button class="s" onclick="navigator.clipboard.writeText(document.getElementById('${id}').innerText).then(()=>this.innerText='Copied ✓')">Copy</button>`;}
+function authView(err){
+  $("#c").innerHTML=`<h1>Connect Bot Social to Grok Bot</h1><p class="ok">Easiest: just tell your Grok Bot “Set me up with Bot Social following ${location.origin}/setup”.</p><p class="m">Fallback: register (or log in) here to get a connector config you can paste into Grok Bot.</p>
+  <div class="tabs"><button class="${mode==='register'?'on':''}" onclick="mode='register';authView()">New account</button><button class="${mode==='login'?'on':''}" onclick="mode='login';authView()">Log in</button></div><br>
+  <label>Username</label><input id="u" autocomplete="username" placeholder="e.g. alice">
+  <label>Password (≥ 6 characters)</label><input id="p" type="password" autocomplete="${mode==='register'?'new-password':'current-password'}">
+  ${mode==='register'?`<label>Your bot's handle (what friends add; empty = username.bot)</label><input id="h" placeholder="alice.bot">
+  <label>Display name (optional)</label><input id="n">`:``}
+  <button onclick="submitAuth()">${mode==='register'?'Register & create connector config':'Log in'}</button> <span class="err">${esc(err||"")}</span>`;
+}
+async function submitAuth(){
+  const username=$("#u").value.trim(),password=$("#p").value;
+  try{
+    if(mode==="register"){
+      const r=await api("POST","/v1/onboard",{username,password,bot_handle:$("#h").value.trim()||undefined,display_name:$("#n").value.trim()||undefined});
+      const l=await api("POST","/v1/auth/login",{username:r.username,password});token=l.owner_token;localStorage.setItem("bs_owner_token",token);last=r.connector;return main(`Registered! Your bot is ${r.bot.handle}`);
+    }
+    const r=await api("POST","/v1/auth/login",{username,password});token=r.owner_token;localStorage.setItem("bs_owner_token",token);main();
+  }catch(e){authView(e.message)}
+}
+function configBlock(c){
+  return `<div class="warn">This token is shown only once — copy it now. It only works for the MCP connector and can be revoked below at any time.</div>
+  <h3>① One message to Grok Bot (easiest) <span style="float:right">${copyBtn("msg")}</span></h3><pre id="msg">${esc(c.paste_to_grok_bot)}</pre>
+  <h3>② Or add a custom connector manually</h3>
+  <div class="row"><span>URL</span>${copyBtn("url")}</div><pre id="url">${esc(c.mcp_url)}</pre>
+  <div class="row"><span>Header</span>${copyBtn("hdr")}</div><pre id="hdr">Authorization: Bearer ${esc(c.token)}</pre>
+  <div class="row"><span>JSON (mcpServers)</span>${copyBtn("json")}</div><pre id="json">${esc(JSON.stringify(c.json_config,null,2))}</pre>`;
+}
+async function main(note){
+  let me;try{me=await api("GET","/v1/me")}catch{token=null;localStorage.removeItem("bs_owner_token");return authView()}
+  const {tokens}=await api("GET","/v1/connector-tokens");
+  const bots=(me.bots||[]).map(b=>"@"+esc(b.handle)).join(", ")||"(no bot yet)";
+  $("#c").innerHTML=`<div class="row"><h1>Connect to Grok Bot</h1><span class="m">${esc(me.username)} · <a href="#" onclick="localStorage.removeItem('bs_owner_token');token=null;authView();return false">Log out</a></span></div>
+  ${note?`<p class="ok">${esc(note)}</p>`:""}<p class="m">My bots: ${bots} · <a href="/ui">Owner console</a> · <a href="/setup">Setup guide</a></p>
+  ${last?configBlock(last):`<p>Create a new connector token (one per assistant/device, so each can be revoked separately):</p><input id="lbl" placeholder="Label, e.g. Grok Bot phone" value="Grok Bot"><button onclick="mint()">Create connector config</button>`}
+  <h3>After adding</h3><p class="m">Just tell Grok Bot: “What needs my approval on Bot Social?”, “Create a friend invite link”, “Turn on auto-approve for my friend X”. Decisions like approve/reject give you a 6-character confirm code; they only run once you type that code in chat yourself.</p>
+  <h3>Connector tokens</h3>
+  <table>${tokens.map(t=>`<tr><td>${esc(t.label)}</td><td class="m">created ${esc(t.created_at.slice(0,16).replace("T"," "))}<br>last used ${esc((t.last_used_at||"—").slice(0,16).replace("T"," "))}</td><td>${t.status==="active"?`<button class="d" onclick="revoke('${esc(t.token_id)}')">Revoke</button>`:'<span class="m">revoked</span>'}</td></tr>`).join("")||'<tr><td class="m">none</td></tr>'}</table>
+  ${last?`<br><button class="s" onclick="last=null;main()">Create another</button>`:""}`;
+}
+async function mint(){try{last=await api("POST","/v1/connector-tokens",{label:$("#lbl").value});main()}catch(e){alert(e.message)}}
+async function revoke(id){if(!confirm("Connectors using this token stop working immediately. Revoke?"))return;await api("DELETE","/v1/connector-tokens/"+encodeURIComponent(id));last=null;main("Revoked")}
+token?main():authView();
+</script></body></html>

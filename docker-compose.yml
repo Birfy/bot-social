@@ -1,0 +1,8 @@
+services:
+  bot-social:
+    build: .
+    ports: ["${PORT:-8787}:8787"]
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes: ["./data:/data"]
+    restart: unless-stopped
