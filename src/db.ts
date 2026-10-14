@@ -9,14 +9,37 @@ export function openDb(path: string): Database.Database {
   const cols = (db.prepare("PRAGMA table_info(bots)").all() as { name: string }[]).map((c) => c.name);
   if (!cols.includes("webhook_headers")) db.exec("ALTER TABLE bots ADD COLUMN webhook_headers TEXT NOT NULL DEFAULT '[]'");
   if (!cols.includes("webhook_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN webhook_updated_at TEXT");
-  // FlyBot homes: a sub-identity bot names its home bot; friendship between homes covers every member.
+  // FlyBot homes: a sub-identity bot names its home bot; a friendship covers a home's members only when that side is home-scoped (see below).
   if (!cols.includes("home_bot_id")) db.exec("ALTER TABLE bots ADD COLUMN home_bot_id TEXT");
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
   if (!tcols.includes("id")) db.exec("ALTER TABLE tokens ADD COLUMN id TEXT");
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
   if (!tcols.includes("scope")) db.exec("ALTER TABLE tokens ADD COLUMN scope TEXT");
   if (!tcols.includes("last_used_at")) db.exec("ALTER TABLE tokens ADD COLUMN last_used_at TEXT");
+  // Friendship scope: which bots each side of a relationship exposes. 'bot' = only that endpoint;
+  // 'home' = a FlyBot home endpoint plus all its members. NULL (rows from before this column)
+  // keeps the old rule: a home endpoint exposes its members, any other bot only itself.
+  const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);
+  if (!rcols.includes("requester_scope")) db.exec("ALTER TABLE relationships ADD COLUMN requester_scope TEXT");
+  if (!rcols.includes("target_scope")) db.exec("ALTER TABLE relationships ADD COLUMN target_scope TEXT");
+  const icols = (db.prepare("PRAGMA table_info(invites)").all() as { name: string }[]).map((c) => c.name);
+  if (!icols.includes("scope")) db.exec("ALTER TABLE invites ADD COLUMN scope TEXT");
+  migrateFriendshipScopes(db);
   return db;
+}
+
+/** Pins the scope of invite-born friendships to the invite's target. Idempotent; only fills NULLs.
+ *  The inviter side gets the invite's target exactly (a member invite exposes that member only;
+ *  a home invite keeps exposing the home). The joiner side is left NULL: unchanged behavior. */
+export function migrateFriendshipScopes(db: Database.Database): number {
+  const r = db.prepare(`UPDATE relationships SET target_scope = (
+      SELECT CASE WHEN b.integration_type = 'flybot-home' THEN 'home' ELSE 'bot' END
+      FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id JOIN bots b ON b.id = i.bot_id
+      WHERE ri.relationship_id = relationships.id AND i.bot_id = relationships.target_bot)
+    WHERE target_scope IS NULL AND id IN (
+      SELECT ri.relationship_id FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id WHERE i.bot_id = relationships.target_bot)`).run();
+  db.exec("UPDATE invites SET scope = CASE WHEN (SELECT integration_type FROM bots WHERE id = invites.bot_id) = 'flybot-home' THEN 'home' ELSE 'bot' END WHERE scope IS NULL");
+  return r.changes;
 }
 
 const SCHEMA = `

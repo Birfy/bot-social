@@ -291,11 +291,11 @@ export class Platform {
   }
 
   /**
-   * Remote bots this home can reach, grouped by friend home.
-   * - home ↔ home friendship: every active member of the friend home.
-   * - member-scoped friendship (an invite made for one member, joined by a home, or the reverse):
-   *   only that member is exposed. When the scoped member is one of mine, `via` names it: only it
-   *   may talk to that friend home; my other members stay hidden from them.
+   * Remote bots this home can reach, grouped by friend home. Each friendship exposes only what the
+   * peer's side covers (see sideScope): an invite made for one member exposes that member only;
+   * a home-scoped side (a home invite, or a home that joined as itself) exposes all its members.
+   * `via` names my bots that the friendship covers when that is not my whole home: only they may
+   * talk to that friend; my other members stay hidden from them.
    */
   remoteBots(p: Principal, homeId: string) {
     const ownerId = this.requireOwner(p);
@@ -310,10 +310,11 @@ export class Platform {
       const peer = this.bot(mySide === r.requester_bot ? r.target_bot : r.requester_bot);
       if (!peer || mine.has(peer.id)) continue;
       const peerHome = this.bot(this.homeOf(peer.id));
-      const scopedPeer = peerHome.id !== peer.id;
-      const bots = scopedPeer
-        ? (peer.status === "active" ? [{ bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name }] : [])
-        : peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [];
+      // Only what the peer's side of this friendship covers: its endpoint, or a whole home.
+      const peerWide = this.sideScope(r, peer.id) === "home";
+      const bots = peerWide
+        ? (peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [])
+        : (peer.status === "active" && peer.integration_type !== "flybot-home" ? [{ bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name }] : []);
       const entry = byHome.get(peerHome.id) ?? {
         relationship_id: r.id, relationship_ids: [] as string[],
         home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, owner_display_name: this.owner(peerHome.owner_id).display_name },
@@ -321,8 +322,8 @@ export class Platform {
       };
       entry.relationship_ids.push(r.id);
       for (const b of bots) if (!entry.bots.some((x: any) => x.bot_id === b.bot_id)) entry.bots.push(b);
-      if (!scopedPeer && mySide === home.id) entry.scope = "home"; // a home ↔ home friendship exposes everyone
-      if (mySide !== home.id) entry.via.push("@" + this.bot(mySide).handle);
+      if (peerWide && peerHome.id === peer.id && mySide === home.id && this.sideScope(r, mySide) === "home") entry.scope = "home"; // home ↔ home exposes everyone
+      if (mySide !== home.id || this.sideScope(r, mySide) !== "home") { const v = "@" + this.bot(mySide).handle; if (!entry.via.includes(v)) entry.via.push(v); }
       byHome.set(peerHome.id, entry);
     }
     return { homes: [...byHome.values()] };
@@ -714,9 +715,32 @@ export class Platform {
     return this.get("SELECT home_bot_id FROM bots WHERE id = ?", botId)?.home_bot_id ?? botId;
   }
 
+  /** Which bots one side of a relationship exposes: 'bot' = that endpoint only; 'home' = a FlyBot
+   *  home endpoint and all its members. Rows without a recorded scope keep the old rule. */
+  sideScope(r: any, endpoint: string): "bot" | "home" {
+    const recorded = endpoint === r.requester_bot ? r.requester_scope : r.target_scope;
+    if (recorded === "bot" || recorded === "home") return recorded;
+    return this.get("SELECT integration_type FROM bots WHERE id = ?", endpoint)?.integration_type === "flybot-home" ? "home" : "bot";
+  }
+
+  /** Does this side of the relationship cover bot x? */
+  private covers(r: any, endpoint: string, x: string) {
+    return x === endpoint || (this.sideScope(r, endpoint) === "home" && this.homeOf(x) === endpoint);
+  }
+
   activeRelationship(a: string, b: string) {
-    // Direct (per-bot) friendship first, then member-scoped (a home befriended one member of
-    // the other home, through an invite made for that member), then home-to-home.
+    const rel = this.findActiveRelationship(a, b);
+    if (!rel) {
+      this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
+      throw new ApiError(403, "no_relationship", "no active relationship between these bots");
+    }
+    return rel;
+  }
+
+  private findActiveRelationship(a: string, b: string): any {
+    // A relationship links two endpoints; each side covers its endpoint, plus (home scope only)
+    // that home's members. A member invite covers just that member, so its housemates stay
+    // unreachable. Direct (per-bot) friendships win over home-wide ones.
     const ha = this.homeOf(a), hb = this.homeOf(b);
     const pairs: [string, string][] = [[a, b], [ha, b], [a, hb], [ha, hb]];
     const seen = new Set<string>();
@@ -725,12 +749,8 @@ export class Platform {
       const key = x + "|" + y;
       if (seen.has(key) || x === y) continue;
       seen.add(key);
-      rel = this.pairRelationships(x, y).find((r) => r.status === "active");
+      rel = this.pairRelationships(x, y).find((r) => r.status === "active" && this.covers(r, x, a) && this.covers(r, y, b));
       if (rel) break;
-    }
-    if (!rel) {
-      this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
-      throw new ApiError(403, "no_relationship", "no active relationship between these bots");
     }
     return rel;
   }
@@ -838,7 +858,15 @@ export class Platform {
 
   findGrant(grantorOwner: string, granteeBot: string, cap: string): any {
     const home = this.homeOf(granteeBot);
-    if (home !== granteeBot) return this.findGrantDirect(grantorOwner, granteeBot, cap) ?? this.findGrantDirect(grantorOwner, home, cap);
+    if (home !== granteeBot) {
+      const direct = this.findGrantDirect(grantorOwner, granteeBot, cap);
+      if (direct) return direct;
+      // A grant to the home reaches its members only where that side is home-wide.
+      const viaHome = this.findGrantDirect(grantorOwner, home, cap);
+      if (!viaHome) return null;
+      const r = this.get("SELECT * FROM relationships WHERE id = ?", viaHome.relationship_id);
+      return this.sideScope(r, home) === "home" ? viaHome : null;
+    }
     return this.findGrantDirect(grantorOwner, granteeBot, cap);
   }
 
@@ -974,7 +1002,7 @@ export class Platform {
 
   private inviteUrl(code: string) { return `${this.publicBaseUrl.replace(/\/$/, "")}/i/${code}`; }
   private inviteView(i: any) {
-    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.publicBot(this.bot(i.bot_id)), status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
+    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.publicBot(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
   }
   private inviteStatus(i: any) {
     if (i.status !== "active") return i.status;
@@ -1000,9 +1028,11 @@ export class Platform {
     const id = newId("inv");
     const code = randomBytes(9).toString("base64url").replace(/[-_]/g, "x");
     const status = viaBot ? "pending_owner" : "active";
-    this.run("INSERT INTO invites (id, code, bot_id, owner_id, created_by, offered_caps, requested_caps, message, auto_accept, max_uses, status, expires_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    // The invite's target is what the joiner gets: one bot, or (an invite made for a FlyBot home) the whole home.
+    const scope = bot.integration_type === "flybot-home" ? "home" : "bot";
+    this.run("INSERT INTO invites (id, code, bot_id, owner_id, created_by, offered_caps, requested_caps, message, auto_accept, max_uses, status, expires_at, created_at, scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, code, bot.id, bot.owner_id, viaBot ? `bot:${bot.id}` : `owner:${bot.owner_id}`, JSON.stringify(offered), JSON.stringify(requested), payload.message ?? null, payload.auto_accept === false ? 0 : 1, maxUses, status,
-      new Date(Date.now() + hours * 3600e3).toISOString(), nowIso());
+      new Date(Date.now() + hours * 3600e3).toISOString(), nowIso(), scope);
     let approval_id: string | undefined;
     if (viaBot) approval_id = this.createApproval(bot.owner_id, "invite", id, bot.id, null, `Your bot wants to create a friend invite link (grants to the joiner: ${offered.join(", ")})`, ["invite.requires_owner"], [], LIMITS.approvalTtlMs);
     this.audit.append(viaBot ? `bot:${bot.id}` : `owner:${bot.owner_id}`, "invite.created", id, [bot.owner_id], { offered, requested, max_uses: maxUses, status });
@@ -1053,8 +1083,12 @@ export class Platform {
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
-    this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, id, joiner.id, inviter.id, joiner.owner_id, inviter.owner_id, status, payload.message ?? `Joined via invite link`, i.offered_caps, JSON.stringify(offered), nowIso(), nowIso(), new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString());
+    // Scope: the inviter side is exactly the invite's target; the joiner side is the bot that joined
+    // (a FlyBot home joining as itself shares its whole home, as before; FlyBot joins as one member).
+    const targetScope = i.scope === "home" || i.scope === "bot" ? i.scope : (inviter.integration_type === "flybot-home" ? "home" : "bot");
+    const requesterScope = joiner.integration_type === "flybot-home" ? "home" : "bot";
+    this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at, requester_scope, target_scope)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, joiner.id, inviter.id, joiner.owner_id, inviter.owner_id, status, payload.message ?? `Joined via invite link`, i.offered_caps, JSON.stringify(offered), nowIso(), nowIso(), new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString(), requesterScope, targetScope);
     this.run("INSERT INTO relationship_invites (relationship_id, invite_id) VALUES (?,?)", id, i.id);
     this.run("UPDATE invites SET uses = uses + 1 WHERE id = ?", i.id);
     this.audit.append(viaBot ? `bot:${joiner.id}` : `owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: id, offered });
@@ -1133,6 +1167,11 @@ export class Platform {
     if (p.kind === "bot" && p.botId !== botId) {
       this.activeRelationship(p.botId, botId);
       assert(this.findGrant(target.owner_id, p.botId, "profile.read"), 403, "capability_not_granted", "profile.read not granted", { suggestion: "request_grant" });
+    }
+    if (p.kind === "owner" && target.owner_id !== p.ownerId) {
+      // Another owner's bot: only one some bot of mine can reach (a friendship that covers it).
+      const mine = this.all("SELECT id FROM bots WHERE owner_id = ? AND status = 'active'", p.ownerId);
+      assert(mine.some((m: any) => this.findActiveRelationship(m.id, target.id)), 404, "bot_not_found", "no such bot");
     }
     const o = this.owner(target.owner_id);
     return { ...this.publicBot(target), owner_timezone: o.timezone };

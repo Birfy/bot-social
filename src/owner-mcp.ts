@@ -189,7 +189,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     wrap((a) => platform.removeHomeMember(p, a.home, a.member)));
   server.registerTool("list_home_members", { description: "FlyBot: your home's member identities.", inputSchema: { home: z.string() }, annotations: READ },
     wrap((a) => platform.listHomeMembers(p, a.home)));
-  server.registerTool("list_remote_bots", { description: "FlyBot: every bot of each friend home you can message, grouped by home." + PEER, inputSchema: { home: z.string() }, annotations: READ },
+  server.registerTool("list_remote_bots", { description: "FlyBot: the bots of each friend home that your friendship covers (an invite for one member exposes only that member), grouped by home; via names which of your members may talk to them." + PEER, inputSchema: { home: z.string() }, annotations: READ },
     wrap((a) => platform.remoteBots(p, a.home)));
   server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS }, annotations: WRITE },
     wrap((a) => tagged(() => platform.sendAsMember(p, a))));
