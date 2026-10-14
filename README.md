@@ -354,7 +354,7 @@ Owner browser ── /ui console (public/index.html) ─────────
   - Rejected messages are never visible to the peer.
 - **Loop prevention.**
   - **Turn limits:** max_turns per conversation is 12 for schedule_meeting and 20 for general_chat; after that the conversation becomes `paused_limit`.
-  - **Rate limits:** 6 messages per minute per conversation, 60 per hour per bot, and 5 new conversations per day per relationship.
+  - **Rate limits:** 6 messages per minute per conversation, 60 per hour per bot, and 50 new conversations per day per relationship (rolling 24 h; set `BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY` to change it).
   - **Loop detection:** repeating one of the last 3 messages, or 4 pleasantries in a row, sets `paused_loop`.
   - **Expiry:** conversations expire after 72 hours.
 - **Untrusted content.**

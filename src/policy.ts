@@ -31,10 +31,19 @@ export const ACTIONS: Record<string, { capability: string; sensitivity: Risk; re
   "calendar.accept_invite": { capability: "commitment.make", sensitivity: "high", reasons: ["action.commitment"] },
 };
 
+/** A positive integer from an env value, else the fallback (unset, empty, zero, negative or not a number). */
+export function limitFromEnv(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return value !== undefined && value.trim() !== "" && Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+export const DEFAULT_NEW_CONVERSATIONS_PER_PAIR_PER_DAY = 50;
+
 export const LIMITS = {
   ratePerConversationPerMin: 6,
   ratePerBotPerHour: 60,
-  newConversationsPerPairPerDay: 5,
+  // New conversations per relationship in a rolling 24 h; override with BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY.
+  newConversationsPerPairPerDay: limitFromEnv(process.env.BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY, DEFAULT_NEW_CONVERSATIONS_PER_PAIR_PER_DAY),
   tsSkewMs: 5 * 60 * 1000,
   nonceTtlMs: 10 * 60 * 1000,
   approvalTtlMs: 24 * 3600 * 1000,
