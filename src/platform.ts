@@ -191,7 +191,7 @@ export class Platform {
   }
 
   /** One-step onboarding: new owner + their bot (platform-generated key) + a connector token. */
-  onboard(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; label?: string }) {
+  onboard(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; label?: string; integration_type?: string }) {
     body = { ...(body ?? {}) };
     const generated: { username?: string; password?: string } = {};
     if (!body.username) {
@@ -207,7 +207,7 @@ export class Platform {
     this.db.transaction(() => {
       const o = this.registerOwner(body as { username: string; password: string; display_name?: string });
       const p: Principal = { kind: "owner", ownerId: o.owner_id };
-      const bot = this.registerBot(p, { handle, display_name: body.bot_display_name || body.display_name || handle, integration_type: "grok-bot" });
+      const bot = this.registerBot(p, { handle, display_name: body.bot_display_name || body.display_name || handle, integration_type: body.integration_type || "grok-bot" });
       // custodial: the platform keeps the (generated) signing key encrypted, so the connector can chat
       this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
       const conn = this.createConnectorToken(p, { label: body.label });
@@ -219,6 +219,102 @@ export class Platform {
       };
     })();
     return out;
+  }
+
+  /** One-call onboarding for a FlyBot install: owner + custodial bot + connector token + optional push webhook. */
+  onboardFlybot(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; webhook_url?: string; webhook_headers?: unknown }) {
+    body = { ...(body ?? {}) };
+    if (body.webhook_url) validateUrl(body.webhook_url);
+    // The bot made here is the owner's FlyBot home (e.g. @danyang.home); local Bots join it as members.
+    const base = String(body.display_name ?? body.username ?? "owner").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "owner";
+    const out = this.onboard({ ...body, bot_handle: body.bot_handle || `${base}.home`, label: "FlyBot", integration_type: "flybot-home" });
+    const p: Principal = { kind: "owner", ownerId: out.owner_id };
+    let webhook: unknown = null;
+    if (body.webhook_url) {
+      this.setWebhook(p, out.bot.bot_id, { url: body.webhook_url, ...(body.webhook_headers !== undefined ? { headers: body.webhook_headers } : {}) });
+      const row = this.get("SELECT webhook_url, webhook_secret FROM bots WHERE id = ?", out.bot.bot_id);
+      webhook = { url: row.webhook_url, secret: row.webhook_secret, signature_header: "x-botsocial-signature", timestamp_header: "x-botsocial-timestamp", signature_scheme: "v1=hex(HMAC-SHA256(secret, `${timestamp}.${body}`))" };
+    }
+    return { ...out, home: out.bot, mcp_url: `${this.publicBaseUrl}/mcp`, webhook };
+  }
+
+  private ownHome(ownerId: string, homeId: string) {
+    const home = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", homeId, String(homeId).replace(/^@/, ""), ownerId);
+    assert(home && home.integration_type === "flybot-home", 404, "home_not_found", "no FlyBot home with that id for this owner");
+    return home;
+  }
+
+  /** Registers (or reactivates) a local FlyBot Bot as @<name>.<home>, its key custodied with the home. */
+  addHomeMember(p: Principal, homeId: string, body: { name?: string; display_name?: string; local_id?: string }) {
+    const ownerId = this.requireOwner(p);
+    const home = this.ownHome(ownerId, homeId);
+    const room = 40 - home.handle.length - 1;
+    assert(room >= 2, 400, "invalid_request", "home handle too long for members");
+    const name = String(body?.name ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, room);
+    assert(name.length >= 1, 400, "invalid_request", "member name required");
+    const handle = `${name}.${home.handle}`;
+    const existing = this.get("SELECT * FROM bots WHERE handle = ?", handle);
+    if (existing) {
+      assert(existing.home_bot_id === home.id, 409, "handle_taken");
+      this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
+      return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
+    }
+    const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
+    this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
+    this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
+    this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
+    return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
+  }
+
+  removeHomeMember(p: Principal, homeId: string, memberId: string) {
+    const ownerId = this.requireOwner(p);
+    const home = this.ownHome(ownerId, homeId);
+    const m = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND home_bot_id = ?", memberId, String(memberId).replace(/^@/, ""), home.id);
+    assert(m, 404, "member_not_found");
+    this.run("UPDATE bots SET status = 'revoked' WHERE id = ?", m.id);
+    this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), m.id);
+    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id });
+    return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
+  }
+
+  homeMembers(homeId: string) {
+    return this.all("SELECT id, handle, display_name FROM bots WHERE home_bot_id = ? AND status = 'active' ORDER BY created_at", homeId)
+      .map((b: any) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name }));
+  }
+
+  listHomeMembers(p: Principal, homeId: string) {
+    const ownerId = this.requireOwner(p);
+    return { members: this.homeMembers(this.ownHome(ownerId, homeId).id) };
+  }
+
+  /** Remote bots this home can reach: every active member (and the home itself) of each friend home. */
+  remoteBots(p: Principal, homeId: string) {
+    const ownerId = this.requireOwner(p);
+    const home = this.ownHome(ownerId, homeId);
+    const rels = this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status = 'active'", home.id, home.id);
+    return {
+      homes: rels.map((r: any) => {
+        const peer = this.bot(r.requester_bot === home.id ? r.target_bot : r.requester_bot);
+        return {
+          relationship_id: r.id, home: { bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name, owner_display_name: this.owner(peer.owner_id).display_name },
+          bots: peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [],
+        };
+      }),
+    };
+  }
+
+  /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string }) {
+    const ownerId = this.requireOwner(p);
+    const cb = this.custodialBot(p, body?.from_bot_id);
+    const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
+    assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
+    void ownerId;
+    this.activeRelationship(cb.botId, to.id);
+    const conv = this.get("SELECT id FROM conversations WHERE status = 'active' AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", cb.botId, to.id, to.id, cb.botId);
+    const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
+    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text }, { conversation_id: conversationId }));
+    return { conversation_id: conversationId, message };
   }
 
   // ================================================================ custodial signing keys
@@ -277,6 +373,7 @@ export class Platform {
       ? this.get("SELECT c.* FROM bot_custody c JOIN bots b ON b.id = c.bot_id WHERE b.id = ? AND b.owner_id = ?", botId, ownerId)
       : this.get("SELECT c.* FROM bot_custody c JOIN bots b ON b.id = c.bot_id WHERE b.owner_id = ? ORDER BY b.created_at LIMIT 1", ownerId);
     assert(c, 409, "not_custodial", "this bot's signing key is not held by the platform; enable custody first (enable_custody)");
+    assert(this.bot(c.bot_id).status === "active", 403, "bot_revoked", "this bot identity was revoked");
     const bp: Principal = { kind: "bot", botId: c.bot_id, ownerId };
     const pem = unseal(this.kmsKey, c.sealed_key, `${c.bot_id}:${c.kid}`);
     const sign = (type: string, payload: unknown, extra: { to?: string; conversation_id?: string } = {}) => signEnvelope({ type, from: c.bot_id, payload, kid: c.kid, privateKeyPem: pem, ...extra });
@@ -514,8 +611,16 @@ export class Platform {
     for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
   }
 
+  /** The home a FlyBot sub-identity belongs to; any other bot is its own home. */
+  homeOf(botId: string): string {
+    return this.get("SELECT home_bot_id FROM bots WHERE id = ?", botId)?.home_bot_id ?? botId;
+  }
+
   activeRelationship(a: string, b: string) {
-    const rel = this.pairRelationships(a, b).find((r) => r.status === "active");
+    // Direct (per-bot) friendship first, then home-to-home friendship for FlyBot members.
+    const ha = this.homeOf(a), hb = this.homeOf(b);
+    const rel = this.pairRelationships(a, b).find((r) => r.status === "active")
+      ?? (ha !== a || hb !== b ? this.pairRelationships(ha, hb).find((r) => r.status === "active") : undefined);
     if (!rel) {
       this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
       throw new ApiError(403, "no_relationship", "no active relationship between these bots");
@@ -624,7 +729,13 @@ export class Platform {
     return this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId).map((g) => ({ ...g, scope: J(g.scope, {}) }));
   }
 
-  findGrant(grantorOwner: string, granteeBot: string, cap: string) {
+  findGrant(grantorOwner: string, granteeBot: string, cap: string): any {
+    const home = this.homeOf(granteeBot);
+    if (home !== granteeBot) return this.findGrantDirect(grantorOwner, granteeBot, cap) ?? this.findGrantDirect(grantorOwner, home, cap);
+    return this.findGrantDirect(grantorOwner, granteeBot, cap);
+  }
+
+  private findGrantDirect(grantorOwner: string, granteeBot: string, cap: string) {
     const g = this.get("SELECT g.* FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND r.status = 'active'", grantorOwner, granteeBot, cap);
     if (!g) return null;
     if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); return null; }

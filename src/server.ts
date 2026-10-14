@@ -51,6 +51,17 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   registerOwnerMcp(app, platform);
   app.get("/connect", async (_req, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(page("connect.html")));
   const onboardHits = new Map<string, number[]>();
+  app.post("/v1/onboard/flybot", async (req, reply) => {
+    const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
+    if (hits.length >= 10) return reply.status(429).send({ error: { code: "rate_limited", message: "too many sign-ups from this address; try again later" } });
+    onboardHits.set(ip, [...hits, now]);
+    return reply.status(201).send(platform.onboardFlybot(B(req)));
+  });
+  app.get("/v1/homes/:id/members", async (req) => platform.listHomeMembers(auth(req), P(req).id));
+  app.post("/v1/homes/:id/members", async (req, reply) => reply.status(201).send(platform.addHomeMember(auth(req), P(req).id, B(req))));
+  app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
+  app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(auth(req), P(req).id));
+  app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
   app.post("/v1/onboard", async (req, reply) => {
     const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
     if (hits.length >= 10) return reply.status(429).send({ error: { code: "rate_limited", message: "too many sign-ups from this address; try again later" } });

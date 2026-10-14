@@ -9,6 +9,8 @@ export function openDb(path: string): Database.Database {
   const cols = (db.prepare("PRAGMA table_info(bots)").all() as { name: string }[]).map((c) => c.name);
   if (!cols.includes("webhook_headers")) db.exec("ALTER TABLE bots ADD COLUMN webhook_headers TEXT NOT NULL DEFAULT '[]'");
   if (!cols.includes("webhook_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN webhook_updated_at TEXT");
+  // FlyBot homes: a sub-identity bot names its home bot; friendship between homes covers every member.
+  if (!cols.includes("home_bot_id")) db.exec("ALTER TABLE bots ADD COLUMN home_bot_id TEXT");
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
   if (!tcols.includes("id")) db.exec("ALTER TABLE tokens ADD COLUMN id TEXT");
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");

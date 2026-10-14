@@ -173,6 +173,17 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     const cb = platform.custodialBot(p, myBot);
     return platform.draftMessage(cb.bp, a.conversation_id, cb.sign("message.draft", { text: a.text, expects_reply: a.expects_reply }, { conversation_id: a.conversation_id }));
   })));
+  // FlyBot homes: one home per FlyBot install, each local Bot a member @<bot>.<home>.
+  server.registerTool("add_home_member", { description: "FlyBot: register a local Bot as a member identity of your home (@<name>.<home>).", inputSchema: { home: z.string(), name: z.string(), display_name: z.string().optional() }, annotations: WRITE },
+    wrap((a) => platform.addHomeMember(p, a.home, a)));
+  server.registerTool("remove_home_member", { description: "FlyBot: revoke a member identity of your home.", inputSchema: { home: z.string(), member: z.string() }, annotations: { ...WRITE, destructiveHint: true } },
+    wrap((a) => platform.removeHomeMember(p, a.home, a.member)));
+  server.registerTool("list_home_members", { description: "FlyBot: your home's member identities.", inputSchema: { home: z.string() }, annotations: READ },
+    wrap((a) => platform.listHomeMembers(p, a.home)));
+  server.registerTool("list_remote_bots", { description: "FlyBot: every bot of each friend home you can message, grouped by home." + PEER, inputSchema: { home: z.string() }, annotations: READ },
+    wrap((a) => platform.remoteBots(p, a.home)));
+  server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1) }, annotations: WRITE },
+    wrap((a) => tagged(() => platform.sendAsMember(p, a))));
   server.registerTool("list_inbox", {
     description: "New events for your bot since last check (messages received, approvals decided, friend changes...). Advances a server-side cursor unless peek=true." + PEER,
     inputSchema: { peek: z.boolean().optional(), since_cursor: z.number().int().optional(), bot_id: z.string().optional() }, annotations: READ,
