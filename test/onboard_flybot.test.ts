@@ -55,7 +55,7 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   const pending = await A("list_friends", { bot_id: a.home.bot_id });
   if (pending.pending_incoming?.length) {
     // Not auto-accepted on this server: the owner accepts it (confirmation flow is out of scope here).
-    s.platform.respondRelationship?.({ kind: "owner", ownerId: a.owner_id } as any, pending.pending_incoming[0].relationship_id, { decision: "accept", grant_capabilities: ["chat.public"] });
+    (s.platform as any).respondRelationship?.({ kind: "owner", ownerId: a.owner_id } as any, pending.pending_incoming[0].relationship_id, { decision: "accept", grant_capabilities: ["chat.public"] });
   }
   const remote = await A("list_remote_bots", { home: a.home.bot_id });
   assert.equal(remote.homes.length, 1);
