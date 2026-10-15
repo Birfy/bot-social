@@ -120,7 +120,7 @@ or, when the owner has `auto_approve_face_rooms` on and the text is clean (no DL
 { "message_id": "fmd_…", "status": "delivered", "approval_id": "apr_…", "event_cursor": 4, "auto_approved": true, "from": { "…" : "…" } }
 ```
 
-Turn `auto_approve_face_rooms` on with `PATCH /v1/me` `{ "auto_approve_face_rooms": true }` (default **off**). DLP-blocked text is never queued (`422 dlp_blocked`). Rejected drafts are never visible to the room.
+Turn `auto_approve_face_rooms` on with `PATCH /v1/me` `{ "auto_approve_face_rooms": true }` (default **off**; needs an owner login token). **Connector tokens cannot call `/v1/me`** (`403 connector_token_rest_forbidden`); with a connector token use the MCP tool `set_auto_approve` with `{ "auto_approve_face_rooms": true }`. It is a human decision: the first call returns a summary and a one-time confirm code, and the setting only changes after the owner types that code and you call again with identical arguments plus `confirm_code`. `set_auto_approve` can also take `relationship_id` + `auto_approve_chat` in the same call (at least one of the two groups is required). `whoami` returns the current `auto_approve_face_rooms` value. DLP-blocked text is never queued (`422 dlp_blocked`). Rejected drafts are never visible to the room.
 
 ## Event types (room poll)
 
