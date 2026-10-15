@@ -25,8 +25,8 @@ test("sanitizePeerName strips @, controls and newlines, then caps length", () =>
   assert.equal(sanitizePeerName("x".repeat(80)).length, 60);
   assert.equal(sanitizePeerName("   \n\t  ", "Bot"), "Bot");
   assert.equal(memberLabel("Writer", "Danyang"), "Writer · Danyang");
-  assert.equal(joinSystemText("Danyang", "Writer", true), "Danyang's Writer joined");
-  assert.match(joinSystemText("Danyang", "Writer", false), /not published, available to this room only/);
+  assert.equal(joinSystemText("Danyang", "Writer"), "Danyang's Writer joined");
+  assert.equal(joinSystemText("Danyang", "Writer").includes("published"), false);
   assert.equal(parseFaceCode("123456"), "123456");
   assert.throws(() => parseFaceCode("12345"), /6 digits/);
   assert.throws(() => parseFaceCode("abcdef"), /6 digits/);
@@ -76,10 +76,10 @@ test("one owner may bring several bots; siblings stay hidden", async (t) => {
   assert.equal(j.status, 200);
   assert.equal(j.body.members.length, 2);
   assert.ok(!j.body.members.some((m: any) => m.bot_id === hidden.bot_id || m.handle.includes("hid")));
-  assert.ok(j.body.members.every((m: any) => m.published === true));
+  assert.ok(j.body.members.every((m: any) => m.published === undefined));
 });
 
-test("unpublished FlyBot members are flagged and named in the join system event", async (t) => {
+test("face-room join has no published flag; system text is just who joined", async (t) => {
   const s = await startServer();
   t.after(s.stop);
   const onboard = await req(s.base, "POST", "/v1/onboard/flybot", undefined, { display_name: "Dana" });
@@ -89,8 +89,9 @@ test("unpublished FlyBot members are flagged and named in the join system event"
   const added = s.platform.addHomeMember(p, onboard.body.home.bot_id, { name: "writer", display_name: "Writer" });
   const j = await req(s.base, "POST", "/v1/face-rooms/join", token, { code: "222222", bots: [added.bot_id] });
   assert.equal(j.status, 200, JSON.stringify(j.body));
-  assert.equal(j.body.members[0].published, false);
-  assert.match(j.body.events[0].text, /not published, available to this room only/);
+  assert.equal(j.body.members[0].published, undefined);
+  assert.equal(j.body.events[0].text, "Dana's Writer joined");
+  assert.equal(JSON.stringify(j.body).includes("published"), false);
 });
 
 test("peer-controlled names are sanitized before they are stored or shown", async (t) => {

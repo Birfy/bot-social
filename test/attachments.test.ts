@@ -23,8 +23,8 @@ async function pair(opts = {}) {
   const B = async (name: string, args: unknown = {}) => { const r = await mcpRaw(s.base, b.connector.token, name, args); if (r.isError) throw Object.assign(new Error(r.value.message ?? String(r.value)), r.value); return r.value; };
   const writer = await A("add_home_member", { home: a.home.bot_id, name: "Writer" });
   const coder = await B("add_home_member", { home: b.home.bot_id, name: "coder" });
-  const inv = await A("create_invite", { bot_id: a.home.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
-  await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: b.home.bot_id });
+  const inv = await A("create_invite", { bot_id: writer.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: coder.bot_id });
   return { s, a, b, A, B, writer, coder };
 }
 

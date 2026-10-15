@@ -77,40 +77,42 @@ test("member invite joined by a member: only those two bots see and reach each o
   assert.equal(s.platform.findGrant(a.owner_id, tester.bot_id, "chat.public"), null);
 });
 
-test("member invite joined by a whole home (older FlyBot): inviter side stays one member", async (t) => {
+test("member invite joined by a home bot: only that home bot is granted, not its members", async (t) => {
   const { s, a, b, A, B, rawB, chief, writer, coder, tester } = await twoHomes(t);
   const inv = await A("create_invite", { bot_id: chief.bot_id, ...CAPS });
   const joined = await B("join_invite", { code: inv.code, from_bot_id: b.home.bot_id });
   const rel = s.platform.db.prepare("SELECT * FROM relationships WHERE id = ?").get(joined.relationship_id) as any;
-  assert.deepEqual([rel.requester_scope, rel.target_scope], ["home", "bot"]);
+  assert.deepEqual([rel.requester_scope, rel.target_scope], ["bot", "bot"]);
   const bobView = await B("list_remote_bots", { home: b.home.bot_id });
   assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle), ["@chief.danyang.home"]);
-  assert.match((await B("send_as_member", { from_bot_id: tester.bot_id, to: chief.handle, text: "hi" })).conversation_id, /.+/);
+  assert.match((await B("send_as_member", { from_bot_id: b.home.bot_id, to: chief.handle, text: "hi" })).conversation_id, /.+/);
+  denied(await rawB("send_as_member", { from_bot_id: tester.bot_id, to: chief.handle, text: "x" }));
   denied(await rawB("send_as_member", { from_bot_id: coder.bot_id, to: writer.handle, text: "x" }));
   assert.throws(() => s.platform.profile({ kind: "owner", ownerId: b.owner_id } as any, writer.bot_id), /no such bot/);
-  void coder;
 });
 
-test("home invite joined by a home: still home-to-home (every member, both ways)", async (t) => {
+test("home invite grants only the home bot; members and Chief stay default-deny", async (t) => {
   const { s, a, b, A, B, chief, writer, coder, tester } = await twoHomes(t);
   const inv = await A("create_invite", { bot_id: a.home.bot_id, ...CAPS });
-  assert.equal(inv.scope, "home");
+  assert.equal(inv.scope, "bot");
   await B("join_invite", { code: inv.code, from_bot_id: b.home.bot_id });
   const bobView = await B("list_remote_bots", { home: b.home.bot_id });
-  assert.equal(bobView.homes[0].scope, "home");
-  assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle).sort(), ["@chief.danyang.home", "@writer.danyang.home"]);
-  for (const [x, y] of [[coder, chief], [tester, writer], [chief, tester]]) assert.ok(s.platform.activeRelationship(x.bot_id, y.bot_id));
+  assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle), ["@danyang.home"]);
+  assert.ok(s.platform.activeRelationship(b.home.bot_id, a.home.bot_id));
+  for (const [x, y] of [[coder, chief], [tester, writer], [chief, tester], [coder, a.home], [b.home, chief]]) {
+    assert.throws(() => s.platform.activeRelationship(x.bot_id, y.bot_id), /no active relationship/);
+  }
 });
 
-test("a home endpoint recorded as bot-scoped exposes no members and passes no home grants", async (t) => {
+test("legacy home-scoped rows are ignored: members stay unreachable", async (t) => {
   const { s, a, B, A, b, chief, coder } = await twoHomes(t);
   const inv = await A("create_invite", { bot_id: a.home.bot_id, ...CAPS });
   const joined = await B("join_invite", { code: inv.code, from_bot_id: b.home.bot_id });
-  s.platform.db.prepare("UPDATE relationships SET target_scope = 'bot' WHERE id = ?").run(joined.relationship_id);
+  s.platform.db.prepare("UPDATE relationships SET target_scope = 'home', requester_scope = 'home' WHERE id = ?").run(joined.relationship_id);
   assert.throws(() => s.platform.activeRelationship(coder.bot_id, chief.bot_id), /no active relationship/);
   assert.equal(s.platform.findGrant(b.owner_id, chief.bot_id, "chat.public"), null);
   const bobView = await B("list_remote_bots", { home: b.home.bot_id });
-  assert.deepEqual(bobView.homes[0].bots, []);
+  assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle), ["@danyang.home"]);
 });
 
 test("migration pins invite-born friendships to the invite's target; idempotent; others untouched", () => {
