@@ -152,5 +152,20 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/events", async (req) => platform.listEvents(auth(req), Number(Q(req).since ?? 0), Math.min(Number(Q(req).limit ?? 100), 500)));
   app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: Q(req).limit ? Number(Q(req).limit) : undefined }));
 
+  // ---- face-to-face rooms (FlyBot #83). Accepts owner login tokens, connector tokens
+  // (the same Bearer FlyBot already stores from /v1/onboard/flybot), and bot tokens
+  // (a bot token may only bring / act as itself).
+  const faceAuth = (req: FastifyRequest): Principal => {
+    const h = req.headers.authorization;
+    return platform.authenticate(h?.startsWith("Bearer ") ? h.slice(7) : undefined);
+  };
+  const faceIp = (req: FastifyRequest) => req.ip;
+  app.post("/v1/face-rooms/join", async (req, reply) => reply.status(200).send(platform.joinFaceRoom(faceAuth(req), B(req), { ip: faceIp(req) })));
+  app.get("/v1/face-rooms", async (req) => platform.listFaceRooms(faceAuth(req)));
+  app.get("/v1/face-rooms/:id", async (req) => platform.getFaceRoom(faceAuth(req), P(req).id, { after: Q(req).after ? Number(Q(req).after) : undefined, as_bot: Q(req).as ?? Q(req).bot ?? Q(req).as_bot }));
+  app.post("/v1/face-rooms/:id/start", async (req) => platform.startFaceRoom(faceAuth(req), P(req).id));
+  app.post("/v1/face-rooms/:id/leave", async (req) => platform.leaveFaceRoom(faceAuth(req), P(req).id, B(req)));
+  app.post("/v1/face-rooms/:id/messages", async (req, reply) => reply.status(202).send(platform.draftFaceRoomMessage(faceAuth(req), P(req).id, B(req))));
+
   return app;
 }

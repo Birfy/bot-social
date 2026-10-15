@@ -10,10 +10,13 @@ import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANT
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
+import {
+  FaceRoomLimits, isFaceCode, joinSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
+} from "./face-rooms.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string } | { kind: "bot"; botId: string; ownerId: string };
 
-export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits> }
+export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
 
 const nowIso = () => new Date().toISOString();
 const J = (s: string | null | undefined, d: any = null) => (s ? JSON.parse(s) : d);
@@ -48,8 +51,12 @@ export class Platform {
 
   private kmsKey: Buffer;
   readonly attachmentLimits: AttachmentLimits;
+  readonly faceRoomLimits: FaceRoomLimits;
+  nowMs: () => number;
   constructor(opts: PlatformOptions = {}) {
     this.attachmentLimits = { ...DEFAULT_ATTACHMENT_LIMITS, ...Object.fromEntries(Object.entries(opts.attachments ?? {}).filter(([, v]) => typeof v === "number" && v > 0)) };
+    this.faceRoomLimits = loadFaceRoomLimits(opts.faceRooms);
+    this.nowMs = opts.now ?? (() => Date.now());
     this.db = openDb(opts.dbPath ?? ":memory:");
     this.audit = new AuditLog(opts.auditPath ?? ":memory:");
     this.publicBaseUrl = opts.publicBaseUrl ?? "http://localhost:8787";
@@ -58,6 +65,7 @@ export class Platform {
     this.webhooks = new WebhookPusher(this.db, this.fetchImpl, () => this.publicBaseUrl, opts.webhooks);
     this.audit.append("platform", "platform.started", null, [], { policy_version: POLICY_VERSION, platform_kid: this.platformKid, platform_public_key: this.platformKey.publicKey });
   }
+  private ts() { return new Date(this.nowMs()).toISOString(); }
 
   close() { this.webhooks.stop(); this.db.close(); this.audit.db.close(); }
   /** Send queued (debounced) webhook pushes now and wait for them. */
@@ -259,14 +267,14 @@ export class Platform {
     const existing = this.get("SELECT * FROM bots WHERE handle = ?", handle);
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
-      this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
-      return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
+      this.run("UPDATE bots SET status = 'active', display_name = ?, published = 0 WHERE id = ?", body?.display_name || existing.display_name, existing.id);
+      return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true, published: false };
     }
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
-    this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
+    this.run("UPDATE bots SET home_bot_id = ?, published = 0 WHERE id = ?", home.id, bot.bot_id);
     this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
     this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
-    return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
+    return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active", published: false };
   }
 
   removeHomeMember(p: Principal, homeId: string, memberId: string) {
@@ -507,17 +515,18 @@ export class Platform {
   me(p: Principal) {
     if (p.kind === "owner") {
       const o = this.owner(p.ownerId);
-      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), bots: this.listBots(p) };
+      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
     return { kind: "bot", ...this.publicBot(b), status: b.status };
   }
 
-  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string }) {
+  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean }) {
     const ownerId = this.requireOwner(p);
     if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms.map(String)), ownerId);
     if (body.timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", body.timezone, ownerId);
     if (body.display_name) this.run("UPDATE owners SET display_name = ? WHERE id = ?", body.display_name, ownerId);
+    if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
     this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], { fields: Object.keys(body) });
     return this.me(p);
   }
@@ -700,6 +709,7 @@ export class Platform {
   }
 
   private expireStale() {
+    this.advanceFaceRooms();
     const now = nowIso();
     for (const r of this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ?", now)) {
       this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ?", now, r.id);
@@ -1190,6 +1200,7 @@ export class Platform {
       this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
       if (a.kind === "outbound_message") this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
+      if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
     }
   }
 
@@ -1204,6 +1215,11 @@ export class Platform {
       }
     }
     if (a.kind === "action") this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
+    if (a.kind === "face_room_message") {
+      this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
+      const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
+      if (d) this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
+    }
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
   }
@@ -1231,6 +1247,9 @@ export class Platform {
       card.invite = this.inviteView(this.get("SELECT * FROM invites WHERE id = ?", a.subject_id));
     } else if (a.kind === "grant_request") {
       card.grant_request = { relationship_id: a.subject_id, ...J(a.note, {}), from: this.publicBot(this.bot(a.bot_id)) };
+    } else if (a.kind === "face_room_message") {
+      const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
+      if (d) card.face_room = { room_id: d.room_id, message_id: d.id, payload: J(d.payload), status: d.status };
     }
     if (a.conversation_id) {
       const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
@@ -1251,6 +1270,7 @@ export class Platform {
     const approve = decision !== "rejected";
     let result: any = {};
     if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
+    else if (a.kind === "face_room_message") result = approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot);
     else if (a.kind === "action") result = approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot);
     else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
@@ -1735,6 +1755,388 @@ export class Platform {
   auditEvents(p: Principal, opts: { subject?: string; limit?: number } = {}) {
     const ownerId = this.requireOwner(p);
     return { events: this.audit.list({ owner: ownerId, subject: opts.subject, limit: opts.limit }), chain: this.audit.verify() };
+  }
+
+  // ================================================================ face-to-face rooms
+  private faceMemberPublic(m: any) {
+    const display_name = sanitizePeerName(m.display_name, "Bot");
+    const owner_name = sanitizePeerName(m.owner_name, "Owner");
+    return {
+      handle: m.handle, display_name, owner_name, published: !!m.published,
+      label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
+    };
+  }
+  private faceSnapshot(b: any) {
+    const o = this.owner(b.owner_id);
+    const display_name = sanitizePeerName(b.display_name, sanitizePeerName(String(b.handle).replace(/^@/, ""), "Bot"));
+    const owner_name = sanitizePeerName(o.display_name, sanitizePeerName(o.username, "Owner"));
+    return {
+      bot_id: b.id, handle: "@" + String(b.handle).replace(/^@/, ""), display_name, owner_name,
+      published: b.published !== 0 && b.published !== false, label: memberLabel(display_name, owner_name),
+    };
+  }
+  private faceOwnerIds(roomId: string, includeLeft = false) {
+    const q = includeLeft
+      ? "SELECT DISTINCT owner_id FROM face_room_members WHERE room_id = ?"
+      : "SELECT DISTINCT owner_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL";
+    return this.all(q, roomId).map((r: any) => r.owner_id);
+  }
+  private faceInsertEvent(roomId: string, type: string, actorBot: string | null, data: Record<string, unknown>) {
+    const id = newId("fev");
+    const created_at = this.ts();
+    this.run("INSERT INTO face_room_events (id, room_id, type, actor_bot, data, created_at) VALUES (?,?,?,?,?,?)", id, roomId, type, actorBot, JSON.stringify(data), created_at);
+    return { id, seq: this.get("SELECT seq FROM face_room_events WHERE id = ?", id).seq as number, created_at, type };
+  }
+  private faceEmitMembers(roomId: string, type: string, data: Record<string, unknown>) {
+    for (const m of this.all("SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId)) this.emit(m.bot_id, type, data);
+  }
+  private faceEventPublic(e: any) {
+    return { event_id: e.id, event_cursor: e.seq, type: e.type, created_at: e.created_at, actor_bot: e.actor_bot, ...J(e.data, {}) };
+  }
+  private faceRecordAttempt(ownerId: string, ip: string | null, code: string, outcome: string) {
+    this.run("INSERT INTO face_room_attempts (owner_id, ip, code, outcome, created_at) VALUES (?,?,?,?,?)", ownerId, ip, String(code).slice(0, 16), outcome, this.ts());
+  }
+  private faceSetLockout(key: string, fails: number) {
+    this.run(`INSERT INTO face_room_lockouts (key, until, fails, created_at) VALUES (?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET until = excluded.until, fails = excluded.fails`, key, new Date(this.nowMs() + this.faceRoomLimits.lockoutMs).toISOString(), fails, this.ts());
+  }
+  private faceLockoutUntil(ownerId: string, ip: string | null): string | null {
+    const now = this.ts();
+    const rows = this.all("SELECT until FROM face_room_lockouts WHERE key IN (?, ?) AND until > ?", `owner:${ownerId}`, ip ? `ip:${ip}` : `owner:${ownerId}`, now);
+    return rows.length ? rows.map((r: any) => r.until as string).sort().at(-1)! : null;
+  }
+  private faceFailOutcomes() { return ["invalid_code", "room_full", "code_void"] as const; }
+  private faceMaybeLockout(ownerId: string, ip: string | null): boolean {
+    const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
+    const fails = this.faceFailOutcomes();
+    const marks = fails.map(() => "?").join(",");
+    let locked = false;
+    const acct = this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome IN (${marks})`, ownerId, since, ...fails).n;
+    if (acct >= this.faceRoomLimits.failsBeforeLockout) { this.faceSetLockout(`owner:${ownerId}`, acct); locked = true; }
+    if (ip) {
+      const n = this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome IN (${marks})`, ip, since, ...fails).n;
+      if (n >= this.faceRoomLimits.failsBeforeLockout) { this.faceSetLockout(`ip:${ip}`, n); locked = true; }
+    }
+    return locked;
+  }
+  private faceRateFail(message: string, scope: string, windowMs: number) {
+    return { ok: false as const, status: 429, code: "rate_limited", message, extra: { retry_after: Math.ceil(windowMs / 1000), scope } };
+  }
+  private faceAttemptRateLimit(ownerId: string, ip: string | null) {
+    const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
+    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ?", ownerId, since).n >= this.faceRoomLimits.attemptsPerAccount)
+      return this.faceRateFail("too many code attempts from this account", "account", this.faceRoomLimits.attemptWindowMs);
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ?", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+      return this.faceRateFail("too many code attempts from this address", "ip", this.faceRoomLimits.attemptWindowMs);
+    return null;
+  }
+  private faceCreateRateLimit(ownerId: string, ip: string | null) {
+    const since = new Date(this.nowMs() - this.faceRoomLimits.createWindowMs).toISOString();
+    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome = 'created'", ownerId, since).n >= this.faceRoomLimits.createsPerAccount)
+      return this.faceRateFail("too many face rooms created from this account", "account_create", this.faceRoomLimits.createWindowMs);
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome = 'created'", ip, since).n >= this.faceRoomLimits.createsPerIp)
+      return this.faceRateFail("too many face rooms created from this address", "ip_create", this.faceRoomLimits.createWindowMs);
+    return null;
+  }
+  private normalizeBotRefs(body: any): string[] {
+    const raw = body?.bots ?? body?.handles ?? body?.bot_ids ?? body?.bot_id ?? body?.bot ?? body?.handle;
+    if (raw === undefined || raw === null || raw === "") return [];
+    return (Array.isArray(raw) ? raw : [raw]).map((x) => String(x).trim()).filter(Boolean);
+  }
+  private faceBotsToBring(p: Principal, body: any) {
+    if (p.kind === "bot") {
+      const extra = this.normalizeBotRefs(body);
+      if (extra.some((r) => r !== p.botId && r.replace(/^@/, "") !== this.bot(p.botId).handle)) throw new ApiError(403, "forbidden", "a bot token may only bring itself");
+      const b = this.bot(p.botId);
+      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+      return [b];
+    }
+    const refs = this.normalizeBotRefs(body);
+    if (!refs.length) {
+      const members = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type = 'flybot-member' ORDER BY created_at", p.ownerId);
+      if (members.length) return [members[0]];
+      const rest = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type != 'flybot-home' ORDER BY created_at", p.ownerId);
+      if (rest.length) return [rest[0]];
+      const any = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at", p.ownerId);
+      assert(any.length, 404, "bot_not_found", "no bot to bring into the room");
+      return [any[0]];
+    }
+    const out: any[] = [];
+    for (const ref of refs) {
+      const b = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), p.ownerId);
+      assert(b, 404, "bot_not_found", `no bot matching ${ref} on this account`);
+      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+      if (!out.some((x) => x.id === b.id)) out.push(b);
+    }
+    return out;
+  }
+  private faceAddMembers(roomId: string, bots: any[]) {
+    const now = this.ts();
+    for (const b of bots) {
+      const snap = this.faceSnapshot(b);
+      const text = joinSystemText(snap.owner_name, snap.display_name, snap.published);
+      const ev = this.faceInsertEvent(roomId, "member.joined", b.id, { text, member: snap, trust: "platform" });
+      const existing = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ?", roomId, b.id);
+      if (existing) {
+        this.run("UPDATE face_room_members SET left_at = NULL, joined_at = ?, join_seq = ?, display_name = ?, owner_name = ?, published = ?, handle = ? WHERE room_id = ? AND bot_id = ?",
+          now, ev.seq, snap.display_name, snap.owner_name, snap.published ? 1 : 0, snap.handle, roomId, b.id);
+      } else {
+        this.run("INSERT INTO face_room_members (room_id, bot_id, owner_id, handle, display_name, owner_name, published, joined_at, join_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+          roomId, b.id, b.owner_id, snap.handle, snap.display_name, snap.owner_name, snap.published ? 1 : 0, now, ev.seq);
+      }
+      this.faceEmitMembers(roomId, "face_room.joined", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member: snap, trust: "platform" });
+    }
+  }
+  private faceCloseIfEmpty(roomId: string) {
+    if (this.get("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).n) return;
+    const now = this.ts();
+    this.run("UPDATE face_rooms SET status = 'closed', closed_at = ?, code = NULL WHERE id = ?", now, roomId);
+    this.run("DELETE FROM face_room_codes WHERE room_id = ?", roomId);
+    for (const d of this.all("SELECT * FROM face_room_drafts WHERE room_id = ? AND status = 'pending_approval'", roomId)) {
+      this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", d.id);
+      this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'", "room_closed", now, d.approval_id);
+    }
+  }
+  private faceStartRoom(room: any, reason: "expired" | "start", actor?: { ownerId: string; botId?: string }) {
+    if (room.status !== "candidate") return;
+    const now = this.ts();
+    this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ?", now, room.id);
+    this.run("DELETE FROM face_room_codes WHERE room_id = ?", room.id);
+    const text = reason === "expired"
+      ? "The matching window ended. The room is now open. The number is no longer valid."
+      : "The room is now open. The number is no longer valid.";
+    const ev = this.faceInsertEvent(room.id, "room.started", actor?.botId ?? null, { text, reason, trust: "platform" });
+    this.faceEmitMembers(room.id, "face_room.started", { room_id: room.id, event_id: ev.id, event_cursor: ev.seq, text, reason, trust: "platform" });
+    this.audit.append(actor ? `owner:${actor.ownerId}` : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
+  }
+  /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
+  advanceFaceRooms() {
+    for (const r of this.all("SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ?", this.ts())) this.faceStartRoom(r, "expired");
+  }
+  private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
+    const ownerId = p.ownerId;
+    let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND owner_id = ?";
+    const args: unknown[] = [roomId, ownerId];
+    if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
+    if (asBot) { sql += " AND (bot_id = ? OR handle = ?)"; args.push(asBot, asBot.startsWith("@") ? asBot : "@" + String(asBot).replace(/^@/, "")); }
+    const members = this.all(sql, ...args);
+    if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
+    return { ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
+  }
+  private faceRoomView(roomId: string, viewer: { joinSeq?: number }, opts: { after?: number } = {}) {
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m));
+    const floor = (viewer.joinSeq ?? 1) - 1;
+    const after = opts.after !== undefined ? opts.after : floor;
+    const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
+    return {
+      room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at, closed_at: room.closed_at,
+      members, event_cursor: events.length ? events[events.length - 1].event_cursor : after, events,
+    };
+  }
+
+  /**
+   * Enter a 6-digit code: create a candidate room if none exists, otherwise join it.
+   * Never returns room contents on failure. Race-safe (BEGIN IMMEDIATE).
+   */
+  joinFaceRoom(p: Principal, body: any, ctx: { ip?: string } = {}) {
+    const ownerId = p.ownerId;
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const bots = this.faceBotsToBring(p, body);
+    const rawCode = body?.code;
+    const codeOk = isFaceCode(rawCode);
+    const code = codeOk ? String(rawCode).trim() : "";
+    type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
+    type Ok = { ok: true; created: boolean; roomId: string };
+    const txn = this.db.transaction((): Ok | Fail => {
+      this.advanceFaceRooms();
+      const locked = this.faceLockoutUntil(ownerId, ip);
+      if (locked) {
+        this.faceRecordAttempt(ownerId, ip, code || String(rawCode ?? ""), "locked_out");
+        return { ok: false, status: 429, code: "locked_out", message: "too many failed code attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
+      }
+      const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
+      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, code || String(rawCode ?? ""), "rate_limited"); return { ...attemptBlock }; }
+      if (!codeOk) {
+        this.faceRecordAttempt(ownerId, ip, String(rawCode ?? ""), "invalid_code");
+        return { ok: false, status: 400, code: "invalid_code", message: "code must be exactly 6 digits", lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      const mapping = this.get("SELECT * FROM face_room_codes WHERE code = ?", code);
+      if (!mapping) {
+        const createBlock = this.faceCreateRateLimit(ownerId, ip);
+        if (createBlock) { this.faceRecordAttempt(ownerId, ip, code, "rate_limited"); return { ...createBlock }; }
+        if (bots.length > this.faceRoomLimits.maxMembers) {
+          this.faceRecordAttempt(ownerId, ip, code, "room_full");
+          return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots); no second room is opened`, lockout: this.faceMaybeLockout(ownerId, ip) };
+        }
+        const id = newId("frm");
+        const now = this.ts();
+        const expires = new Date(this.nowMs() + this.faceRoomLimits.ttlMs).toISOString();
+        this.run("INSERT INTO face_rooms (id, code, status, created_at, expires_at) VALUES (?,?,?,?,?)", id, code, "candidate", now, expires);
+        this.run("INSERT INTO face_room_codes (code, room_id, expires_at) VALUES (?,?,?)", code, id, expires);
+        this.faceAddMembers(id, bots);
+        this.faceRecordAttempt(ownerId, ip, code, "created");
+        return { ok: true, created: true, roomId: id };
+      }
+      const room = this.get("SELECT * FROM face_rooms WHERE id = ?", mapping.room_id);
+      if (!room || room.status !== "candidate" || Date.parse(room.expires_at) <= this.nowMs()) {
+        this.faceRecordAttempt(ownerId, ip, code, "code_void");
+        return { ok: false, status: 409, code: "code_void", message: "this number is no longer valid", lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      const active = this.all("SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL", room.id);
+      const activeSet = new Set(active.map((m: any) => m.bot_id));
+      const newcomers = bots.filter((b) => !activeSet.has(b.id));
+      if (active.length + newcomers.length > this.faceRoomLimits.maxMembers) {
+        this.faceRecordAttempt(ownerId, ip, code, "room_full");
+        return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots); no second room is opened`, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      if (newcomers.length) this.faceAddMembers(room.id, newcomers);
+      this.faceRecordAttempt(ownerId, ip, code, newcomers.length ? "joined" : "rejoined");
+      return { ok: true, created: false, roomId: room.id };
+    });
+    const out = txn.immediate();
+    if (!out.ok) {
+      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      throw new ApiError(out.status, out.code, out.message, out.extra);
+    }
+    this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), ip });
+    const viewer = this.faceRequireMember(p, out.roomId);
+    return this.faceRoomView(out.roomId, viewer);
+  }
+
+  getFaceRoom(p: Principal, roomId: string, opts: { after?: number; as_bot?: string } = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId, opts.as_bot);
+    const floor = viewer.joinSeq - 1;
+    const after = Math.max(Number(opts.after ?? 0) || 0, floor);
+    return this.faceRoomView(roomId, viewer, { after });
+  }
+
+  listFaceRooms(p: Principal) {
+    this.advanceFaceRooms();
+    const ownerId = p.ownerId;
+    const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
+    const args: unknown[] = p.kind === "bot" ? [ownerId, p.botId] : [ownerId];
+    const rows = this.all(`SELECT r.id, r.status, r.expires_at, r.started_at, COUNT(DISTINCT m2.bot_id) member_count
+      FROM face_rooms r
+      JOIN face_room_members m ON m.room_id = r.id AND m.owner_id = ? AND m.left_at IS NULL ${extra}
+      LEFT JOIN face_room_members m2 ON m2.room_id = r.id AND m2.left_at IS NULL
+      WHERE r.status != 'closed'
+      GROUP BY r.id ORDER BY r.created_at DESC`, ...args);
+    return {
+      rooms: rows.map((r: any) => ({
+        room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
+        my_bots: this.all("SELECT handle, display_name, published FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", r.id, ownerId)
+          .map((m: any) => ({ handle: m.handle, display_name: m.display_name, published: !!m.published })),
+      })),
+    };
+  }
+
+  startFaceRoom(p: Principal, roomId: string) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId);
+    this.db.transaction(() => {
+      const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+      if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+      if (room.status === "candidate") this.faceStartRoom(room, "start", { ownerId: viewer.ownerId, botId: viewer.botIds[0] });
+    }).immediate();
+    return this.faceRoomView(roomId, viewer);
+  }
+
+  leaveFaceRoom(p: Principal, roomId: string, body: any = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId);
+    let leaving = viewer.members;
+    const refs = this.normalizeBotRefs(body);
+    if (refs.length) {
+      leaving = leaving.filter((m: any) => refs.some((r) => m.bot_id === r || m.handle === r || m.handle === "@" + String(r).replace(/^@/, "")));
+      assert(leaving.length, 404, "bot_not_found", "none of those bots are in this room");
+    }
+    this.db.transaction(() => {
+      const now = this.ts();
+      for (const m of leaving) {
+        this.run("UPDATE face_room_members SET left_at = ? WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", now, roomId, m.bot_id);
+        const text = leaveSystemText(m.owner_name, m.display_name);
+        const member = this.faceMemberPublic(m);
+        const ev = this.faceInsertEvent(roomId, "member.left", m.bot_id, { text, member, trust: "platform" });
+        this.emit(m.bot_id, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform", self: true });
+        this.faceEmitMembers(roomId, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform" });
+      }
+      this.faceCloseIfEmpty(roomId);
+    }).immediate();
+    this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, this.faceOwnerIds(roomId, true), { bots: leaving.map((m: any) => m.bot_id) });
+    const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
+    if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
+    return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
+  }
+
+  draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string } = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    const text = String(body?.text ?? "");
+    assert(text.length > 0 && text.length <= 4000, 400, "invalid_request", "text (1-4000 chars) required");
+    const sender = this.bot(viewer.botIds[0]);
+    const flags = this.dlp(sender.owner_id, { text });
+    const blocked = flags.filter((f) => f.action === "block");
+    if (blocked.length) throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
+    const minuteAgo = this.nowMs() - 60e3, hourAgo = this.nowMs() - 3600e3;
+    if (this.get("SELECT COUNT(*) n FROM face_room_drafts WHERE room_id = ? AND sender_bot = ? AND created_ms > ?", roomId, sender.id, minuteAgo).n >= LIMITS.ratePerConversationPerMin)
+      throw new ApiError(429, "rate_limited", "per-room rate limit (6/min)", { retry_after: 60 });
+    if (this.get("SELECT COUNT(*) n FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?", sender.id, hourAgo).n >= LIMITS.ratePerBotPerHour)
+      throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
+    const id = newId("fmd");
+    const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
+    const snap = this.faceSnapshot(sender);
+    const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId });
+    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms) VALUES (?,?,?,?,?,?,?,?)",
+      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs());
+    this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
+    const o = this.owner(sender.owner_id);
+    if (o.auto_approve_face_rooms && flags.length === 0 && !detectInjection(text).suspected) {
+      this.decideApproval({ kind: "owner", ownerId: sender.owner_id }, aprId, { decision: "approved" }, "policy:auto_approve");
+      const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", id);
+      return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, from: snap };
+    }
+    return { message_id: id, status: "pending_approval", approval_id: aprId, from: snap };
+  }
+
+  private deliverFaceRoomMessage(a: any, body: any) {
+    const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", d.room_id);
+    assert(room && room.status !== "closed", 409, "room_closed", "this room is closed");
+    let payload = J(d.payload);
+    if (body.decision === "approved_with_edits" && body.edited_payload) {
+      payload = { ...payload, ...body.edited_payload };
+      const blocked = this.dlp(this.bot(d.sender_bot).owner_id, payload).filter((f) => f.action === "block");
+      assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
+    }
+    const still = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", d.room_id, d.sender_bot);
+    assert(still, 409, "not_a_member", "sender is no longer in the room");
+    const snap = this.faceMemberPublic(still);
+    const inj = detectInjection(String(payload.text ?? ""));
+    const ev = this.faceInsertEvent(d.room_id, "room.message", d.sender_bot, {
+      from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
+      security: { injection_suspected: inj.suspected }, edited_by_owner: body.decision === "approved_with_edits",
+    });
+    this.run("UPDATE face_room_drafts SET status = 'delivered', event_seq = ? WHERE id = ?", ev.seq, d.id);
+    this.faceEmitMembers(d.room_id, "face_room.message", {
+      room_id: d.room_id, event_id: ev.id, event_cursor: ev.seq, message_id: d.id,
+      from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
+      security: { injection_suspected: inj.suspected },
+    });
+    this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
+    this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
+    return { message_id: d.id, status: "delivered", event_cursor: ev.seq };
+  }
+  private rejectFaceRoomMessage(a: any, note?: string) {
+    const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
+    this.run("UPDATE face_room_drafts SET status = 'rejected' WHERE id = ?", d.id);
+    this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: "rejected", note_to_bot: note ?? null });
+    return { message_id: d.id, status: "rejected" };
   }
 
   platformInfo() {

@@ -94,6 +94,10 @@ function summarize(type: string, d: any): string {
     case "event.invite_accepted": return `Meeting invite accepted${cid}`;
     case "action.failed": return `An action failed${cid}`;
     case "webhook.test": return `Test push from Bot Social — your webhook works`;
+    case "face_room.joined": return `A bot joined a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "face_room.left": return `A bot left a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "face_room.started": return `A face-to-face room is now open${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "face_room.message": return `New face-to-face room message${d?.room_id ? ` (${d.room_id})` : ""}`;
     default: return type;
   }
 }
@@ -175,7 +179,7 @@ export class WebhookPusher {
       type: "botsocial.wake", delivery_id: id, test: kind === "test",
       bot: { bot_id: b.id, handle: "@" + b.handle },
       event_count: events.length, counts,
-      items: events.slice(0, MAX_ITEMS).map((e) => ({ event_id: e.event_id, type: e.type, at: e.created_at, summary: summarize(e.type, e.data), ...(e.data.conversation_id ? { conversation_id: e.data.conversation_id } : {}) })),
+      items: events.slice(0, MAX_ITEMS).map((e) => ({ event_id: e.event_id, type: e.type, at: e.created_at, summary: summarize(e.type, e.data), ...(e.data.conversation_id ? { conversation_id: e.data.conversation_id } : {}), ...(e.data.room_id ? { room_id: e.data.room_id } : {}) })),
       more: Math.max(0, events.length - MAX_ITEMS),
       note: kind === "test" ? "This is a test push. Nothing to do." : "Bot Social has new activity for this bot. Details are not included here; run `botctl pending` to see them.",
       server: this.baseUrl(), sent_at: now(),

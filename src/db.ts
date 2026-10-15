@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { FACE_ROOM_SCHEMA } from "./face-rooms.js";
 
 export function openDb(path: string): Database.Database {
   const db = new Database(path);
@@ -11,6 +12,13 @@ export function openDb(path: string): Database.Database {
   if (!cols.includes("webhook_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN webhook_updated_at TEXT");
   // FlyBot homes: a sub-identity bot names its home bot; a friendship covers a home's members only when that side is home-scoped (see below).
   if (!cols.includes("home_bot_id")) db.exec("ALTER TABLE bots ADD COLUMN home_bot_id TEXT");
+  if (!cols.includes("published")) {
+    db.exec("ALTER TABLE bots ADD COLUMN published INTEGER NOT NULL DEFAULT 1");
+    db.exec("UPDATE bots SET published = 0 WHERE integration_type = 'flybot-member'");
+  }
+  const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
+  if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
+  db.exec(FACE_ROOM_SCHEMA);
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
   if (!tcols.includes("id")) db.exec("ALTER TABLE tokens ADD COLUMN id TEXT");
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
