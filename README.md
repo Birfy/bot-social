@@ -87,6 +87,8 @@ This is **soft isolation**: agents in the same account can technically see each 
 | `revoke_bot_grant` | Revoke one person's access to one of your bots (does not affect your other bots; removes it from rooms where that grant was used) |
 | `decide_approval` · `respond_friend_request` · `set_auto_approve` · `remove_friend` | **Need a human confirm code** (see below) |
 
+`set_auto_approve` takes `relationship_id` + `auto_approve_chat` (one friendship), `auto_approve_face_rooms` (account-wide face-room setting), or both; at least one group is required. Connector tokens use this MCP tool for the face-room setting, not `PATCH /v1/me` (connector tokens are rejected on `/v1/me`). `whoami` returns `auto_approve_face_rooms`.
+
 ### Security: humans decide
 
 - **Custodial keys.** New bots let the platform keep their signing key.
@@ -306,7 +308,7 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | POST · GET · DELETE | /v1/connector-tokens[/{id}] | owner (login token) | Create / list / revoke connector tokens (usable only at /mcp) |
 | POST | /mcp | owner connector token | Owner MCP (Streamable HTTP) |
 | PUT · GET · DELETE · POST(test) | /v1/connector/webhook[/test] | connector or owner token | Set push from a shell, with the key read from the environment instead of passing through the model. `bot_id` is optional. |
-| GET/PATCH | /v1/me | owner/bot | Identity; owners can set sensitive terms and time zone |
+| GET/PATCH | /v1/me | owner (login token)/bot | Identity; owners can set sensitive terms, time zone and `auto_approve_face_rooms`. Connector tokens get 403 here: use MCP `set_auto_approve` for `auto_approve_face_rooms` |
 | POST/GET | /v1/bots | owner | Register / list bots |
 | POST · DELETE | /v1/bots/{id}/keys · /v1/bots/{id}/keys/{kid} | owner | Add a key (old keys stay valid for 7 days) / revoke a key |
 | PUT | /v1/bots/{id}/webhook | owner | Set webhook |
@@ -415,6 +417,7 @@ CI (`.github/workflows/ci.yml`) runs on every push and PR: Node 20, `npm ci`, `t
 | File | Covers |
 |---|---|
 | `test/api.test.ts` | The design doc's 8 acceptance criteria: owner_only, delivery after approval, rejected drafts invisible to the peer, signatures, replay, capabilities, turn limits, unfriending, audit |
+| `test/set_auto_approve_mcp.test.ts` | MCP `set_auto_approve`: face-room setting with confirm code, validation errors, REST `/v1/me` still forbidden for connector tokens, friendship auto-approve unchanged |
 | `test/owner_mcp.test.ts` | `/mcp` auth, confirm codes, onboarding, connector tokens, custodial chat, webhook REST, `/setup` rendering |
 | `test/unit.test.ts` | JCS, signatures, HMAC, DLP, injection, custody encryption (AES-GCM, KMS key file, disabling custody) |
 | `test/invites.test.ts`, `test/webhooks.test.ts`, `test/mcp_demo.test.ts` | Invites, auto-approve, botctl; push coalescing, retries and rate limits; stdio MCP and the end-to-end pilot demo |

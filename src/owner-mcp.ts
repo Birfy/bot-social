@@ -69,8 +69,9 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     try { return fn(); } finally { audit.append = orig; }
   };
   const CONFIRM = { confirm_code: z.string().optional().describe("The one-time code the OWNER typed in chat. Omit on the first call.") };
-  const confirmed = <A extends { confirm_code?: string }>(tool: string, summarize: (a: A) => unknown, run: (a: A) => unknown) => async (a: A) => {
+  const confirmed = <A extends { confirm_code?: string }>(tool: string, summarize: (a: A) => unknown, run: (a: A) => unknown, validate?: (a: A) => void) => async (a: A) => {
     try {
+      validate?.(a); // reject malformed calls before a confirm code is issued or consumed
       if (!a.confirm_code) {
         const { code, expires_at } = issueConfirmCode(p.ownerId, tool, a as any);
         return ok({ status: "confirmation_required", summary: summarize(a), confirm_code: code, expires_at,
@@ -104,11 +105,26 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { relationship_id: z.string(), decision: z.enum(["accept", "decline"]), grant_capabilities: z.array(z.string()).optional(), ...CONFIRM }, annotations: DECIDE,
   }, confirmed("respond_friend_request", (a) => ({ action: `${a.decision} friend request ${a.relationship_id}`, grant_capabilities: a.grant_capabilities ?? [], request: platform.listRelationships(p).find((r: any) => r.relationship_id === a.relationship_id) ?? null }),
     (a) => platform.consent(p, a.relationship_id, a)));
+  const validateAutoApprove = (a: any) => {
+    const hasRel = a.relationship_id !== undefined, hasChat = a.auto_approve_chat !== undefined, hasFace = a.auto_approve_face_rooms !== undefined;
+    if (!hasRel && !hasChat && !hasFace) throw new ApiError(400, "invalid_request", "nothing to change: provide auto_approve_face_rooms (boolean) and/or relationship_id together with auto_approve_chat (boolean)");
+    if (hasRel !== hasChat) throw new ApiError(400, "invalid_request", "relationship_id and auto_approve_chat must be provided together");
+  };
   server.registerTool("set_auto_approve", {
-    description: "Turn auto-approve of clean low-risk chat messages on/off for one friendship (DLP-flagged messages still need approval)." + HUMAN,
-    inputSchema: { relationship_id: z.string(), auto_approve_chat: z.boolean(), ...CONFIRM }, annotations: DECIDE,
-  }, confirmed("set_auto_approve", (a) => ({ action: `turn auto-approve ${a.auto_approve_chat ? "ON" : "OFF"} for friendship ${a.relationship_id}` }),
-    (a) => platform.updateRelationshipSettings(p, a.relationship_id, a)));
+    description: "Turn auto-approve on/off. Provide one or both groups: (a) relationship_id + auto_approve_chat: clean low-risk chat messages for ONE friendship (DLP-flagged messages still need approval); (b) auto_approve_face_rooms: clean low-risk face-to-face room messages for ALL of the owner's face rooms (an account setting, the same one PATCH /v1/me sets; connector tokens cannot call /v1/me, so use this tool; DLP-flagged or suspected-injection text still needs approval). At least one group is required." + HUMAN,
+    inputSchema: { relationship_id: z.string().optional(), auto_approve_chat: z.boolean().optional(), auto_approve_face_rooms: z.boolean().optional().describe("Account-wide: auto-approve clean face-to-face room messages."), ...CONFIRM }, annotations: DECIDE,
+  }, confirmed("set_auto_approve", (a: any) => {
+    const changes: string[] = [];
+    if (a.relationship_id !== undefined) changes.push(`turn auto-approve of chat messages ${a.auto_approve_chat ? "ON" : "OFF"} for friendship ${a.relationship_id}`);
+    if (a.auto_approve_face_rooms !== undefined) changes.push(`turn auto-approve of face-to-face room messages ${a.auto_approve_face_rooms ? "ON" : "OFF"} for ALL your face rooms (account setting)`);
+    return { action: changes.join("; and ") };
+  }, (a: any) => {
+    const out: any = {};
+    // friendship first: if it fails (unknown friendship) the account setting is left untouched
+    if (a.relationship_id !== undefined) out.relationship = platform.updateRelationshipSettings(p, a.relationship_id, a);
+    if (a.auto_approve_face_rooms !== undefined) out.auto_approve_face_rooms = (platform.updateSettings(p, { auto_approve_face_rooms: a.auto_approve_face_rooms }) as any).auto_approve_face_rooms;
+    return out;
+  }, validateAutoApprove));
   server.registerTool("remove_friend", { description: "Remove a friendship." + HUMAN, inputSchema: { relationship_id: z.string(), ...CONFIRM }, annotations: DECIDE },
     confirmed("remove_friend", (a) => ({ action: `remove friendship ${a.relationship_id}` }), (a) => platform.removeRelationship(p, a.relationship_id)));
   server.registerTool("create_invite", {
