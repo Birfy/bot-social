@@ -10,11 +10,13 @@ export function openDb(path: string): Database.Database {
   const cols = (db.prepare("PRAGMA table_info(bots)").all() as { name: string }[]).map((c) => c.name);
   if (!cols.includes("webhook_headers")) db.exec("ALTER TABLE bots ADD COLUMN webhook_headers TEXT NOT NULL DEFAULT '[]'");
   if (!cols.includes("webhook_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN webhook_updated_at TEXT");
-  // FlyBot homes: a sub-identity bot names its home bot; a friendship covers a home's members only when that side is home-scoped (see below).
+  // FlyBot homes: a sub-identity bot names its home bot. Access is always per-bot (default deny);
+  // a home or Chief bot is not a wildcard for its members.
   if (!cols.includes("home_bot_id")) db.exec("ALTER TABLE bots ADD COLUMN home_bot_id TEXT");
+  // Legacy `published` flag: keep the column so existing databases are not rewritten, but the
+  // server no longer reads or writes it. There is no global "publish all my Bots".
   if (!cols.includes("published")) {
     db.exec("ALTER TABLE bots ADD COLUMN published INTEGER NOT NULL DEFAULT 1");
-    db.exec("UPDATE bots SET published = 0 WHERE integration_type = 'flybot-member'");
   }
   const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
@@ -24,15 +26,27 @@ export function openDb(path: string): Database.Database {
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
   if (!tcols.includes("scope")) db.exec("ALTER TABLE tokens ADD COLUMN scope TEXT");
   if (!tcols.includes("last_used_at")) db.exec("ALTER TABLE tokens ADD COLUMN last_used_at TEXT");
-  // Friendship scope: which bots each side of a relationship exposes. 'bot' = only that endpoint;
-  // 'home' = a FlyBot home endpoint plus all its members. NULL (rows from before this column)
-  // keeps the old rule: a home endpoint exposes its members, any other bot only itself.
+  // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
+  // (default deny); a legacy 'home' value is ignored and never covers members.
   const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);
   if (!rcols.includes("requester_scope")) db.exec("ALTER TABLE relationships ADD COLUMN requester_scope TEXT");
   if (!rcols.includes("target_scope")) db.exec("ALTER TABLE relationships ADD COLUMN target_scope TEXT");
   const icols = (db.prepare("PRAGMA table_info(invites)").all() as { name: string }[]).map((c) => c.name);
   if (!icols.includes("scope")) db.exec("ALTER TABLE invites ADD COLUMN scope TEXT");
   migrateFriendshipScopes(db);
+  // Per-bot access: record which rooms a grant is used in (owner can see and revoke).
+  db.exec(`CREATE TABLE IF NOT EXISTS grant_rooms (
+    grant_id TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    ended_at TEXT,
+    PRIMARY KEY (grant_id, room_id)
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS grant_rooms_room ON grant_rooms (room_id, ended_at)");
+  const gcols = (db.prepare("PRAGMA table_info(grants)").all() as { name: string }[]).map((c) => c.name);
+  if (!gcols.includes("room_id")) db.exec("ALTER TABLE grants ADD COLUMN room_id TEXT");
+  const fm = (db.prepare("PRAGMA table_info(face_room_members)").all() as { name: string }[]).map((c) => c.name);
+  if (!fm.includes("added_by_owner_id")) db.exec("ALTER TABLE face_room_members ADD COLUMN added_by_owner_id TEXT");
   return db;
 }
 

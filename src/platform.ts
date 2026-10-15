@@ -267,14 +267,14 @@ export class Platform {
     const existing = this.get("SELECT * FROM bots WHERE handle = ?", handle);
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
-      this.run("UPDATE bots SET status = 'active', display_name = ?, published = 0 WHERE id = ?", body?.display_name || existing.display_name, existing.id);
-      return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true, published: false };
+      this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
+      return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
     }
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
-    this.run("UPDATE bots SET home_bot_id = ?, published = 0 WHERE id = ?", home.id, bot.bot_id);
+    this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
     this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
     this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
-    return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active", published: false };
+    return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
   }
 
   removeHomeMember(p: Principal, homeId: string, memberId: string) {
@@ -299,42 +299,12 @@ export class Platform {
   }
 
   /**
-   * Remote bots this home can reach, grouped by friend home. Each friendship exposes only what the
-   * peer's side covers (see sideScope): an invite made for one member exposes that member only;
-   * a home-scoped side (a home invite, or a home that joined as itself) exposes all its members.
-   * `via` names my bots that the friendship covers when that is not my whole home: only they may
-   * talk to that friend; my other members stay hidden from them.
+   * Bots granted TO me (default deny: nothing appears unless that bot's owner created an
+   * active relationship + grant to one of my bots). Home / Chief bots are not a wildcard.
+   * `home` is optional grouping: when set, only grants held by that home or its members.
    */
-  remoteBots(p: Principal, homeId: string) {
-    const ownerId = this.requireOwner(p);
-    const home = this.ownHome(ownerId, homeId);
-    const mine = new Set<string>([home.id, ...this.homeMembers(home.id).map((m: any) => m.bot_id)]);
-    const ids = [...mine];
-    const marks = ids.map(() => "?").join(",");
-    const rels = this.all(`SELECT * FROM relationships WHERE (requester_bot IN (${marks}) OR target_bot IN (${marks})) AND status = 'active' ORDER BY created_at`, ...ids, ...ids);
-    const byHome = new Map<string, any>();
-    for (const r of rels) {
-      const mySide = mine.has(r.requester_bot) ? r.requester_bot : r.target_bot;
-      const peer = this.bot(mySide === r.requester_bot ? r.target_bot : r.requester_bot);
-      if (!peer || mine.has(peer.id)) continue;
-      const peerHome = this.bot(this.homeOf(peer.id));
-      // Only what the peer's side of this friendship covers: its endpoint, or a whole home.
-      const peerWide = this.sideScope(r, peer.id) === "home";
-      const bots = peerWide
-        ? (peer.integration_type === "flybot-home" ? this.homeMembers(peer.id) : [])
-        : (peer.status === "active" && peer.integration_type !== "flybot-home" ? [{ bot_id: peer.id, handle: "@" + peer.handle, display_name: peer.display_name }] : []);
-      const entry = byHome.get(peerHome.id) ?? {
-        relationship_id: r.id, relationship_ids: [] as string[],
-        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, owner_display_name: this.owner(peerHome.owner_id).display_name },
-        bots: [] as any[], scope: "member", via: [] as string[],
-      };
-      entry.relationship_ids.push(r.id);
-      for (const b of bots) if (!entry.bots.some((x: any) => x.bot_id === b.bot_id)) entry.bots.push(b);
-      if (peerWide && peerHome.id === peer.id && mySide === home.id && this.sideScope(r, mySide) === "home") entry.scope = "home"; // home ↔ home exposes everyone
-      if (mySide !== home.id || this.sideScope(r, mySide) !== "home") { const v = "@" + this.bot(mySide).handle; if (!entry.via.includes(v)) entry.via.push(v); }
-      byHome.set(peerHome.id, entry);
-    }
-    return { homes: [...byHome.values()] };
+  remoteBots(p: Principal, homeId?: string) {
+    return this.listRemoteBots(p, homeId);
   }
 
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
@@ -720,22 +690,9 @@ export class Platform {
     for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
   }
 
-  /** The home a FlyBot sub-identity belongs to; any other bot is its own home. */
+  /** The home a FlyBot sub-identity belongs to; any other bot is its own home. Display grouping only — never an access wildcard. */
   homeOf(botId: string): string {
     return this.get("SELECT home_bot_id FROM bots WHERE id = ?", botId)?.home_bot_id ?? botId;
-  }
-
-  /** Which bots one side of a relationship exposes: 'bot' = that endpoint only; 'home' = a FlyBot
-   *  home endpoint and all its members. Rows without a recorded scope keep the old rule. */
-  sideScope(r: any, endpoint: string): "bot" | "home" {
-    const recorded = endpoint === r.requester_bot ? r.requester_scope : r.target_scope;
-    if (recorded === "bot" || recorded === "home") return recorded;
-    return this.get("SELECT integration_type FROM bots WHERE id = ?", endpoint)?.integration_type === "flybot-home" ? "home" : "bot";
-  }
-
-  /** Does this side of the relationship cover bot x? */
-  private covers(r: any, endpoint: string, x: string) {
-    return x === endpoint || (this.sideScope(r, endpoint) === "home" && this.homeOf(x) === endpoint);
   }
 
   activeRelationship(a: string, b: string) {
@@ -747,22 +704,16 @@ export class Platform {
     return rel;
   }
 
+  /** Access is only the two endpoint bots. Home / Chief never cover their members. */
   private findActiveRelationship(a: string, b: string): any {
-    // A relationship links two endpoints; each side covers its endpoint, plus (home scope only)
-    // that home's members. A member invite covers just that member, so its housemates stay
-    // unreachable. Direct (per-bot) friendships win over home-wide ones.
-    const ha = this.homeOf(a), hb = this.homeOf(b);
-    const pairs: [string, string][] = [[a, b], [ha, b], [a, hb], [ha, hb]];
-    const seen = new Set<string>();
-    let rel: any;
-    for (const [x, y] of pairs) {
-      const key = x + "|" + y;
-      if (seen.has(key) || x === y) continue;
-      seen.add(key);
-      rel = this.pairRelationships(x, y).find((r) => r.status === "active" && this.covers(r, x, a) && this.covers(r, y, b));
-      if (rel) break;
-    }
-    return rel;
+    return this.pairRelationships(a, b).find((r) => r.status === "active");
+  }
+
+  /** The bot the grantor is sharing (their endpoint on the relationship). */
+  private grantedBotOf(g: any, r?: any): string {
+    const rel = r ?? this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+    if (!rel) return "";
+    return g.grantor_owner === rel.requester_owner ? rel.requester_bot : rel.target_bot;
   }
 
   requestRelationship(p: Principal, body: any) {
@@ -851,14 +802,15 @@ export class Platform {
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status: "active" });
   }
 
-  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: number | undefined, actor: string) {
-    this.run("UPDATE grants SET status = 'superseded' WHERE relationship_id = ? AND grantor_owner = ? AND capability = ? AND status = 'active'", relId, grantorOwner, cap);
+  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: number | undefined, actor: string, extra: { roomId?: string } = {}) {
+    this.run("UPDATE grants SET status = 'superseded' WHERE relationship_id = ? AND grantor_owner = ? AND capability = ? AND status = 'active' AND IFNULL(room_id,'') = ?", relId, grantorOwner, cap, extra.roomId ?? "");
     const id = newId("grt");
-    const exp = new Date(Date.now() + (expiresInDays ?? LIMITS.grantDefaultDays) * 86400e3).toISOString();
-    this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-      id, relId, grantorOwner, granteeBot, cap, JSON.stringify(scope ?? {}), nowIso(), exp);
+    const exp = extra.roomId ? null : new Date(Date.now() + (expiresInDays ?? LIMITS.grantDefaultDays) * 86400e3).toISOString();
+    const sc = extra.roomId ? { ...(scope ?? {}), kind: "room", room_id: extra.roomId } : { ...(scope ?? {}) };
+    this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at, room_id) VALUES (?,?,?,?,?,?,?,?,?)",
+      id, relId, grantorOwner, granteeBot, cap, JSON.stringify(sc), nowIso(), exp, extra.roomId ?? null);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
-    this.audit.append(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: scope ?? {}, expires_at: exp });
+    this.audit.append(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: sc, expires_at: exp, room_id: extra.roomId ?? null });
     return id;
   }
 
@@ -866,25 +818,14 @@ export class Platform {
     return this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId).map((g) => ({ ...g, scope: J(g.scope, {}) }));
   }
 
-  findGrant(grantorOwner: string, granteeBot: string, cap: string): any {
-    const home = this.homeOf(granteeBot);
-    if (home !== granteeBot) {
-      const direct = this.findGrantDirect(grantorOwner, granteeBot, cap);
-      if (direct) return direct;
-      // A grant to the home reaches its members only where that side is home-wide.
-      const viaHome = this.findGrantDirect(grantorOwner, home, cap);
-      if (!viaHome) return null;
-      const r = this.get("SELECT * FROM relationships WHERE id = ?", viaHome.relationship_id);
-      return this.sideScope(r, home) === "home" ? viaHome : null;
+  findGrant(grantorOwner: string, granteeBot: string, cap: string, grantedBot?: string): any {
+    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL", grantorOwner, granteeBot, cap);
+    for (const g of rows) {
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
+      if (grantedBot && this.grantedBotOf(g, g) !== grantedBot) continue;
+      return { ...g, scope: J(g.scope, {}) };
     }
-    return this.findGrantDirect(grantorOwner, granteeBot, cap);
-  }
-
-  private findGrantDirect(grantorOwner: string, granteeBot: string, cap: string) {
-    const g = this.get("SELECT g.* FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND r.status = 'active'", grantorOwner, granteeBot, cap);
-    if (!g) return null;
-    if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); return null; }
-    return { ...g, scope: J(g.scope, {}) };
+    return null;
   }
 
   addGrant(p: Principal, relId: string, body: { capability: string; scope?: any; expires_in_days?: number }) {
@@ -907,9 +848,195 @@ export class Platform {
     assert(g.grantor_owner === ownerId, 403, "forbidden", "only the grantor can revoke");
     this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", nowIso(), grantId);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
-    this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r.requester_owner, r.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
+    this.endGrantRooms([grantId], `owner:${ownerId}`);
+    this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked" });
     return { grant_id: grantId, status: "revoked" };
+  }
+
+  /**
+   * Revoke one person's access to one of my bots (every capability in that bundle) without
+   * touching grants of my other bots. Removes the bot from rooms where that grant was used.
+   */
+  revokeBotGrant(p: Principal, grantId: string, botId?: string) {
+    const ownerId = this.requireOwner(p);
+    const g = this.get("SELECT * FROM grants WHERE id = ?", grantId);
+    assert(g, 404, "grant_not_found");
+    assert(g.grantor_owner === ownerId, 403, "forbidden", "only the grantor can revoke");
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+    const granted = this.grantedBotOf(g, r);
+    if (botId) {
+      const bot = this.ownBot(ownerId, this.resolveOwnBot(ownerId, botId).id);
+      assert(granted === bot.id, 404, "grant_not_found", "that grant is not for this bot");
+    }
+    const bundle = this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ?",
+      g.relationship_id, ownerId, g.grantee_bot, g.room_id ?? "");
+    const ids = bundle.map((x: any) => x.id);
+    const now = nowIso();
+    for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
+    const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
+      capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
+    });
+    this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked", granted_bot: granted });
+    return { grant_id: grantId, status: "revoked", revoked: ids, granted_bot: granted, grantee_bot: g.grantee_bot, rooms_removed: rooms };
+  }
+
+  /** Grants of one of my bots: who has it, scope, rooms, created/expiry. */
+  listBotGrants(p: Principal, botId: string) {
+    const ownerId = this.requireOwner(p);
+    const bot = this.resolveOwnBot(ownerId, botId);
+    this.expireStale();
+    const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
+      FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.grantor_owner = ? AND g.status = 'active' AND r.status IN ('active','room')
+      ORDER BY g.created_at`, ownerId);
+    const groups = new Map<string, any>();
+    for (const g of rows) {
+      const granted = this.grantedBotOf(g, g);
+      if (granted !== bot.id) continue;
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
+      const key = `${g.relationship_id}:${g.grantee_bot}:${g.room_id ?? ""}`;
+      const grantee = this.bot(g.grantee_bot);
+      const moreRooms = this.activeGrantRooms(g.id);
+      const scope = g.room_id || J(g.scope, {}).kind === "room" ? "room" : (moreRooms.length ? "group" : "person");
+      const cur = groups.get(key) ?? {
+        grant_id: g.id, grantee: this.publicBot(grantee), scope,
+        room: g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null,
+        rooms: [] as any[], capabilities: [] as string[], created_at: g.created_at, expires_at: g.expires_at,
+        relationship_id: g.rel_status === "room" ? null : g.relationship_id,
+      };
+      for (const room of moreRooms) if (!cur.rooms.some((x: any) => x.room_id === room.room_id)) cur.rooms.push(room);
+      if (moreRooms.length && cur.scope === "person") cur.scope = "group";
+      if (!cur.room) cur.room = g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null;
+      if (!cur.capabilities.includes(g.capability)) cur.capabilities.push(g.capability);
+      if (g.created_at < cur.created_at) cur.created_at = g.created_at;
+      groups.set(key, cur);
+    }
+    return { bot: this.publicBot(bot), grants: [...groups.values()] };
+  }
+
+  /** Bots other owners have granted TO me. */
+  listRemoteBots(p: Principal, homeId?: string) {
+    const ownerId = this.requireOwner(p);
+    let mine: string[];
+    if (homeId) {
+      const home = this.ownHome(ownerId, homeId);
+      mine = [home.id, ...this.homeMembers(home.id).map((m: any) => m.bot_id)];
+    } else {
+      mine = this.all("SELECT id FROM bots WHERE owner_id = ? AND status = 'active'", ownerId).map((b: any) => b.id);
+    }
+    if (!mine.length) return { bots: [], homes: [] };
+    this.expireStale();
+    const marks = mine.map(() => "?").join(",");
+    const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
+      FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status IN ('active','room')
+      ORDER BY g.created_at`, ...mine, ownerId);
+    const bots: any[] = [];
+    const byHome = new Map<string, any>();
+    const seen = new Set<string>();
+    for (const g of rows) {
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
+      const grantedId = this.grantedBotOf(g, g);
+      if (!grantedId || mine.includes(grantedId) || seen.has(grantedId + ":" + g.grantee_bot)) continue;
+      const granted = this.get("SELECT * FROM bots WHERE id = ? AND status = 'active'", grantedId);
+      if (!granted) continue;
+      seen.add(grantedId + ":" + g.grantee_bot);
+      const rooms = this.activeGrantRooms(g.id);
+      const scope = g.room_id || J(g.scope, {}).kind === "room" ? "room" : (rooms.length ? "group" : "person");
+      const item = {
+        bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name,
+        owner_display_name: this.owner(granted.owner_id).display_name,
+        grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
+        via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
+        relationship_id: g.rel_status === "room" ? null : g.relationship_id,
+      };
+      bots.push(item);
+      const peerHome = this.bot(this.homeOf(granted.id));
+      const entry = byHome.get(peerHome.id) ?? {
+        relationship_id: item.relationship_id, relationship_ids: [] as string[],
+        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, owner_display_name: this.owner(peerHome.owner_id).display_name },
+        bots: [] as any[], scope: "member", via: [] as string[],
+      };
+      if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) entry.relationship_ids.push(item.relationship_id);
+      if (!entry.bots.some((x: any) => x.bot_id === granted.id)) {
+        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at });
+      }
+      if (!entry.via.includes(item.via)) entry.via.push(item.via);
+      byHome.set(peerHome.id, entry);
+    }
+    return { bots, homes: [...byHome.values()] };
+  }
+
+  private resolveOwnBot(ownerId: string, ref: string) {
+    const b = this.get("SELECT * FROM bots WHERE owner_id = ? AND (id = ? OR handle = ?)", ownerId, ref, String(ref).replace(/^@/, ""));
+    assert(b, 404, "bot_not_found", "no such bot on this account");
+    return b;
+  }
+
+  private grantRoomPublic(roomId: string) {
+    const room = this.get("SELECT id, status, expires_at, started_at FROM face_rooms WHERE id = ?", roomId);
+    if (!room) return { room_id: roomId, status: "unknown" };
+    return { room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at };
+  }
+
+  private activeGrantRooms(grantId: string) {
+    return this.all("SELECT room_id FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL", grantId)
+      .map((x: any) => this.grantRoomPublic(x.room_id));
+  }
+
+  private recordGrantRoomUse(grantId: string, roomId: string, actor: string, owners: (string | null | undefined)[]) {
+    const existing = this.get("SELECT * FROM grant_rooms WHERE grant_id = ? AND room_id = ?", grantId, roomId);
+    if (existing && !existing.ended_at) return;
+    if (existing) this.run("UPDATE grant_rooms SET ended_at = NULL, created_at = ? WHERE grant_id = ? AND room_id = ?", nowIso(), grantId, roomId);
+    else this.run("INSERT INTO grant_rooms (grant_id, room_id, created_at) VALUES (?,?,?)", grantId, roomId, nowIso());
+    this.audit.append(actor, "grant.used_in_room", grantId, owners, { room_id: roomId });
+  }
+
+  /** End room usages for these grants and remove the granted bot from those rooms when we added it. */
+  private endGrantRooms(grantIds: string[], actor: string): string[] {
+    if (!grantIds.length) return [];
+    const now = nowIso();
+    const removed: string[] = [];
+    for (const gid of grantIds) {
+      const g = this.get("SELECT * FROM grants WHERE id = ?", gid);
+      if (!g) continue;
+      const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+      const granted = this.grantedBotOf(g, r);
+      const granteeOwner = this.bot(g.grantee_bot).owner_id;
+      const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL", gid);
+      for (const u of usages) {
+        this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
+        removed.push(u.room_id);
+        const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
+        if (member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id) {
+          this.removeFaceMember(u.room_id, member);
+          this.endRoomGrantsForBots(u.room_id, [granted]);
+        }
+      }
+      if (g.room_id) {
+        const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);
+        if (member) {
+          this.removeFaceMember(g.room_id, member);
+          this.endRoomGrantsForBots(g.room_id, [granted]);
+        }
+        if (!removed.includes(g.room_id)) removed.push(g.room_id);
+      }
+    }
+    void actor;
+    return [...new Set(removed)];
+  }
+
+  /** Access grant held by one of my bots on someone else's bot (relationship grants only). */
+  private accessGrantTo(ownerId: string, myBotIds: string[], targetBotId: string) {
+    if (!myBotIds.length) return null;
+    const marks = myBotIds.map(() => "?").join(",");
+    const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
+      FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL`,
+      ...myBotIds, ownerId);
+    return rows.find((g: any) => this.grantedBotOf(g, g) === targetBotId) ?? null;
   }
 
   requestGrant(p: Principal, env: Envelope) {
@@ -974,8 +1101,8 @@ export class Platform {
     this.expireStale();
     const botId = p.kind === "bot" ? p.botId : null;
     const rows = botId
-      ? this.all("SELECT * FROM relationships WHERE requester_bot = ? OR target_bot = ? ORDER BY created_at DESC", botId, botId)
-      : this.all("SELECT * FROM relationships WHERE requester_owner = ? OR target_owner = ? ORDER BY created_at DESC", p.ownerId, p.ownerId);
+      ? this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status != 'room' ORDER BY created_at DESC", botId, botId)
+      : this.all("SELECT * FROM relationships WHERE (requester_owner = ? OR target_owner = ?) AND status != 'room' ORDER BY created_at DESC", p.ownerId, p.ownerId);
     return rows.map((r) => {
       const meIsRequester = botId ? r.requester_bot === botId : r.requester_owner === p.ownerId;
       const myBot = meIsRequester ? r.requester_bot : r.target_bot;
@@ -1038,8 +1165,8 @@ export class Platform {
     const id = newId("inv");
     const code = randomBytes(9).toString("base64url").replace(/[-_]/g, "x");
     const status = viaBot ? "pending_owner" : "active";
-    // The invite's target is what the joiner gets: one bot, or (an invite made for a FlyBot home) the whole home.
-    const scope = bot.integration_type === "flybot-home" ? "home" : "bot";
+    // Per-bot only: an invite for a home or Chief grants that one bot, never its members.
+    const scope = "bot";
     this.run("INSERT INTO invites (id, code, bot_id, owner_id, created_by, offered_caps, requested_caps, message, auto_accept, max_uses, status, expires_at, created_at, scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, code, bot.id, bot.owner_id, viaBot ? `bot:${bot.id}` : `owner:${bot.owner_id}`, JSON.stringify(offered), JSON.stringify(requested), payload.message ?? null, payload.auto_accept === false ? 0 : 1, maxUses, status,
       new Date(Date.now() + hours * 3600e3).toISOString(), nowIso(), scope);
@@ -1093,10 +1220,9 @@ export class Platform {
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
-    // Scope: the inviter side is exactly the invite's target; the joiner side is the bot that joined
-    // (a FlyBot home joining as itself shares its whole home, as before; FlyBot joins as one member).
-    const targetScope = i.scope === "home" || i.scope === "bot" ? i.scope : (inviter.integration_type === "flybot-home" ? "home" : "bot");
-    const requesterScope = joiner.integration_type === "flybot-home" ? "home" : "bot";
+    // Per-bot only. Legacy invite.scope / home endpoints are recorded as 'bot' and never cover members.
+    const targetScope = "bot";
+    const requesterScope = "bot";
     this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at, requester_scope, target_scope)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, joiner.id, inviter.id, joiner.owner_id, inviter.owner_id, status, payload.message ?? `Joined via invite link`, i.offered_caps, JSON.stringify(offered), nowIso(), nowIso(), new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString(), requesterScope, targetScope);
     this.run("INSERT INTO relationship_invites (relationship_id, invite_id) VALUES (?,?)", id, i.id);
@@ -1136,7 +1262,7 @@ export class Platform {
     const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, status: b.status }));
     if (!selected) return { bots: list, bot: null, friends: [], pending_incoming: [], pending_outgoing: [], others: [] };
     this.expireStale();
-    const rows = this.all("SELECT * FROM relationships WHERE requester_bot = ? OR target_bot = ? ORDER BY updated_at DESC", selected.id, selected.id);
+    const rows = this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status != 'room' ORDER BY updated_at DESC", selected.id, selected.id);
     const items = rows.map((r) => {
       const outgoing = r.requester_bot === selected.id;
       const peerId = outgoing ? r.target_bot : r.requester_bot;
@@ -1176,12 +1302,11 @@ export class Platform {
     const target = this.bot(botId);
     if (p.kind === "bot" && p.botId !== botId) {
       this.activeRelationship(p.botId, botId);
-      assert(this.findGrant(target.owner_id, p.botId, "profile.read"), 403, "capability_not_granted", "profile.read not granted", { suggestion: "request_grant" });
+      assert(this.findGrant(target.owner_id, p.botId, "profile.read", target.id), 403, "capability_not_granted", "profile.read not granted", { suggestion: "request_grant" });
     }
     if (p.kind === "owner" && target.owner_id !== p.ownerId) {
-      // Another owner's bot: only one some bot of mine can reach (a friendship that covers it).
       const mine = this.all("SELECT id FROM bots WHERE owner_id = ? AND status = 'active'", p.ownerId);
-      assert(mine.some((m: any) => this.findActiveRelationship(m.id, target.id)), 404, "bot_not_found", "no such bot");
+      assert(mine.some((m: any) => this.findActiveRelationship(m.id, target.id) && this.findGrant(target.owner_id, m.id, "profile.read", target.id)), 404, "bot_not_found", "no such bot");
     }
     const o = this.owner(target.owner_id);
     return { ...this.publicBot(target), owner_timezone: o.timezone };
@@ -1342,7 +1467,7 @@ export class Platform {
       this.policyDecision(botId, null, [ownerId], "conversation.create", "deny", ["intent.unsupported"]);
       throw new ApiError(403, "intent_scope_violation", "MVP intents: schedule_meeting, general_chat");
     }
-    if (!this.findGrant(peer.owner_id, botId, "chat.public")) {
+    if (!this.findGrant(peer.owner_id, botId, "chat.public", peer.id)) {
       this.policyDecision(botId, null, [ownerId, peer.owner_id], "conversation.create", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
     }
@@ -1369,8 +1494,8 @@ export class Platform {
   private effectiveCaps(me: string, peer: string, allowed: string[]) {
     const meB = this.bot(me), peerB = this.bot(peer);
     return {
-      me_on_peer: allowed.filter((c) => this.findGrant(peerB.owner_id, me, c)),
-      peer_on_me: allowed.filter((c) => this.findGrant(meB.owner_id, peer, c)),
+      me_on_peer: allowed.filter((c) => this.findGrant(peerB.owner_id, me, c, peer)),
+      peer_on_me: allowed.filter((c) => this.findGrant(meB.owner_id, peer, c, me)),
     };
   }
 
@@ -1389,7 +1514,7 @@ export class Platform {
     assert(typeof pl.text === "string" && pl.text.length > 0 && pl.text.length <= 4000, 400, "invalid_request", "payload.text (1-4000 chars) required");
     // Refs live in the signed payload, so the sender's signature covers them.
     const refs = this.checkRefs(botId, pl.attachments);
-    if (!this.findGrant(peerB.owner_id, botId, "chat.public")) {
+    if (!this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id)) {
       this.policyDecision(botId, convId, owners, "message.draft", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
     }
@@ -1713,7 +1838,7 @@ export class Platform {
       const peerB = this.bot(sub);
       peerOwners.push(peerB.owner_id);
       this.activeRelationship(botId, sub);
-      const g = this.findGrant(peerB.owner_id, botId, "calendar.freebusy.read");
+      const g = this.findGrant(peerB.owner_id, botId, "calendar.freebusy.read", peerB.id);
       if (!g) {
         this.policyDecision(botId, c.id, [ownerId, peerB.owner_id], "calendar.freebusy.read", "deny", ["capability_not_granted"]);
         throw new ApiError(403, "capability_not_granted", "peer has not granted calendar.freebusy.read", { suggestion: "request_grant", capability: "calendar.freebusy.read" });
@@ -1762,7 +1887,7 @@ export class Platform {
     const display_name = sanitizePeerName(m.display_name, "Bot");
     const owner_name = sanitizePeerName(m.owner_name, "Owner");
     return {
-      handle: m.handle, display_name, owner_name, published: !!m.published,
+      handle: m.handle, display_name, owner_name,
       label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
     };
   }
@@ -1772,7 +1897,7 @@ export class Platform {
     const owner_name = sanitizePeerName(o.display_name, sanitizePeerName(o.username, "Owner"));
     return {
       bot_id: b.id, handle: "@" + String(b.handle).replace(/^@/, ""), display_name, owner_name,
-      published: b.published !== 0 && b.published !== false, label: memberLabel(display_name, owner_name),
+      label: memberLabel(display_name, owner_name),
     };
   }
   private faceOwnerIds(roomId: string, includeLeft = false) {
@@ -1843,49 +1968,122 @@ export class Platform {
     if (raw === undefined || raw === null || raw === "") return [];
     return (Array.isArray(raw) ? raw : [raw]).map((x) => String(x).trim()).filter(Boolean);
   }
-  private faceBotsToBring(p: Principal, body: any) {
+  private faceBotsToBring(p: Principal, body: any): { bot: any; viaGrant?: any }[] {
+    const wrap = (bot: any, viaGrant?: any) => ({ bot, viaGrant });
     if (p.kind === "bot") {
       const extra = this.normalizeBotRefs(body);
       if (extra.some((r) => r !== p.botId && r.replace(/^@/, "") !== this.bot(p.botId).handle)) throw new ApiError(403, "forbidden", "a bot token may only bring itself");
       const b = this.bot(p.botId);
       assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
-      return [b];
+      return [wrap(b)];
     }
     const refs = this.normalizeBotRefs(body);
     if (!refs.length) {
       const members = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type = 'flybot-member' ORDER BY created_at", p.ownerId);
-      if (members.length) return [members[0]];
+      if (members.length) return [wrap(members[0])];
       const rest = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type != 'flybot-home' ORDER BY created_at", p.ownerId);
-      if (rest.length) return [rest[0]];
+      if (rest.length) return [wrap(rest[0])];
       const any = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at", p.ownerId);
       assert(any.length, 404, "bot_not_found", "no bot to bring into the room");
-      return [any[0]];
+      return [wrap(any[0])];
     }
-    const out: any[] = [];
+    const out: { bot: any; viaGrant?: any }[] = [];
+    const mine = this.all("SELECT id FROM bots WHERE owner_id = ? AND status = 'active'", p.ownerId).map((b: any) => b.id);
     for (const ref of refs) {
-      const b = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), p.ownerId);
-      assert(b, 404, "bot_not_found", `no bot matching ${ref} on this account`);
-      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
-      if (!out.some((x) => x.id === b.id)) out.push(b);
+      const own = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), p.ownerId);
+      if (own) {
+        assert(own.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+        if (!out.some((x) => x.bot.id === own.id)) out.push(wrap(own));
+        continue;
+      }
+      const other = this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", ref, String(ref).replace(/^@/, ""));
+      assert(other && other.status === "active", 404, "bot_not_found", `no bot matching ${ref} on this account`);
+      const grant = this.accessGrantTo(p.ownerId, mine, other.id);
+      assert(grant, 404, "bot_not_found", `no bot matching ${ref} on this account`);
+      if (!out.some((x) => x.bot.id === other.id)) out.push(wrap(other, grant));
     }
     return out;
   }
-  private faceAddMembers(roomId: string, bots: any[]) {
+  private faceAddMembers(roomId: string, bots: any[], addedByOwnerId: string) {
     const now = this.ts();
     for (const b of bots) {
       const snap = this.faceSnapshot(b);
-      const text = joinSystemText(snap.owner_name, snap.display_name, snap.published);
+      const text = joinSystemText(snap.owner_name, snap.display_name);
       const ev = this.faceInsertEvent(roomId, "member.joined", b.id, { text, member: snap, trust: "platform" });
       const existing = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ?", roomId, b.id);
       if (existing) {
-        this.run("UPDATE face_room_members SET left_at = NULL, joined_at = ?, join_seq = ?, display_name = ?, owner_name = ?, published = ?, handle = ? WHERE room_id = ? AND bot_id = ?",
-          now, ev.seq, snap.display_name, snap.owner_name, snap.published ? 1 : 0, snap.handle, roomId, b.id);
+        this.run("UPDATE face_room_members SET left_at = NULL, joined_at = ?, join_seq = ?, display_name = ?, owner_name = ?, handle = ?, added_by_owner_id = ? WHERE room_id = ? AND bot_id = ?",
+          now, ev.seq, snap.display_name, snap.owner_name, snap.handle, addedByOwnerId, roomId, b.id);
       } else {
-        this.run("INSERT INTO face_room_members (room_id, bot_id, owner_id, handle, display_name, owner_name, published, joined_at, join_seq) VALUES (?,?,?,?,?,?,?,?,?)",
-          roomId, b.id, b.owner_id, snap.handle, snap.display_name, snap.owner_name, snap.published ? 1 : 0, now, ev.seq);
+        this.run("INSERT INTO face_room_members (room_id, bot_id, owner_id, handle, display_name, owner_name, added_by_owner_id, joined_at, join_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+          roomId, b.id, b.owner_id, snap.handle, snap.display_name, snap.owner_name, addedByOwnerId, now, ev.seq);
       }
       this.faceEmitMembers(roomId, "face_room.joined", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member: snap, trust: "platform" });
     }
+  }
+  /** Implicit room-scoped grants between the newcomers and everyone already in the room (other owners). */
+  private syncFaceRoomAccess(roomId: string, newcomers: any[], actorOwnerId: string, bring: { bot: any; viaGrant?: any }[]) {
+    const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId);
+    for (const nb of newcomers) {
+      for (const em of members) {
+        if (em.bot_id === nb.id || em.owner_id === nb.owner_id) continue;
+        this.ensurePairRoomGrant(roomId, nb, this.bot(em.bot_id), actorOwnerId);
+      }
+    }
+    for (const x of bring) {
+      if (!x.viaGrant) continue;
+      const siblings = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL",
+        x.viaGrant.relationship_id, x.viaGrant.grantor_owner, x.viaGrant.grantee_bot);
+      const ids = siblings.length ? siblings.map((s: any) => s.id) : [x.viaGrant.id];
+      for (const gid of ids) this.recordGrantRoomUse(gid, roomId, `owner:${actorOwnerId}`, [actorOwnerId, x.bot.owner_id]);
+    }
+  }
+  private ensurePairRoomGrant(roomId: string, a: any, b: any, actorOwnerId: string) {
+    const hit = this.get(`SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.room_id = ? AND g.status = 'active' AND r.status = 'room'
+      AND ((r.requester_bot = ? AND r.target_bot = ?) OR (r.requester_bot = ? AND r.target_bot = ?))`, roomId, a.id, b.id, b.id, a.id);
+    if (hit) return;
+    const id = newId("rel");
+    const now = nowIso();
+    this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, requester_scope, target_scope)
+      VALUES (?,?,?,?,?,'room',?,?,?,?,?,'bot','bot')`, id, a.id, b.id, a.owner_id, b.owner_id, "face room", "[]", "[]", now, now);
+    const actor = `owner:${actorOwnerId}`;
+    for (const cap of DEFAULT_CAPABILITIES) {
+      this.insertGrant(id, a.owner_id, b.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
+      this.insertGrant(id, b.owner_id, a.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
+    }
+  }
+  private removeFaceMember(roomId: string, m: any) {
+    if (m.left_at) return;
+    const now = this.ts();
+    const n = this.run("UPDATE face_room_members SET left_at = ? WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", now, roomId, m.bot_id);
+    if (!n.changes) return;
+    const text = leaveSystemText(m.owner_name, m.display_name);
+    const member = this.faceMemberPublic(m);
+    const ev = this.faceInsertEvent(roomId, "member.left", m.bot_id, { text, member, trust: "platform" });
+    this.emit(m.bot_id, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform", self: true });
+    this.faceEmitMembers(roomId, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform" });
+    this.faceCloseIfEmpty(roomId);
+  }
+  private endRoomGrantsForBots(roomId: string, botIds: string[]) {
+    if (!botIds.length) return;
+    const now = nowIso();
+    const rows = this.all("SELECT * FROM grants WHERE room_id = ? AND status = 'active'", roomId);
+    for (const g of rows) {
+      const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+      const granted = this.grantedBotOf(g, r);
+      if (!botIds.includes(g.grantee_bot) && !botIds.includes(granted)) continue;
+      this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
+      this.audit.append("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "room_left", room_id: roomId, grantee_bot: g.grantee_bot });
+    }
+    if (botIds.length) {
+      const marks = botIds.map(() => "?").join(",");
+      this.run(`UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL AND grant_id IN (
+        SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
+        WHERE g.grantee_bot IN (${marks}) OR r.requester_bot IN (${marks}) OR r.target_bot IN (${marks}))`,
+        now, roomId, ...botIds, ...botIds, ...botIds);
+    }
+    this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?) AND NOT EXISTS (SELECT 1 FROM grants g2 WHERE g2.relationship_id = relationships.id AND g2.status = 'active')", now, roomId);
   }
   private faceCloseIfEmpty(roomId: string) {
     if (this.get("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).n) return;
@@ -1896,6 +2094,12 @@ export class Platform {
       this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", d.id);
       this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'", "room_closed", now, d.approval_id);
     }
+    for (const g of this.all("SELECT * FROM grants WHERE room_id = ? AND status = 'active'", roomId)) {
+      this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
+      this.audit.append("platform", "grant.revoked", g.id, [], { reason: "room_closed", room_id: roomId });
+    }
+    this.run("UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL", now, roomId);
+    this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)", now, roomId);
   }
   private faceStartRoom(room: any, reason: "expired" | "start", actor?: { ownerId: string; botId?: string }) {
     if (room.status !== "candidate") return;
@@ -1917,8 +2121,8 @@ export class Platform {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
     const ownerId = p.ownerId;
-    let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND owner_id = ?";
-    const args: unknown[] = [roomId, ownerId];
+    let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR added_by_owner_id = ?)";
+    const args: unknown[] = [roomId, ownerId, ownerId];
     if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
     if (asBot) { sql += " AND (bot_id = ? OR handle = ?)"; args.push(asBot, asBot.startsWith("@") ? asBot : "@" + String(asBot).replace(/^@/, "")); }
     const members = this.all(sql, ...args);
@@ -1944,7 +2148,8 @@ export class Platform {
   joinFaceRoom(p: Principal, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
-    const bots = this.faceBotsToBring(p, body);
+    const bring = this.faceBotsToBring(p, body);
+    const bots = bring.map((x) => x.bot);
     const rawCode = body?.code;
     const codeOk = isFaceCode(rawCode);
     const code = codeOk ? String(rawCode).trim() : "";
@@ -1976,7 +2181,8 @@ export class Platform {
         const expires = new Date(this.nowMs() + this.faceRoomLimits.ttlMs).toISOString();
         this.run("INSERT INTO face_rooms (id, code, status, created_at, expires_at) VALUES (?,?,?,?,?)", id, code, "candidate", now, expires);
         this.run("INSERT INTO face_room_codes (code, room_id, expires_at) VALUES (?,?,?)", code, id, expires);
-        this.faceAddMembers(id, bots);
+        this.faceAddMembers(id, bots, ownerId);
+        this.syncFaceRoomAccess(id, bots, ownerId, bring);
         this.faceRecordAttempt(ownerId, ip, code, "created");
         return { ok: true, created: true, roomId: id };
       }
@@ -1992,7 +2198,10 @@ export class Platform {
         this.faceRecordAttempt(ownerId, ip, code, "room_full");
         return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots); no second room is opened`, lockout: this.faceMaybeLockout(ownerId, ip) };
       }
-      if (newcomers.length) this.faceAddMembers(room.id, newcomers);
+      if (newcomers.length) {
+        this.faceAddMembers(room.id, newcomers, ownerId);
+        this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
+      }
       this.faceRecordAttempt(ownerId, ip, code, newcomers.length ? "joined" : "rejoined");
       return { ok: true, created: false, roomId: room.id };
     });
@@ -2018,18 +2227,18 @@ export class Platform {
     this.advanceFaceRooms();
     const ownerId = p.ownerId;
     const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
-    const args: unknown[] = p.kind === "bot" ? [ownerId, p.botId] : [ownerId];
+    const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, p.botId] : [ownerId, ownerId];
     const rows = this.all(`SELECT r.id, r.status, r.expires_at, r.started_at, COUNT(DISTINCT m2.bot_id) member_count
       FROM face_rooms r
-      JOIN face_room_members m ON m.room_id = r.id AND m.owner_id = ? AND m.left_at IS NULL ${extra}
+      JOIN face_room_members m ON m.room_id = r.id AND (m.owner_id = ? OR m.added_by_owner_id = ?) AND m.left_at IS NULL ${extra}
       LEFT JOIN face_room_members m2 ON m2.room_id = r.id AND m2.left_at IS NULL
       WHERE r.status != 'closed'
       GROUP BY r.id ORDER BY r.created_at DESC`, ...args);
     return {
       rooms: rows.map((r: any) => ({
         room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
-        my_bots: this.all("SELECT handle, display_name, published FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", r.id, ownerId)
-          .map((m: any) => ({ handle: m.handle, display_name: m.display_name, published: !!m.published })),
+        my_bots: this.all("SELECT handle, display_name FROM face_room_members WHERE room_id = ? AND (owner_id = ? OR added_by_owner_id = ?) AND left_at IS NULL", r.id, ownerId, ownerId)
+          .map((m: any) => ({ handle: m.handle, display_name: m.display_name })),
       })),
     };
   }
@@ -2055,16 +2264,8 @@ export class Platform {
       assert(leaving.length, 404, "bot_not_found", "none of those bots are in this room");
     }
     this.db.transaction(() => {
-      const now = this.ts();
-      for (const m of leaving) {
-        this.run("UPDATE face_room_members SET left_at = ? WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", now, roomId, m.bot_id);
-        const text = leaveSystemText(m.owner_name, m.display_name);
-        const member = this.faceMemberPublic(m);
-        const ev = this.faceInsertEvent(roomId, "member.left", m.bot_id, { text, member, trust: "platform" });
-        this.emit(m.bot_id, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform", self: true });
-        this.faceEmitMembers(roomId, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform" });
-      }
-      this.faceCloseIfEmpty(roomId);
+      for (const m of leaving) this.removeFaceMember(roomId, m);
+      this.endRoomGrantsForBots(roomId, leaving.map((m: any) => m.bot_id));
     }).immediate();
     this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, this.faceOwnerIds(roomId, true), { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);

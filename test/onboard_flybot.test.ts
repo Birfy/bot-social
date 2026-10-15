@@ -49,10 +49,10 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   // Not friends yet: members cannot reach each other.
   const refused = await fetch(s.base + "/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${a.connector.token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "send_as_member", arguments: { from_bot_id: writer.bot_id, to: coder.handle, text: "hi" } } }) }).then((r) => r.json()) as any;
   assert.equal(refused.result.isError, true);
-  // Home-to-home friendship through an invite.
-  const inv = await A("create_invite", { bot_id: a.home.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
-  await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: b.home.bot_id });
-  const pending = await A("list_friends", { bot_id: a.home.bot_id });
+  // Per-bot invite: writer ↔ coder. A home invite would not let members talk.
+  const inv = await A("create_invite", { bot_id: writer.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: coder.bot_id });
+  const pending = await A("list_friends", { bot_id: writer.bot_id });
   if (pending.pending_incoming?.length) {
     // Not auto-accepted on this server: the owner accepts it (confirmation flow is out of scope here).
     (s.platform as any).respondRelationship?.({ kind: "owner", ownerId: a.owner_id } as any, pending.pending_incoming[0].relationship_id, { decision: "accept", grant_capabilities: ["chat.public"] });
@@ -103,13 +103,15 @@ test("FlyBot member-scoped invite: joining exposes only that member; other membe
   assert.equal(bobView.homes[0].home.handle, "@danyang.home");
   assert.equal(bobView.homes[0].scope, "member");
   assert.deepEqual(bobView.homes[0].bots.map((x: any) => x.handle), ["@chief.danyang.home"]);
-  // Danyang sees Bob's members, reachable via Chief.
+  // Danyang sees only the bot that joined (Bob's home), reachable via Chief — not every member of Bob's home.
   const danView = await A("list_remote_bots", { home: a.home.bot_id });
-  assert.deepEqual(danView.homes[0].bots.map((x: any) => x.handle), ["@coder.bob.home"]);
+  assert.deepEqual(danView.homes[0].bots.map((x: any) => x.handle), ["@bob.home"]);
   assert.deepEqual(danView.homes[0].via, ["@chief.danyang.home"]);
-  // Bob's coder ↔ Chief works both ways; Writer is hidden and unreachable both ways.
-  assert.match((await B("send_as_member", { from_bot_id: coder.bot_id, to: chief.handle, text: "hi chief" })).conversation_id, /.+/);
-  assert.match((await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "hi coder" })).conversation_id, /.+/);
+  // Only the joining bot (Bob's home) can talk to Chief; Coder was never granted.
+  assert.match((await B("send_as_member", { from_bot_id: b.home.bot_id, to: chief.handle, text: "hi chief" })).conversation_id, /.+/);
+  assert.match((await A("send_as_member", { from_bot_id: chief.bot_id, to: b.home.handle, text: "hi bob home" })).conversation_id, /.+/);
+  const fromCoder = await raw(b.connector.token, "send_as_member", { from_bot_id: coder.bot_id, to: chief.handle, text: "hi chief" });
+  assert.equal(fromCoder.isError, true);
   const toWriter = await raw(b.connector.token, "send_as_member", { from_bot_id: coder.bot_id, to: writer.handle, text: "hi writer" });
   assert.equal(toWriter.isError, true);
   assert.match(toWriter.content[0].text, /no_relationship/);

@@ -89,9 +89,8 @@ export function memberLabel(displayName: string, ownerName: string): string {
   return `${displayName} · ${ownerName}`;
 }
 
-export function joinSystemText(ownerName: string, displayName: string, published: boolean): string {
-  const base = `${ownerName}'s ${displayName} joined`;
-  return published ? base : `${base}; not published, available to this room only`;
+export function joinSystemText(ownerName: string, displayName: string): string {
+  return `${ownerName}'s ${displayName} joined`;
 }
 
 export function leaveSystemText(ownerName: string, displayName: string): string {
@@ -121,6 +120,7 @@ CREATE TABLE IF NOT EXISTS face_room_members (
   display_name TEXT NOT NULL,
   owner_name TEXT NOT NULL,
   published INTEGER NOT NULL DEFAULT 1,
+  added_by_owner_id TEXT,
   joined_at TEXT NOT NULL,
   join_seq INTEGER NOT NULL DEFAULT 0,
   left_at TEXT,

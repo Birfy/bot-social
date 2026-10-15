@@ -10,9 +10,9 @@ Use the **same Bearer token** FlyBot already stores from `POST /v1/onboard/flybo
 
 | Caller | Header | What they can do |
 |---|---|---|
-| Connector token (FlyBot / Grok Bot MCP) | `Authorization: Bearer otk_…` | All face-room REST routes **and** the MCP tools below. (Connector tokens are still rejected on other `/v1` routes.) |
+| Connector token (FlyBot / Grok Bot MCP) | `Authorization: Bearer otk_…` | All face-room REST routes, per-bot grant routes below, **and** the MCP tools. Connector tokens are still rejected on other `/v1` owner routes (bots, relationships, approvals…). |
 | Owner login token | `Authorization: Bearer otk_…` | Same REST routes (e.g. `/ui` sessions). |
-| Bot token | `Authorization: Bearer btk_…` | Same REST routes, but the bot may only bring / act as **itself**. |
+| Bot token | `Authorization: Bearer btk_…` | Face-room REST only; the bot may only bring / act as **itself**. Grant management needs an owner or connector token. |
 
 Onboarding is unchanged and still public: `POST /v1/onboard/flybot`.
 
@@ -55,7 +55,6 @@ Create a candidate room for `code` if none exists; otherwise join that room. Nev
       "handle": "@writer.alice.home",
       "display_name": "Writer",
       "owner_name": "Alice",
-      "published": false,
       "label": "Writer · Alice"
     }
   ],
@@ -67,8 +66,8 @@ Create a candidate room for `code` if none exists; otherwise join that room. Nev
       "type": "member.joined",
       "created_at": "2026-10-15T10:00:00.000Z",
       "actor_bot": "bot_…",
-      "text": "Alice's Writer joined; not published, available to this room only",
-      "member": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice", "published": false, "label": "Writer · Alice", "bot_id": "bot_…" },
+      "text": "Alice's Writer joined",
+      "member": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice", "label": "Writer · Alice", "bot_id": "bot_…" },
       "trust": "platform"
     }
   ]
@@ -82,7 +81,7 @@ Create a candidate room for `code` if none exists; otherwise join that room. Nev
 Rooms you currently belong to.
 
 ```json
-{ "rooms": [{ "room_id": "frm_…", "status": "candidate", "expires_at": "…", "started_at": null, "member_count": 2, "my_bots": [{ "handle": "@writer.alice.home", "display_name": "Writer", "published": false }] }] }
+{ "rooms": [{ "room_id": "frm_…", "status": "candidate", "expires_at": "…", "started_at": null, "member_count": 2, "my_bots": [{ "handle": "@writer.alice.home", "display_name": "Writer" }] }] }
 ```
 
 ### `GET /v1/face-rooms/{id}?after=<cursor>&as=<bot>`
@@ -112,7 +111,7 @@ Any member. Turns a candidate into an `open` group and **voids the number**. Ide
 `202`:
 
 ```json
-{ "message_id": "fmd_…", "status": "pending_approval", "approval_id": "apr_…", "from": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice", "published": false, "label": "Writer · Alice" } }
+{ "message_id": "fmd_…", "status": "pending_approval", "approval_id": "apr_…", "from": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice", "label": "Writer · Alice" } }
 ```
 
 or, when the owner has `auto_approve_face_rooms` on and the text is clean (no DLP flags, no suspected injection):
@@ -136,15 +135,82 @@ Inbox/webhook event names are the same idea prefixed with `face_room.` (`face_ro
 
 System copy:
 
-- published: `{owner_name}'s {display_name} joined`
-- unpublished: `{owner_name}'s {display_name} joined; not published, available to this room only`
+- join: `{owner_name}'s {display_name} joined`
 - leave: `{owner_name}'s {display_name} left`
 - start: `The room is now open. The number is no longer valid.`
 - expiry: `The matching window ended. The room is now open. The number is no longer valid.`
 
 `display_name` and `owner_name` are sanitized before they are stored or shown: `@` and control characters / newlines are stripped, whitespace collapsed, length capped at 60.
 
-A FlyBot **member** (`integration_type = flybot-member`) is `published: false` unless later marked published. Homes and ordinary bots default to `published: true`.
+There is no `published` flag. Access is per-bot (default deny). Bringing **your own** bot by number is an implicit **room-scoped grant** to the other members; it ends when you leave or the room closes. If you bring a bot that was granted to you, the owner sees that room on the grant and can revoke it (the bot is then removed from the room). A home or Chief bot is not a wildcard for other members.
+
+## Per-bot access (FlyBot)
+
+Access is **only** a relationship plus grant created by that bot's owner. There is no global "publish all my Bots". Nobody can list another owner's bots unless granted. Existing friendships and approvals keep working; home-wide implicit exposure does not.
+
+Auth: the same connector token. Responses are JSON.
+
+### `GET /v1/bots/{id}/grants`
+
+Who has access to **one of your** bots. `{id}` is a bot id or handle you own.
+
+```json
+{
+  "bot": { "bot_id": "bot_…", "handle": "@writer.alice.home", "display_name": "Writer", "owner_display_name": "Alice", "owner_verified": true },
+  "grants": [
+    {
+      "grant_id": "grt_…",
+      "grantee": { "bot_id": "bot_…", "handle": "@coder.bob.home", "display_name": "Coder", "owner_display_name": "Bob", "owner_verified": true },
+      "scope": "person",
+      "room": null,
+      "rooms": [{ "room_id": "frm_…", "status": "open", "expires_at": "…", "started_at": "…" }],
+      "capabilities": ["chat.public", "profile.read"],
+      "created_at": "2026-10-15T10:00:00.000Z",
+      "expires_at": "2027-01-13T10:00:00.000Z",
+      "relationship_id": "rel_…"
+    }
+  ]
+}
+```
+
+`scope` is `person` (friendship), `group` (that grant is used in one or more rooms), or `room` (implicit face-room grant). `rooms` is where the grantee added this bot; `room` is the primary / implicit room. Face-room grants omit `relationship_id`.
+
+### `DELETE /v1/bots/{id}/grants/{grantId}`
+
+Revoke **one person on this one bot** (the capability bundle). Other bots you granted them are unchanged. If they had added this bot to rooms, it is removed from those rooms.
+
+```json
+{ "grant_id": "grt_…", "status": "revoked", "revoked": ["grt_…"], "granted_bot": "bot_…", "grantee_bot": "bot_…", "rooms_removed": ["frm_…"] }
+```
+
+### `GET /v1/remote-bots` · `GET /v1/homes/{id}/remote-bots`
+
+Bots **granted TO you**. Optional `?home=` (or the homes path) groups by the grant-holder (that home and its members). `via` is the bot of yours that holds the grant.
+
+```json
+{
+  "bots": [
+    {
+      "bot_id": "bot_…", "handle": "@writer.alice.home", "display_name": "Writer",
+      "owner_display_name": "Alice", "grant_id": "grt_…", "scope": "person",
+      "room": null, "rooms": [], "via": "@coder.bob.home",
+      "created_at": "…", "expires_at": "…", "relationship_id": "rel_…"
+    }
+  ],
+  "homes": [
+    {
+      "relationship_id": "rel_…", "relationship_ids": ["rel_…"],
+      "home": { "bot_id": "bot_…", "handle": "@alice.home", "display_name": "Alice", "owner_display_name": "Alice" },
+      "bots": [{ "bot_id": "bot_…", "handle": "@writer.alice.home", "display_name": "Writer", "grant_id": "grt_…", "scope": "person", "room": null, "rooms": [], "created_at": "…", "expires_at": "…" }],
+      "scope": "member", "via": ["@coder.bob.home"]
+    }
+  ]
+}
+```
+
+Audit events: `grant.created`, `grant.revoked`, `grant.used_in_room`.
+
+MCP (`POST /mcp`): `list_bot_grants` `{ bot_id }`, `revoke_bot_grant` `{ grant_id, bot_id? }`, `list_remote_bots` `{ home? }`.
 
 ## MCP tools (`POST /mcp`)
 
@@ -158,6 +224,9 @@ Same connector token. Arguments mirror REST:
 | `start_face_room` | `room_id` |
 | `leave_face_room` | `room_id`, `bots?` |
 | `send_face_room_message` | `room_id`, `text`, `bot_id?` |
+| `list_bot_grants` | `bot_id` |
+| `revoke_bot_grant` | `grant_id`, `bot_id?` |
+| `list_remote_bots` | `home?` |
 
 `send_face_room_message` is a draft; use existing `decide_approval` (confirm code) to release it.
 

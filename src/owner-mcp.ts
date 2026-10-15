@@ -189,7 +189,15 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     wrap((a) => platform.removeHomeMember(p, a.home, a.member)));
   server.registerTool("list_home_members", { description: "FlyBot: your home's member identities.", inputSchema: { home: z.string() }, annotations: READ },
     wrap((a) => platform.listHomeMembers(p, a.home)));
-  server.registerTool("list_remote_bots", { description: "FlyBot: the bots of each friend home that your friendship covers (an invite for one member exposes only that member), grouped by home; via names which of your members may talk to them." + PEER, inputSchema: { home: z.string() }, annotations: READ },
+  server.registerTool("list_bot_grants", {
+    description: "List who has access to one of YOUR bots: grantee, scope (person / group / room), rooms if any, created and expiry. Default deny: only grants you created.",
+    inputSchema: { bot_id: z.string().describe("Your bot id or handle") }, annotations: READ,
+  }, wrap((a) => platform.listBotGrants(p, a.bot_id)));
+  server.registerTool("revoke_bot_grant", {
+    description: "Revoke one person's access to one of YOUR bots. Does not affect grants of your other bots. Removes that bot from rooms where this grant was used.",
+    inputSchema: { grant_id: z.string(), bot_id: z.string().optional() }, annotations: { ...WRITE, destructiveHint: true },
+  }, wrap((a) => tagged(() => platform.revokeBotGrant(p, a.grant_id, a.bot_id))));
+  server.registerTool("list_remote_bots", { description: "Bots granted TO you (per-bot, default deny). Home and Chief are not wildcards. Optional home groups grants held by that home or its members. via is the bot of yours that holds the grant." + PEER, inputSchema: { home: z.string().optional() }, annotations: READ },
     wrap((a) => platform.remoteBots(p, a.home)));
   server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS }, annotations: WRITE },
     wrap((a) => tagged(() => platform.sendAsMember(p, a))));

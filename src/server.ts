@@ -31,6 +31,13 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     if (p.kind === "owner" && p.scope === "connector") throw new ApiError(403, "connector_token_rest_forbidden", "connector tokens only work at /mcp; log in for the REST API");
     return p;
   };
+  // Connector token (FlyBot / MCP) or owner login. Used for per-bot access management and webhooks.
+  const ownerAny = (req: FastifyRequest) => {
+    const h = req.headers.authorization;
+    const p = platform.authenticate(h?.startsWith("Bearer ") ? h.slice(7) : undefined);
+    if (p.kind !== "owner") throw new ApiError(403, "owner_only", "owner or connector token required");
+    return p;
+  };
   const P = (req: FastifyRequest) => req.params as Record<string, string>;
   const B = (req: FastifyRequest) => (req.body ?? {}) as any;
   const Q = (req: FastifyRequest) => req.query as Record<string, string>;
@@ -62,7 +69,10 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
   app.post("/v1/attachments", { bodyLimit: Math.ceil(platform.attachmentLimits.maxBytes / 3) * 4 + 64 * 1024 }, async (req, reply) => reply.status(201).send(platform.uploadAttachment(auth(req), B(req))));
   app.get("/v1/attachments/:id", async (req) => platform.getAttachment(auth(req), { attachment_id: P(req).id, bot_id: Q(req)?.bot_id }));
-  app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(auth(req), P(req).id));
+  app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(ownerAny(req), P(req).id));
+  app.get("/v1/remote-bots", async (req) => platform.listRemoteBots(ownerAny(req), Q(req).home || Q(req).home_id));
+  app.get("/v1/bots/:id/grants", async (req) => platform.listBotGrants(ownerAny(req), P(req).id));
+  app.delete("/v1/bots/:id/grants/:grantId", async (req) => platform.revokeBotGrant(ownerAny(req), P(req).grantId, P(req).id));
   app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
   app.post("/v1/onboard", async (req, reply) => {
     const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
@@ -77,12 +87,6 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/connector-tokens", async (req) => ({ tokens: platform.listConnectorTokens(auth(req)) }));
   app.delete("/v1/connector-tokens/:id", async (req) => platform.revokeConnectorToken(auth(req), P(req).id));
   // Webhook via shell (so a secret header from an env var never passes through the model). Accepts connector or login owner tokens.
-  const ownerAny = (req: FastifyRequest) => {
-    const h = req.headers.authorization;
-    const p = platform.authenticate(h?.startsWith("Bearer ") ? h.slice(7) : undefined);
-    if (p.kind !== "owner") throw new ApiError(403, "owner_only", "owner or connector token required");
-    return p;
-  };
   const myBotId = (p: Principal, id?: string) => { const bots = platform.listBots(p); const b = id ? bots.find((x: any) => x.id === id || "@" + x.handle === id || x.handle === id) : bots[0]; if (!b) throw new ApiError(404, "bot_not_found"); return b.id as string; };
   app.put("/v1/connector/webhook", async (req) => { const p = ownerAny(req); const b = B(req); return platform.setWebhook(p, myBotId(p, b.bot_id), { url: b.url, headers: b.headers }); });
   app.get("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.getWebhook(p, myBotId(p, Q(req).bot_id)); });
