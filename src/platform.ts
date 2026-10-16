@@ -9,6 +9,7 @@ import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToke
 import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan } from "./policy.js";
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
+import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-look.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
   FaceRoomLimits, isFaceCode, joinSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
@@ -91,9 +92,11 @@ export class Platform {
     assert(o, 404, "owner_not_found");
     return o;
   }
-  private publicBot(b: any) {
+  /** `look` adds avatar/color. Opt-in per call site: only places where the viewer may already see the Bot
+   *  (own bots, active friends, grants, profile.read); never events, messages, invites or pending requests. */
+  private publicBot(b: any, look = false) {
     const o = this.owner(b.owner_id);
-    return { bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, owner_display_name: o.display_name, owner_verified: true };
+    return { bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, owner_display_name: o.display_name, owner_verified: true, ...(look ? lookOf(b) : {}) };
   }
   private requireOwner(p: Principal): string {
     if (p.kind !== "owner") throw new ApiError(403, "owner_only", "this operation can only be performed by the owner");
@@ -256,9 +259,10 @@ export class Platform {
   }
 
   /** Registers (or reactivates) a local FlyBot Bot as @<name>.<home>, its key custodied with the home. */
-  addHomeMember(p: Principal, homeId: string, body: { name?: string; display_name?: string; local_id?: string }) {
+  addHomeMember(p: Principal, homeId: string, body: { name?: string; display_name?: string; local_id?: string; avatar?: string | null; color?: string | null }) {
     const ownerId = this.requireOwner(p);
     const home = this.ownHome(ownerId, homeId);
+    const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     const room = 40 - home.handle.length - 1;
     assert(room >= 2, 400, "invalid_request", "home handle too long for members");
     const name = String(body?.name ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, room);
@@ -268,10 +272,12 @@ export class Platform {
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
       this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
+      this.applyLook(existing.id, look);
       return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
     }
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
     this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
+    this.applyLook(bot.bot_id, look);
     this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
     this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
     return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
@@ -289,8 +295,8 @@ export class Platform {
   }
 
   homeMembers(homeId: string) {
-    return this.all("SELECT id, handle, display_name FROM bots WHERE home_bot_id = ? AND status = 'active' ORDER BY created_at", homeId)
-      .map((b: any) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name }));
+    return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at FROM bots WHERE home_bot_id = ? AND status = 'active' ORDER BY created_at", homeId)
+      .map((b: any) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, ...lookOf(b) }));
   }
 
   listHomeMembers(p: Principal, homeId: string) {
@@ -471,15 +477,41 @@ export class Platform {
     return { ok: true, note: "password changed; all login sessions were signed out (connector tokens unaffected)" };
   }
 
-  updateBotProfile(p: Principal, botId: string | undefined, body: { display_name?: string }) {
+  /** Stores validated look fields (undefined = leave unchanged, null = clear). Returns the audit-safe change list. */
+  private applyLook(botId: string, look: { avatar?: string | null; color?: string | null }) {
+    const changed: Record<string, unknown> = {};
+    if (look.avatar !== undefined) {
+      this.run("UPDATE bots SET avatar = ?, avatar_updated_at = ? WHERE id = ?", look.avatar, nowIso(), botId);
+      changed.avatar = avatarFingerprint(look.avatar);
+    }
+    if (look.color !== undefined) {
+      this.run("UPDATE bots SET color = ? WHERE id = ?", look.color, botId);
+      changed.color = look.color;
+    }
+    return changed;
+  }
+
+  /** Owner (login or connector) changes the display name and/or look. Fields are optional but at least one is required;
+   *  `avatar` / `color` set to null (or "") clear the owner's choice. */
+  updateBotProfile(p: Principal, botId: string | undefined, body: { display_name?: string; avatar?: string | null; color?: string | null }) {
     const ownerId = this.requireOwner(p);
     const b = botId ? this.ownBot(ownerId, botId) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", ownerId);
     assert(b, 404, "bot_not_found");
-    const name = String(body?.display_name ?? "").trim();
-    assert(name.length >= 1 && name.length <= 60, 400, "invalid_request", "display_name: 1-60 chars");
-    this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
-    this.audit.append(`owner:${ownerId}`, "bot.profile_updated", b.id, [ownerId], { display_name: name });
-    return this.publicBot(this.bot(b.id));
+    const has = (k: string) => body?.[k as keyof typeof body] !== undefined;
+    assert(has("display_name") || has("avatar") || has("color"), 400, "invalid_request", "provide display_name, avatar and/or color");
+    let name: string | undefined;
+    if (has("display_name")) {
+      name = String(body.display_name).trim();
+      assert(name.length >= 1 && name.length <= 60, 400, "invalid_request", "display_name: 1-60 chars");
+    }
+    const avatar = has("avatar") ? validateAvatar(body.avatar) : undefined;
+    const color = has("color") ? validateColor(body.color) : undefined;
+    this.db.transaction(() => {
+      if (name !== undefined) this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
+      const changed = this.applyLook(b.id, { avatar, color });
+      this.audit.append(`owner:${ownerId}`, "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...changed });
+    })();
+    return this.publicBot(this.bot(b.id), true);
   }
 
   me(p: Principal) {
@@ -488,7 +520,7 @@ export class Platform {
       return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
-    return { kind: "bot", ...this.publicBot(b), status: b.status };
+    return { kind: "bot", ...this.publicBot(b, true), status: b.status };
   }
 
   updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean }) {
@@ -502,11 +534,12 @@ export class Platform {
   }
 
   // ================================================================ bots & keys
-  registerBot(p: Principal, body: { handle: string; display_name?: string; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
+  registerBot(p: Principal, body: { handle: string; display_name?: string; avatar?: string | null; color?: string | null; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
     const ownerId = this.requireOwner(p);
     const handle = String(body?.handle ?? "").replace(/^@/, "");
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
     assert(!this.get("SELECT 1 FROM bots WHERE handle = ?", handle), 409, "handle_taken");
+    const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     let generated: { kid: string; publicKey: string; privateKeyPem: string } | undefined;
     let key = body.public_key;
     if (!key) {
@@ -525,8 +558,10 @@ export class Platform {
       this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", id, key!.kid, "Ed25519", key!.value, nowIso());
     })();
     const botToken = this.issueToken("bot", id);
-    this.audit.append(`owner:${ownerId}`, "bot.registered", id, [ownerId], { handle, kid: key.kid, public_key: key.value, integration_type: body.integration_type || "rest" });
+    const lookChanged = this.applyLook(id, look);
+    this.audit.append(`owner:${ownerId}`, "bot.registered", id, [ownerId], { handle, kid: key.kid, public_key: key.value, integration_type: body.integration_type || "rest", ...lookChanged });
     return {
+      ...lookOf(this.bot(id)),
       bot_id: id, owner_id: ownerId, handle: "@" + handle, status: "active", bot_token: botToken, webhook_secret: webhookSecret,
       key: { kid: key.kid, public_key: key.value, ...(generated ? { private_key_pem: generated.privateKeyPem, note: "platform-generated; returned once, store it securely" } : {}) },
       mcp: { transport: "stdio", command: "npm run mcp", env: { BOTSOCIAL_URL: this.publicBaseUrl, BOTSOCIAL_BOT_ID: id } },
@@ -535,8 +570,8 @@ export class Platform {
 
   listBots(p: Principal) {
     const ownerId = this.requireOwner(p);
-    return this.all("SELECT id, handle, display_name, integration_type, webhook_url, status, created_at FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
-      ...b, webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
+    return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
+      ...b, ...lookOf(b), webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
     }));
   }
 
@@ -882,6 +917,42 @@ export class Platform {
     return { grant_id: grantId, status: "revoked", revoked: ids, granted_bot: granted, grantee_bot: g.grantee_bot, rooms_removed: rooms };
   }
 
+  /**
+   * Recipient side of revoke_bot_grant: the GRANTEE's owner removes a grant that was given to one of their bots.
+   * The whole bundle (every capability of that grant to that bot) ends as 'declined'; it disappears from
+   * the granting owner's list_bot_grants and from the grantee's list_remote_bots. Only this direction ends:
+   * the friendship and any grants the other way stay. The Bot leaves rooms where the grant was used (same
+   * as a revoke). The granting owner may share the Bot again with a fresh invite (see joinInvite).
+   * Needs no confirm code: it only reduces the caller's own access, like leaving a room.
+   */
+  declineBotGrant(p: Principal, grantId: string, botId?: string) {
+    const ownerId = this.requireOwner(p);
+    const g = this.get("SELECT * FROM grants WHERE id = ?", grantId);
+    assert(g, 404, "grant_not_found");
+    const grantee = this.bot(g.grantee_bot);
+    assert(grantee.owner_id === ownerId && g.grantor_owner !== ownerId, 403, "forbidden", "only the owner of the grantee bot can decline this grant");
+    assert(g.status === "active", 404, "grant_not_found", "that grant is no longer active");
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+    const granted = this.grantedBotOf(g, r);
+    if (botId) {
+      const ref = this.get("SELECT id FROM bots WHERE id = ? OR handle = ?", botId, String(botId).replace(/^@/, ""));
+      assert(ref && ref.id === granted, 404, "grant_not_found", "that grant is not for this bot");
+    }
+    const bundle = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ?",
+      g.relationship_id, g.grantor_owner, g.grantee_bot, g.room_id ?? "");
+    const ids = bundle.map((x: any) => x.id as string);
+    const now = nowIso();
+    for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
+    const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    this.audit.append(`owner:${ownerId}`, "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
+      capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
+    });
+    for (const b of new Set([granted, g.grantee_bot].filter(Boolean))) {
+      this.emit(b, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "declined", granted_bot: granted, grantee_bot: g.grantee_bot });
+    }
+    return { grant_id: grantId, status: "declined", declined: ids, granted_bot: granted, grantee_bot: g.grantee_bot, rooms_removed: rooms };
+  }
+
   /** Grants of one of my bots: who has it, scope, rooms, created/expiry. */
   listBotGrants(p: Principal, botId: string) {
     const ownerId = this.requireOwner(p);
@@ -901,7 +972,7 @@ export class Platform {
       const moreRooms = this.activeGrantRooms(g.id);
       const scope = g.room_id || J(g.scope, {}).kind === "room" ? "room" : (moreRooms.length ? "group" : "person");
       const cur = groups.get(key) ?? {
-        grant_id: g.id, grantee: this.publicBot(grantee), scope,
+        grant_id: g.id, grantee: this.publicBot(grantee, true), scope,
         room: g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null,
         rooms: [] as any[], capabilities: [] as string[], created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id,
@@ -913,7 +984,7 @@ export class Platform {
       if (g.created_at < cur.created_at) cur.created_at = g.created_at;
       groups.set(key, cur);
     }
-    return { bot: this.publicBot(bot), grants: [...groups.values()] };
+    return { bot: this.publicBot(bot, true), grants: [...groups.values()] };
   }
 
   /** Bots other owners have granted TO me. */
@@ -946,7 +1017,7 @@ export class Platform {
       const rooms = this.activeGrantRooms(g.id);
       const scope = g.room_id || J(g.scope, {}).kind === "room" ? "room" : (rooms.length ? "group" : "person");
       const item = {
-        bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name,
+        bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted),
         owner_display_name: this.owner(granted.owner_id).display_name,
         grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
         via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
@@ -956,12 +1027,12 @@ export class Platform {
       const peerHome = this.bot(this.homeOf(granted.id));
       const entry = byHome.get(peerHome.id) ?? {
         relationship_id: item.relationship_id, relationship_ids: [] as string[],
-        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, owner_display_name: this.owner(peerHome.owner_id).display_name },
+        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, ...lookOf(peerHome), owner_display_name: this.owner(peerHome.owner_id).display_name },
         bots: [] as any[], scope: "member", via: [] as string[],
       };
       if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) entry.relationship_ids.push(item.relationship_id);
       if (!entry.bots.some((x: any) => x.bot_id === granted.id)) {
-        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at });
+        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at });
       }
       if (!entry.via.includes(item.via)) entry.via.push(item.via);
       byHome.set(peerHome.id, entry);
@@ -1111,7 +1182,7 @@ export class Platform {
       const fmt = (g: any) => ({ grant_id: g.id, capability: g.capability, scope: g.scope, expires_at: g.expires_at });
       return {
         relationship_id: r.id, status: r.status, direction: meIsRequester ? "outgoing" : "incoming", my_bot_id: myBot,
-        peer: this.publicBot(this.bot(peerBot)), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
+        peer: this.publicBot(this.bot(peerBot), r.status === "active"), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
         created_at: r.created_at, expires_at: r.expires_at, blocked_by_me: r.blocked_by === p.ownerId,
         settings: this.settingsFor(r.id, p.ownerId),
         capabilities: { me_on_peer: grants.filter((g) => g.grantee_bot === myBot).map(fmt), peer_on_me: grants.filter((g) => g.grantee_bot === peerBot).map(fmt) },
@@ -1211,12 +1282,17 @@ export class Platform {
     const i = this.get("SELECT * FROM invites WHERE code = ?", code);
     assert(i, 404, "invite_not_found");
     const st = this.inviteStatus(i);
-    assert(st === "active", 410, "invite_unavailable", `invite is ${st}`);
+    assert(st === "active", 410, "invite_unavailable", `invite is ${st}`, { invite_status: st });
     const inviter = this.bot(i.bot_id);
     assert(inviter.owner_id !== joiner.owner_id, 400, "invalid_request", "cannot join your own invite");
     const existing = this.pairRelationships(joiner.id, inviter.id);
     assert(!existing.some((r) => r.status === "blocked"), 403, "blocked", "relationship is blocked");
-    assert(!existing.some((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status)), 409, "relationship_exists");
+    const live = existing.find((r) => r.status === "active");
+    // Re-share: already friends, but the inviter's access to this Bot was removed (declined by the joiner or revoked by the
+    // inviter). A fresh owner-joined invite from the inviter (auto_accept) restores it instead of failing with relationship_exists.
+    if (live && !viaBot && i.auto_accept && !this.hasLiveGrant(inviter.owner_id, joiner.id, live.id)) return this.regrantViaInvite(i, live, inviter, joiner, payload);
+    const blocking = existing.find((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status));
+    assert(!blocking, 409, "relationship_exists", "you are already connected to this Bot (or a request is pending)", { relationship_id: blocking?.id });
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
@@ -1233,6 +1309,31 @@ export class Platform {
     else if (!this.maybeAutoAcceptInvite(id)) this.notifyTarget(id);
     const r = this.get("SELECT status FROM relationships WHERE id = ?", id);
     return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: r.status === "active" ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent" };
+  }
+
+  /** Does `grantorOwner` still hold an unexpired, active relationship-level grant to `granteeBot` on this relationship? */
+  private hasLiveGrant(grantorOwner: string, granteeBot: string, relId: string): boolean {
+    return this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL", relId, grantorOwner, granteeBot)
+      .some((g: any) => !g.expires_at || Date.parse(g.expires_at) >= Date.now());
+  }
+
+  private regrantViaInvite(i: any, rel: any, inviter: any, joiner: any, payload: any) {
+    const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
+    const actor = `owner:${i.owner_id}(invite:${i.id})`;
+    this.db.transaction(() => {
+      this.run("UPDATE invites SET uses = uses + 1 WHERE id = ?", i.id);
+      this.run("INSERT OR IGNORE INTO relationship_invites (relationship_id, invite_id) VALUES (?,?)", rel.id, i.id);
+      const fbScope = { window_days: 14, hours: "09:00-18:00" };
+      // inviter owner -> joiner bot: the same bundle a fresh friendship would give
+      for (const c of new Set<string>([...DEFAULT_CAPABILITIES, ...J(i.offered_caps, [])])) this.insertGrant(rel.id, inviter.owner_id, joiner.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, actor);
+      // joiner owner -> inviter bot: add only what is missing; never replaces grants the joiner already holds
+      for (const c of new Set<string>([...DEFAULT_CAPABILITIES, ...offered])) {
+        if (!this.findGrant(joiner.owner_id, inviter.id, c, joiner.id)) this.insertGrant(rel.id, joiner.owner_id, inviter.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${joiner.owner_id}`);
+      }
+    })();
+    this.audit.append(`owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: rel.id, regrant: true, offered });
+    for (const b of [inviter.id, joiner.id]) this.emit(b, "grant.changed", { relationship_id: rel.id, status: "granted", granted_bot: inviter.id, grantee_bot: joiner.id });
+    return { relationship_id: rel.id, status: "active", approval_id: undefined, inviter: this.publicBot(inviter), awaiting: null, regranted: true };
   }
 
   /** A join that never became a friendship (requester owner rejected / request expired) must give its
@@ -1259,7 +1360,7 @@ export class Platform {
     else bots = this.all("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at", p.ownerId);
     const selected = botId ? bots.find((b) => b.id === botId || "@" + b.handle === botId || b.handle === botId) : bots[0];
     if (botId && !selected) throw new ApiError(403, "forbidden", "not your bot");
-    const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, status: b.status }));
+    const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, ...lookOf(b), status: b.status }));
     if (!selected) return { bots: list, bot: null, friends: [], pending_incoming: [], pending_outgoing: [], others: [] };
     this.expireStale();
     const rows = this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status != 'room' ORDER BY updated_at DESC", selected.id, selected.id);
@@ -1273,7 +1374,7 @@ export class Platform {
       const times = [r.updated_at, last?.updated_at, lastMsg].filter(Boolean).sort();
       return {
         relationship_id: r.id, status: r.status, direction: outgoing ? "outgoing" : "incoming",
-        peer: this.publicBot(this.bot(peerId)),
+        peer: this.publicBot(this.bot(peerId), r.status === "active"),
         connected_at: r.status === "active" || r.status === "revoked" || r.status === "blocked" ? r.updated_at : null,
         requested_at: r.created_at, expires_at: r.expires_at, message: r.message, settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,
         capabilities: {
@@ -1286,7 +1387,7 @@ export class Platform {
       };
     });
     return {
-      bots: list, bot: { bot_id: selected.id, handle: "@" + selected.handle, display_name: selected.display_name, status: selected.status, owner_display_name: this.owner(selected.owner_id).display_name },
+      bots: list, bot: { bot_id: selected.id, handle: "@" + selected.handle, display_name: selected.display_name, ...lookOf(selected), status: selected.status, owner_display_name: this.owner(selected.owner_id).display_name },
       friends: items.filter((i) => i.status === "active"),
       pending_incoming: items.filter((i) => i.direction === "incoming" && ["pending_target", "pending_requester_owner"].includes(i.status)),
       pending_outgoing: items.filter((i) => i.direction === "outgoing" && ["pending_target", "pending_requester_owner"].includes(i.status)),
@@ -1309,7 +1410,7 @@ export class Platform {
       assert(mine.some((m: any) => this.findActiveRelationship(m.id, target.id) && this.findGrant(target.owner_id, m.id, "profile.read", target.id)), 404, "bot_not_found", "no such bot");
     }
     const o = this.owner(target.owner_id);
-    return { ...this.publicBot(target), owner_timezone: o.timezone };
+    return { ...this.publicBot(target, true), owner_timezone: o.timezone };
   }
 
   // ================================================================ approvals
@@ -1883,12 +1984,15 @@ export class Platform {
   }
 
   // ================================================================ face-to-face rooms
-  private faceMemberPublic(m: any) {
+  /** `look` adds the Bot's current avatar/color. Only used for the member list of a room the viewer belongs to;
+   *  events (persisted, replayed and delivered as inbox items) never carry the avatar. */
+  private faceMemberPublic(m: any, look = false) {
     const display_name = sanitizePeerName(m.display_name, "Bot");
     const owner_name = sanitizePeerName(m.owner_name, "Owner");
     return {
       handle: m.handle, display_name, owner_name,
       label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
+      ...(look ? lookOf(this.get("SELECT avatar, color, avatar_updated_at FROM bots WHERE id = ?", m.bot_id) ?? {}) : {}),
     };
   }
   private faceSnapshot(b: any) {
@@ -2131,7 +2235,7 @@ export class Platform {
   }
   private faceRoomView(roomId: string, viewer: { joinSeq?: number }, opts: { after?: number } = {}) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
-    const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m));
+    const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m, true));
     const floor = (viewer.joinSeq ?? 1) - 1;
     const after = opts.after !== undefined ? opts.after : floor;
     const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
@@ -2237,8 +2341,8 @@ export class Platform {
     return {
       rooms: rows.map((r: any) => ({
         room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
-        my_bots: this.all("SELECT handle, display_name FROM face_room_members WHERE room_id = ? AND (owner_id = ? OR added_by_owner_id = ?) AND left_at IS NULL", r.id, ownerId, ownerId)
-          .map((m: any) => ({ handle: m.handle, display_name: m.display_name })),
+        my_bots: this.all("SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND (m.owner_id = ? OR m.added_by_owner_id = ?) AND m.left_at IS NULL", r.id, ownerId, ownerId)
+          .map((m: any) => ({ handle: m.handle, display_name: m.display_name, ...lookOf(m) })),
       })),
     };
   }
