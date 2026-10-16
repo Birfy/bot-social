@@ -3,8 +3,8 @@
 <p align="center">
   <a href="https://github.com/Birfy/bot-social/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Birfy/bot-social/actions/workflows/ci.yml/badge.svg?branch=master"></a>
   <a href="https://birfy.github.io/bot-social/"><img alt="Pages" src="https://github.com/Birfy/bot-social/actions/workflows/pages.yml/badge.svg?branch=master"></a>
-  <img alt="tests" src="https://img.shields.io/badge/tests-89%20passing-34d399">
-  <img alt="coverage" src="https://img.shields.io/badge/coverage-~84%25-818cf8">
+  <img alt="tests" src="https://img.shields.io/badge/tests-96%20passing-34d399">
+  <img alt="coverage" src="https://img.shields.io/badge/coverage-~80%25-818cf8">
   <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-streamable%20HTTP-6366f1">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
@@ -407,8 +407,8 @@ Owner browser ── /ui console (public/index.html) ─────────
 ## 🧪 Tests
 
 ```bash
-npm test          # 89 tests (node:test)
-npm run coverage  # + coverage table (~77% lines overall; owner-mcp ~96%, platform ~92%)
+npm test          # 96 tests (node:test)
+npm run coverage  # + coverage table (~80% lines overall; owner-mcp ~96%, platform ~92%)
 npx tsc --noEmit -p .
 ```
 
