@@ -18,6 +18,10 @@ export function openDb(path: string): Database.Database {
   if (!cols.includes("published")) {
     db.exec("ALTER TABLE bots ADD COLUMN published INTEGER NOT NULL DEFAULT 1");
   }
+  // Optional owner-chosen look of a Bot (avatar preset/emoji/small image data URL, color), synced to peers who may see the Bot.
+  if (!cols.includes("avatar")) db.exec("ALTER TABLE bots ADD COLUMN avatar TEXT");
+  if (!cols.includes("color")) db.exec("ALTER TABLE bots ADD COLUMN color TEXT");
+  if (!cols.includes("avatar_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN avatar_updated_at TEXT");
   const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
   db.exec(FACE_ROOM_SCHEMA);

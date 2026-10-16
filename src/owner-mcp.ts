@@ -150,10 +150,12 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     description: "Change the owner's web login password (for /ui). Needs the current password. Signs out all web sessions; connector tokens keep working. Only when the owner asks; never invent a password.",
     inputSchema: { current_password: z.string(), new_password: z.string().min(6) }, annotations: { ...WRITE, destructiveHint: true },
   }, wrap((a) => tagged(() => platform.changePassword(p, a))));
-  server.registerTool("get_bot_profile", { description: "Show your bot's public profile (handle, display name).", inputSchema: { bot_id: z.string().optional() }, annotations: READ },
+  server.registerTool("get_bot_profile", { description: "Show your bot's public profile (handle, display name, avatar, color).", inputSchema: { bot_id: z.string().optional() }, annotations: READ },
     wrap((a) => { const bots = platform.listBots(p); const b = a.bot_id ? bots.find((x: any) => x.id === a.bot_id) : bots[0]; if (!b) throw new ApiError(404, "bot_not_found"); return platform.profile(p, b.id); }));
-  server.registerTool("update_bot_profile", { description: "Change your bot's display name shown to friends.", inputSchema: { display_name: z.string(), bot_id: z.string().optional() }, annotations: WRITE },
-    wrap((a) => tagged(() => platform.updateBotProfile(p, a.bot_id, a))));
+  server.registerTool("update_bot_profile", {
+    description: "Change your bot's profile shown to friends and face-room members: display_name and/or look. avatar: a preset id (e.g. \"star\"), a single emoji, or a small image data URL (PNG/JPEG/WebP, at most 64 KiB in total); color: #rrggbb. Pass null to clear avatar or color. At least one of display_name, avatar, color is required.",
+    inputSchema: { display_name: z.string().optional(), avatar: z.string().nullable().optional(), color: z.string().nullable().optional(), bot_id: z.string().optional() }, annotations: WRITE,
+  }, wrap((a) => tagged(() => platform.updateBotProfile(p, a.bot_id, a))));
   // ---- chat as the bot (custodial key). Drafts still go through owner approval / auto-approve policy.
   const findFriend = (bp: Principal, friend: string) => {
     const f = friend.trim().replace(/^@/, "").toLowerCase();
@@ -199,7 +201,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { attachment_id: z.string(), bot_id: z.string().optional() }, annotations: READ,
   }, wrap((a) => platform.getAttachment(p, a)));
   // FlyBot homes: one home per FlyBot install, each local Bot a member @<bot>.<home>.
-  server.registerTool("add_home_member", { description: "FlyBot: register a local Bot as a member identity of your home (@<name>.<home>).", inputSchema: { home: z.string(), name: z.string(), display_name: z.string().optional() }, annotations: WRITE },
+  server.registerTool("add_home_member", { description: "FlyBot: register a local Bot as a member identity of your home (@<name>.<home>).", inputSchema: { home: z.string(), name: z.string(), display_name: z.string().optional(), avatar: z.string().nullable().optional(), color: z.string().nullable().optional() }, annotations: WRITE },
     wrap((a) => platform.addHomeMember(p, a.home, a)));
   server.registerTool("remove_home_member", { description: "FlyBot: revoke a member identity of your home.", inputSchema: { home: z.string(), member: z.string() }, annotations: { ...WRITE, destructiveHint: true } },
     wrap((a) => platform.removeHomeMember(p, a.home, a.member)));
@@ -213,7 +215,11 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     description: "Revoke one person's access to one of YOUR bots. Does not affect grants of your other bots. Removes that bot from rooms where this grant was used.",
     inputSchema: { grant_id: z.string(), bot_id: z.string().optional() }, annotations: { ...WRITE, destructiveHint: true },
   }, wrap((a) => tagged(() => platform.revokeBotGrant(p, a.grant_id, a.bot_id))));
-  server.registerTool("list_remote_bots", { description: "Bots granted TO you (per-bot, default deny). Home and Chief are not wildcards. Optional home groups grants held by that home or its members. via is the bot of yours that holds the grant." + PEER, inputSchema: { home: z.string().optional() }, annotations: READ },
+  server.registerTool("decline_bot_grant", {
+    description: "Remove a grant someone gave to one of YOUR bots (recipient side of revoke_bot_grant): the shared Bot disappears from list_remote_bots and from the granting owner's list_bot_grants. Takes grant_id from list_remote_bots; optional bot_id is the remote bot's id/handle (safety check). Does not end the friendship or the grants you gave them; the owner can share the Bot again with a fresh invite. No confirm code (it only reduces your own access).",
+    inputSchema: { grant_id: z.string(), bot_id: z.string().optional().describe("The remote (shared) Bot's id or handle") }, annotations: { ...WRITE, destructiveHint: true },
+  }, wrap((a) => tagged(() => platform.declineBotGrant(p, a.grant_id, a.bot_id))));
+  server.registerTool("list_remote_bots", { description: "Bots granted TO you (per-bot, default deny), with each Bot's avatar/color. Home and Chief are not wildcards. Optional home groups grants held by that home or its members. via is the bot of yours that holds the grant." + PEER, inputSchema: { home: z.string().optional() }, annotations: READ },
     wrap((a) => platform.remoteBots(p, a.home)));
   server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS }, annotations: WRITE },
     wrap((a) => tagged(() => platform.sendAsMember(p, a))));

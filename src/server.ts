@@ -73,6 +73,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/remote-bots", async (req) => platform.listRemoteBots(ownerAny(req), Q(req).home || Q(req).home_id));
   app.get("/v1/bots/:id/grants", async (req) => platform.listBotGrants(ownerAny(req), P(req).id));
   app.delete("/v1/bots/:id/grants/:grantId", async (req) => platform.revokeBotGrant(ownerAny(req), P(req).grantId, P(req).id));
+  // Recipient side: the grantee removes a grant given to one of their bots (the granting owner's list_bot_grants drops it).
+  app.delete("/v1/remote-bots/:grantId", async (req) => platform.declineBotGrant(ownerAny(req), P(req).grantId, Q(req).bot_id || undefined));
   app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
   app.post("/v1/onboard", async (req, reply) => {
     const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
@@ -105,6 +107,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/bots", async (req, reply) => reply.status(201).send(platform.registerBot(auth(req), B(req))));
   app.get("/v1/bots", async (req) => ({ bots: platform.listBots(auth(req)) }));
   app.get("/v1/bots/:id/profile", async (req) => platform.profile(auth(req), P(req).id));
+  // Owner (login or connector token) sets display_name and/or avatar/color; avatar/color null clears.
+  app.patch("/v1/bots/:id/profile", async (req) => platform.updateBotProfile(ownerAny(req), P(req).id, B(req)));
   app.post("/v1/bots/:id/keys", async (req, reply) => reply.status(201).send(platform.addKey(auth(req), P(req).id, B(req))));
   app.delete("/v1/bots/:id/keys/:kid", async (req) => platform.revokeKey(auth(req), P(req).id, P(req).kid));
   app.get("/v1/bots/:id/webhook", async (req) => platform.getWebhook(auth(req), P(req).id));
