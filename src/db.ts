@@ -30,6 +30,15 @@ export function openDb(path: string): Database.Database {
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
   if (!tcols.includes("scope")) db.exec("ALTER TABLE tokens ADD COLUMN scope TEXT");
   if (!tcols.includes("last_used_at")) db.exec("ALTER TABLE tokens ADD COLUMN last_used_at TEXT");
+  // typed_by_owner attestation: only tokens held by a trusted owner host (login, or a connector token minted for FlyBot) may stamp it.
+  if (!tcols.includes("attest_typed")) {
+    db.exec("ALTER TABLE tokens ADD COLUMN attest_typed INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE tokens SET attest_typed = 1 WHERE kind = 'owner' AND scope = 'connector' AND label = 'FlyBot'");
+  }
+  const mcols = (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map((c) => c.name);
+  if (!mcols.includes("typed_by_owner")) db.exec("ALTER TABLE messages ADD COLUMN typed_by_owner INTEGER NOT NULL DEFAULT 0");
+  const dcols = (db.prepare("PRAGMA table_info(face_room_drafts)").all() as { name: string }[]).map((c) => c.name);
+  if (!dcols.includes("typed_by_owner")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN typed_by_owner INTEGER NOT NULL DEFAULT 0");
   // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
   // (default deny); a legacy 'home' value is ignored and never covers members.
   const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);

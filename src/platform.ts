@@ -15,7 +15,7 @@ import {
   FaceRoomLimits, isFaceCode, joinSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
 } from "./face-rooms.js";
 
-export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string } | { kind: "bot"; botId: string; ownerId: string };
+export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
 export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
 
@@ -157,9 +157,10 @@ export class Platform {
     if (row.kind === "owner") {
       if (row.scope === "connector") {
         this.run("UPDATE tokens SET last_used_at = ? WHERE token_hash = ?", nowIso(), row.token_hash);
-        return { kind: "owner", ownerId: row.subject_id, scope: "connector", tokenId: row.id };
+        return { kind: "owner", ownerId: row.subject_id, scope: "connector", tokenId: row.id, attestTyped: row.attest_typed === 1 };
       }
-      return { kind: "owner", ownerId: row.subject_id };
+      // a login (owner console / REST) session is the person at the keyboard
+      return { kind: "owner", ownerId: row.subject_id, attestTyped: true };
     }
     const b = this.bot(row.subject_id);
     return { kind: "bot", botId: b.id, ownerId: b.owner_id };
@@ -167,16 +168,17 @@ export class Platform {
 
   // ================================================================ connector tokens (owner MCP)
   /** Labelled, revocable owner token that only works at /mcp. Minting needs a full (login) owner token. */
-  createConnectorToken(p: Principal, body: { label?: string }) {
+  createConnectorToken(p: Principal, body: { label?: string; attest_typed_by_owner?: boolean }) {
     const ownerId = this.requireOwner(p);
     assert(p.kind === "owner" && !p.scope, 403, "forbidden", "a connector token cannot mint tokens");
     const label = String(body?.label ?? "Grok Bot").trim().slice(0, 60) || "Grok Bot";
     assert((this.get("SELECT COUNT(*) n FROM tokens WHERE kind='owner' AND scope='connector' AND subject_id = ? AND revoked_at IS NULL", ownerId).n) < 20, 409, "too_many_tokens", "revoke an old connector token first (max 20 active)");
     const id = newId("ctk");
     const token = randomToken("otk");
-    this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at, id, label, scope) VALUES (?,?,?,?,?,?,?)", hashToken(token), "owner", ownerId, nowIso(), id, label, "connector");
-    this.audit.append(`owner:${ownerId}`, "connector_token.created", id, [ownerId], { label });
-    return { token_id: id, label, token, ...this.connectorConfig(token) };
+    const attest = body?.attest_typed_by_owner === true ? 1 : 0;
+    this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at, id, label, scope, attest_typed) VALUES (?,?,?,?,?,?,?,?)", hashToken(token), "owner", ownerId, nowIso(), id, label, "connector", attest);
+    this.audit.append(`owner:${ownerId}`, "connector_token.created", id, [ownerId], { label, attest_typed_by_owner: !!attest });
+    return { token_id: id, label, token, attest_typed_by_owner: !!attest, ...this.connectorConfig(token) };
   }
 
   connectorConfig(token: string) {
@@ -191,8 +193,8 @@ export class Platform {
 
   listConnectorTokens(p: Principal) {
     const ownerId = this.requireOwner(p);
-    return this.all("SELECT id, label, created_at, last_used_at, revoked_at FROM tokens WHERE kind='owner' AND scope='connector' AND subject_id = ? ORDER BY created_at DESC", ownerId)
-      .map((t) => ({ token_id: t.id, label: t.label, created_at: t.created_at, last_used_at: t.last_used_at, status: t.revoked_at ? "revoked" : "active", revoked_at: t.revoked_at }));
+    return this.all("SELECT id, label, created_at, last_used_at, revoked_at, attest_typed FROM tokens WHERE kind='owner' AND scope='connector' AND subject_id = ? ORDER BY created_at DESC", ownerId)
+      .map((t) => ({ token_id: t.id, label: t.label, attest_typed_by_owner: t.attest_typed === 1, created_at: t.created_at, last_used_at: t.last_used_at, status: t.revoked_at ? "revoked" : "active", revoked_at: t.revoked_at }));
   }
 
   revokeConnectorToken(p: Principal, tokenId: string) {
@@ -205,7 +207,7 @@ export class Platform {
   }
 
   /** One-step onboarding: new owner + their bot (platform-generated key) + a connector token. */
-  onboard(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; label?: string; integration_type?: string }) {
+  onboard(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; label?: string; integration_type?: string }, opts: { attestTyped?: boolean } = {}) {
     body = { ...(body ?? {}) };
     const generated: { username?: string; password?: string } = {};
     if (!body.username) {
@@ -224,7 +226,7 @@ export class Platform {
       const bot = this.registerBot(p, { handle, display_name: body.bot_display_name || body.display_name || handle, integration_type: body.integration_type || "grok-bot" });
       // custodial: the platform keeps the (generated) signing key encrypted, so the connector can chat
       this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
-      const conn = this.createConnectorToken(p, { label: body.label });
+      const conn = this.createConnectorToken(p, { label: body.label, attest_typed_by_owner: opts.attestTyped === true });
       out = {
         owner_id: o.owner_id, username: body.username,
         ...(generated.password ? { generated_password: generated.password, password_note: "auto-generated web login (for /ui); tell the owner once, do not store it" } : {}),
@@ -241,7 +243,7 @@ export class Platform {
     if (body.webhook_url) validateUrl(body.webhook_url);
     // The bot made here is the owner's FlyBot home (e.g. @danyang.home); local Bots join it as members.
     const base = String(body.display_name ?? body.username ?? "owner").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "owner";
-    const out = this.onboard({ ...body, bot_handle: body.bot_handle || `${base}.home`, label: "FlyBot", integration_type: "flybot-home" });
+    const out = this.onboard({ ...body, bot_handle: body.bot_handle || `${base}.home`, label: "FlyBot", integration_type: "flybot-home" }, { attestTyped: true });
     const p: Principal = { kind: "owner", ownerId: out.owner_id };
     let webhook: unknown = null;
     if (body.webhook_url) {
@@ -313,9 +315,24 @@ export class Platform {
     return this.listRemoteBots(p, homeId);
   }
 
+  /**
+   * `typed_by_owner` attestation: the platform stamps it on a message only when the caller is an owner principal
+   * that may attest (owner login, or a connector token minted for a trusted host such as FlyBot) and says so
+   * explicitly. Bot tokens and plain connector tokens are refused; message text and signed envelopes are never read for it.
+   */
+  private typedByOwner(p: Principal, body: any): boolean {
+    const v = body?.typed_by_owner;
+    if (v === undefined || v === null || v === false) return false;
+    assert(v === true, 400, "invalid_request", "typed_by_owner must be a boolean");
+    if (p.kind !== "owner") throw new ApiError(403, "typed_attestation_forbidden", "typed_by_owner can only be set with the owner's own credential, never a Bot token");
+    if (!p.attestTyped) throw new ApiError(403, "typed_attestation_forbidden", "this connector token may not attest typed_by_owner (use the token FlyBot onboarding issued, or an owner login)");
+    return true;
+  }
+
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[] }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean }) {
     const ownerId = this.requireOwner(p);
+    const typed = this.typedByOwner(p, body);
     const cb = this.custodialBot(p, body?.from_bot_id);
     const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
@@ -325,8 +342,8 @@ export class Platform {
     // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
     const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId);
     const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
-    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }));
-    return { conversation_id: conversationId, message };
+    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed);
+    return { conversation_id: conversationId, message, typed_by_owner: typed };
   }
 
   // ================================================================ attachments
@@ -1600,7 +1617,8 @@ export class Platform {
     };
   }
 
-  draftMessage(p: Principal, convId: string, env: Envelope) {
+  /** `typedByOwner` is internal: set only by sendAsMember after typedByOwner() authorised it, never from the envelope or text. */
+  draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false) {
     this.verifyEnvelope(p, env, "message.draft");
     const { botId, ownerId } = this.requireBot(p);
     assert(!env.conversation_id || env.conversation_id === convId, 400, "invalid_envelope", "conversation_id mismatch");
@@ -1649,19 +1667,19 @@ export class Platform {
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
     const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs);
-    this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
-      "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now());
+      "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0);
     for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
-    this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId });
+    this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
     this.refreshConversationStatus(convId);
     const rel = this.activeRelationship(botId, peer);
     if (this.settingsFor(rel.id, ownerId).auto_approve_chat && flags.length === 0 && !detectInjection(pl.text).suspected) {
       this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, "policy:auto_approve");
-      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, policy: { decision: "allow", reasons: ["owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
+      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(typedByOwner ? { typed_by_owner: true } : {}), policy: { decision: "allow", reasons: ["owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
   }
 
   private dlp(ownerId: string, pl: any) {
@@ -1704,6 +1722,7 @@ export class Platform {
       untrusted_content: { text: payload.text, structured: payload.structured ?? null },
       ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
       expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
+      ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
       security: { injection_suspected: inj.suspected }, turn: { count: turn, max: c.max_turns },
       sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
       platform_kid: this.platformKid, delivered_at: nowIso(),
@@ -1787,8 +1806,8 @@ export class Platform {
       .map((m) => {
         const content = J(m.delivered_payload) ?? J(m.payload);
         return m.sender_bot === viewerBot
-          ? { message_id: m.id, direction: "outbound", status: m.status, content, risk_flags: J(m.risk_flags, []), approval_id: m.status === "pending_approval" ? m.approval_id : undefined, created_at: m.created_at, delivered_at: m.delivered_at }
-          : { message_id: m.id, direction: "inbound", status: m.status, expects_reply: !!m.expects_reply, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", untrusted_content: { text: content.text, structured: content.structured }, security: { injection_suspected: J(m.injection, {}).suspected ?? false }, delivered_at: m.delivered_at };
+          ? { message_id: m.id, direction: "outbound", status: m.status, content, ...(m.typed_by_owner ? { typed_by_owner: true } : {}), risk_flags: J(m.risk_flags, []), approval_id: m.status === "pending_approval" ? m.approval_id : undefined, created_at: m.created_at, delivered_at: m.delivered_at }
+          : { message_id: m.id, direction: "inbound", status: m.status, expects_reply: !!m.expects_reply, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", ...(m.typed_by_owner ? { typed_by_owner: true } : {}), untrusted_content: { text: content.text, structured: content.structured }, security: { injection_suspected: J(m.injection, {}).suspected ?? false }, delivered_at: m.delivered_at };
       });
     const actions = this.all("SELECT * FROM actions WHERE conversation_id = ? ORDER BY created_at", convId)
       .filter((x) => x.actor_bot === viewerBot || ["executed", "failed"].includes(x.status))
@@ -2377,7 +2396,8 @@ export class Platform {
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
   }
 
-  draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string } = {}) {
+  draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean } = {}) {
+    const typed = this.typedByOwner(p, body);
     this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
@@ -2397,16 +2417,16 @@ export class Platform {
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     const snap = this.faceSnapshot(sender);
     const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId });
-    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms) VALUES (?,?,?,?,?,?,?,?)",
-      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs());
+    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner) VALUES (?,?,?,?,?,?,?,?,?)",
+      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs(), typed ? 1 : 0);
     this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
     const o = this.owner(sender.owner_id);
     if (o.auto_approve_face_rooms && flags.length === 0 && !detectInjection(text).suspected) {
       this.decideApproval({ kind: "owner", ownerId: sender.owner_id }, aprId, { decision: "approved" }, "policy:auto_approve");
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", id);
-      return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, from: snap };
+      return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, ...(typed ? { typed_by_owner: true } : {}), from: snap };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, from: snap };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typed ? { typed_by_owner: true } : {}), from: snap };
   }
 
   private deliverFaceRoomMessage(a: any, body: any) {
@@ -2426,12 +2446,14 @@ export class Platform {
     const ev = this.faceInsertEvent(d.room_id, "room.message", d.sender_bot, {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected }, edited_by_owner: body.decision === "approved_with_edits",
+      ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
     });
     this.run("UPDATE face_room_drafts SET status = 'delivered', event_seq = ? WHERE id = ?", ev.seq, d.id);
     this.faceEmitMembers(d.room_id, "face_room.message", {
       room_id: d.room_id, event_id: ev.id, event_cursor: ev.seq, message_id: d.id,
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected },
+      ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
     });
     this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
     this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
@@ -2445,6 +2467,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner"] };
   }
 }
