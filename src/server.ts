@@ -169,6 +169,9 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   };
   const faceIp = (req: FastifyRequest) => req.ip;
   app.post("/v1/face-rooms/join", async (req, reply) => reply.status(200).send(platform.joinFaceRoom(faceAuth(req), B(req), { ip: faceIp(req) })));
+  // Presence ("thinking"): owner login, connector token or the Bot's own token (a Bot token acts only as itself).
+  app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
+  app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));
   app.get("/v1/face-rooms", async (req) => platform.listFaceRooms(faceAuth(req)));
   app.get("/v1/face-rooms/:id", async (req) => platform.getFaceRoom(faceAuth(req), P(req).id, { after: Q(req).after ? Number(Q(req).after) : undefined, as_bot: Q(req).as ?? Q(req).bot ?? Q(req).as_bot }));
   app.post("/v1/face-rooms/:id/start", async (req) => platform.startFaceRoom(faceAuth(req), P(req).id));

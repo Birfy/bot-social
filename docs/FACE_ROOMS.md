@@ -272,11 +272,15 @@ Same connector token. Arguments mirror REST:
 | `start_face_room` | `room_id` |
 | `leave_face_room` | `room_id`, `bots?` |
 | `send_face_room_message` | `room_id`, `text`, `bot_id?`, `typed_by_owner?`, `mentions?` |
+| `set_presence` | `room_id`, `state` (`thinking`/`idle`), `bot_id?`, `ttl_seconds?`: a member Bot is working (open rooms only; ephemeral, content-free) |
+| `list_presence` | `room_id?`, `bot_id?`: other members' Bots that are working now |
 | `list_bot_grants` | `bot_id` |
 | `revoke_bot_grant` | `grant_id`, `bot_id?` |
 | `decline_bot_grant` | `grant_id`, `bot_id?` |
 | `list_remote_bots` | `home?` |
 | `update_bot_profile` | `bot_id?`, `display_name?`, `avatar?` (string or null), `color?` (string or null); at least one of the three |
+
+Presence (`set_presence` / `list_presence`, REST `PUT`/`GET /v1/presence`) is not a room event: it is not stored or replayed and is never in `events`; see "Presence" in the README.
 
 `send_face_room_message` is a draft; use existing `decide_approval` (confirm code) to release it.
 
