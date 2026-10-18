@@ -41,6 +41,12 @@ function checkPassword(pw: string, stored: string): boolean {
  * The core platform: identity, relationships, grants, conversations, approvals,
  * calendar capability (mock), events/webhooks and audit. HTTP / MCP layers are thin wrappers.
  */
+/** Parse a stored mentions column (JSON array of handles, or null). */
+function mentionsOf(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try { const v = JSON.parse(raw); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; }
+}
+
 export class Platform {
   db: Database.Database;
   audit: AuditLog;
@@ -329,10 +335,37 @@ export class Platform {
     return true;
   }
 
+  /**
+   * `mentions`: the Bot handles the sender says the line is addressed to (the composer's @ picks). Optional and
+   * backward compatible: absent, null and [] all mean "none". Validated, not trusted: a list of at most 8 handles
+   * (`@name.home`, 2-40 chars [a-z0-9._-]), normalised to lowercase `@handle`, deduplicated; anything else is a 400.
+   * The platform keeps it with the message and countersigns it; whether a receiver acts on it is its own rule.
+   */
+  private mentionList(raw: unknown): string[] {
+    if (raw === undefined || raw === null) return [];
+    assert(Array.isArray(raw), 400, "invalid_request", "mentions must be an array of Bot handles");
+    assert(raw.length <= 8, 400, "invalid_request", "mentions: at most 8 handles");
+    const out: string[] = [];
+    for (const item of raw) {
+      assert(typeof item === "string" && /^@?[a-z0-9._-]{2,40}$/i.test(item), 400, "invalid_request", "mentions: each item is a Bot handle (2-40 chars [a-z0-9._-], optional leading @)");
+      const handle = "@" + item.replace(/^@/, "").toLowerCase();
+      if (!out.includes(handle)) out.push(handle);
+    }
+    return out;
+  }
+
+  /** The handles of `mentions` that are current members of the face room right now (lowercase `@handle`). */
+  private roomMentions(roomId: string, mentions: string[]): string[] {
+    if (!mentions.length) return [];
+    const inRoom = new Set(this.all("SELECT handle FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((r) => "@" + String(r.handle).replace(/^@/, "").toLowerCase()));
+    return mentions.filter((h) => inRoom.has(h));
+  }
+
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null }) {
     const ownerId = this.requireOwner(p);
     const typed = this.typedByOwner(p, body);
+    const mentions = this.mentionList(body?.mentions);
     const cb = this.custodialBot(p, body?.from_bot_id);
     const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
@@ -342,7 +375,7 @@ export class Platform {
     // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
     const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId);
     const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
-    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed);
+    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions);
     return { conversation_id: conversationId, message, typed_by_owner: typed };
   }
 
@@ -1479,7 +1512,7 @@ export class Platform {
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       const pl = J(m.payload);
-      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
+      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
     } else if (a.kind === "action") {
       const x = this.get("SELECT * FROM actions WHERE id = ?", a.subject_id);
       card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
@@ -1492,7 +1525,11 @@ export class Platform {
       card.grant_request = { relationship_id: a.subject_id, ...J(a.note, {}), from: this.publicBot(this.bot(a.bot_id)) };
     } else if (a.kind === "face_room_message") {
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
-      if (d) card.face_room = { room_id: d.room_id, message_id: d.id, payload: J(d.payload), status: d.status };
+      if (d) {
+        // What the owner is approving includes whom the line is addressed to; only handles still in the room (as at delivery).
+        const listed = d.status === "pending_approval" ? this.roomMentions(d.room_id, mentionsOf(d.mentions)) : mentionsOf(d.mentions);
+        card.face_room = { room_id: d.room_id, message_id: d.id, payload: J(d.payload), ...(listed.length ? { mentions: listed } : {}), status: d.status };
+      }
     }
     if (a.conversation_id) {
       const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
@@ -1618,7 +1655,7 @@ export class Platform {
   }
 
   /** `typedByOwner` is internal: set only by sendAsMember after typedByOwner() authorised it, never from the envelope or text. */
-  draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false) {
+  draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false, mentions: string[] = []) {
     this.verifyEnvelope(p, env, "message.draft");
     const { botId, ownerId } = this.requireBot(p);
     assert(!env.conversation_id || env.conversation_id === convId, 400, "invalid_envelope", "conversation_id mismatch");
@@ -1666,10 +1703,13 @@ export class Platform {
     const id = newId("msg");
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
+    // Only the two ends of this conversation can be mentioned in it.
+    const ends = ["@" + String(this.bot(botId).handle).replace(/^@/, "").toLowerCase(), "@" + String(peerB.handle).replace(/^@/, "").toLowerCase()];
+    const kept = mentions.filter((h) => ends.includes(h));
     const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs);
-    this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
-      "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0);
+      "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
     for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
     this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
@@ -1677,9 +1717,9 @@ export class Platform {
     const rel = this.activeRelationship(botId, peer);
     if (this.settingsFor(rel.id, ownerId).auto_approve_chat && flags.length === 0 && !detectInjection(pl.text).suspected) {
       this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, "policy:auto_approve");
-      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(typedByOwner ? { typed_by_owner: true } : {}), policy: { decision: "allow", reasons: ["owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
+      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
   }
 
   private dlp(ownerId: string, pl: any) {
@@ -1706,6 +1746,8 @@ export class Platform {
     this.activeRelationship(sender.id, recipient.id);
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
+    // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
+    if (edited && m.mentions) { this.run("UPDATE messages SET mentions = NULL WHERE id = ?", m.id); m.mentions = null; }
     if (edited) {
       payload = { ...payload, ...body.edited_payload, ...(payload.attachments ? { attachments: payload.attachments } : {}) };
       if (!payload.attachments) delete payload.attachments;
@@ -1723,6 +1765,7 @@ export class Platform {
       ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
       expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
       ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
+      ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}),
       security: { injection_suspected: inj.suspected }, turn: { count: turn, max: c.max_turns },
       sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
       platform_kid: this.platformKid, delivered_at: nowIso(),
@@ -1806,8 +1849,8 @@ export class Platform {
       .map((m) => {
         const content = J(m.delivered_payload) ?? J(m.payload);
         return m.sender_bot === viewerBot
-          ? { message_id: m.id, direction: "outbound", status: m.status, content, ...(m.typed_by_owner ? { typed_by_owner: true } : {}), risk_flags: J(m.risk_flags, []), approval_id: m.status === "pending_approval" ? m.approval_id : undefined, created_at: m.created_at, delivered_at: m.delivered_at }
-          : { message_id: m.id, direction: "inbound", status: m.status, expects_reply: !!m.expects_reply, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", ...(m.typed_by_owner ? { typed_by_owner: true } : {}), untrusted_content: { text: content.text, structured: content.structured }, security: { injection_suspected: J(m.injection, {}).suspected ?? false }, delivered_at: m.delivered_at };
+          ? { message_id: m.id, direction: "outbound", status: m.status, content, ...(m.typed_by_owner ? { typed_by_owner: true } : {}), ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), risk_flags: J(m.risk_flags, []), approval_id: m.status === "pending_approval" ? m.approval_id : undefined, created_at: m.created_at, delivered_at: m.delivered_at }
+          : { message_id: m.id, direction: "inbound", status: m.status, expects_reply: !!m.expects_reply, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", ...(m.typed_by_owner ? { typed_by_owner: true } : {}), ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), untrusted_content: { text: content.text, structured: content.structured }, security: { injection_suspected: J(m.injection, {}).suspected ?? false }, delivered_at: m.delivered_at };
       });
     const actions = this.all("SELECT * FROM actions WHERE conversation_id = ? ORDER BY created_at", convId)
       .filter((x) => x.actor_bot === viewerBot || ["executed", "failed"].includes(x.status))
@@ -2396,8 +2439,9 @@ export class Platform {
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
   }
 
-  draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean } = {}) {
+  draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean; mentions?: string[] | null } = {}) {
     const typed = this.typedByOwner(p, body);
+    const mentions = this.mentionList(body?.mentions);
     this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
@@ -2414,19 +2458,22 @@ export class Platform {
     if (this.get("SELECT COUNT(*) n FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?", sender.id, hourAgo).n >= LIMITS.ratePerBotPerHour)
       throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
     const id = newId("fmd");
+    // Only people in the room can be mentioned in it; handles that are not (or no longer) members are dropped.
+    // Checked again when the line is delivered, since a member can leave while it waits for approval.
+    const kept = this.roomMentions(roomId, mentions);
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     const snap = this.faceSnapshot(sender);
     const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId });
-    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner) VALUES (?,?,?,?,?,?,?,?,?)",
-      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs(), typed ? 1 : 0);
+    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs(), typed ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
     this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
     const o = this.owner(sender.owner_id);
     if (o.auto_approve_face_rooms && flags.length === 0 && !detectInjection(text).suspected) {
       this.decideApproval({ kind: "owner", ownerId: sender.owner_id }, aprId, { decision: "approved" }, "policy:auto_approve");
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", id);
-      return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, ...(typed ? { typed_by_owner: true } : {}), from: snap };
+      return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typed ? { typed_by_owner: true } : {}), from: snap };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
   }
 
   private deliverFaceRoomMessage(a: any, body: any) {
@@ -2439,6 +2486,10 @@ export class Platform {
       const blocked = this.dlp(this.bot(d.sender_bot).owner_id, payload).filter((f) => f.action === "block");
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
+    const edited = body.decision === "approved_with_edits" && !!body.edited_payload; // the list described the typed text; an edited line carries none
+    // Membership is re-checked now: a mentioned Bot that left while the line waited is dropped. What is stored is what is delivered.
+    const listed = edited ? [] : this.roomMentions(d.room_id, mentionsOf(d.mentions));
+    if (d.mentions) this.run("UPDATE face_room_drafts SET mentions = ? WHERE id = ?", listed.length ? JSON.stringify(listed) : null, d.id);
     const still = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", d.room_id, d.sender_bot);
     assert(still, 409, "not_a_member", "sender is no longer in the room");
     const snap = this.faceMemberPublic(still);
@@ -2447,6 +2498,7 @@ export class Platform {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected }, edited_by_owner: body.decision === "approved_with_edits",
       ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
+      ...(listed.length ? { mentions: listed } : {}),
     });
     this.run("UPDATE face_room_drafts SET status = 'delivered', event_seq = ? WHERE id = ?", ev.seq, d.id);
     this.faceEmitMembers(d.room_id, "face_room.message", {
@@ -2454,6 +2506,7 @@ export class Platform {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected },
       ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
+      ...(listed.length ? { mentions: listed } : {}),
     });
     this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
     this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
@@ -2467,6 +2520,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions"] };
   }
 }
