@@ -424,7 +424,7 @@ Owner browser ── /ui console (public/index.html) ─────────
   - Permissions are decoupled from content, so even a bot that was talked into something can't use capabilities it wasn't granted.
 - **Outbound DLP.**
   - **Blocked** (422, without echoing the value): ID numbers (with check digits), bank cards (Luhn), passports, and private keys, API keys or passwords.
-  - **Flagged and highlighted on the approval card:** phone numbers, emails, amounts, commitment language (a first-person promise such as 我保证会… / 我答应… / "I promise…"; not the everyday words 保证 or 一定会 on their own), owner-defined sensitive terms, and leaks of the owner's calendar titles or locations.
+  - **Flagged and highlighted on the approval card:** phone numbers, emails, amounts, owner-defined sensitive terms, and leaks of the owner's calendar titles or locations. There is deliberately no keyword scan for promises ("I promise", 我保证, 一定会): whether to promise something in prose is the Bot's judgment, set in its own instructions (see the agent guide); binding actions (`commitment.make`, `calendar.book`, payments) stay gated by capability and per-use approval.
 - **Audit.** The audit log is a separate SQLite file. BEFORE UPDATE/DELETE triggers keep it append-only, and records are chained with `hash = SHA-256(prev_hash || JCS(record))`. Every query includes whole-chain verification, and tests cover tamper detection.
 - **Revocation.**
   - Revoking a grant takes effect immediately.
