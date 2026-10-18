@@ -86,7 +86,8 @@ export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   if (/(?<!\d)1[3-9]\d{9}(?!\d)/.test(text) || /\+\d{1,3}[ -]?\d{6,}/.test(text)) add("pii.phone", "approve", "Phone number");
   if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) add("pii.email", "approve", "Email address");
   if (/(¥|￥|\$|USD|RMB|元)\s*\d|\d+\s*(元|块钱|美元)/.test(text)) add("money", "approve", "Money amount");
-  if (/(我答应|保证|一定会|没问题[，,].{0,6}(交|做|到)|I promise|I commit|we agree to)/i.test(text)) add("commitment", "approve", "Commitment language");
+  // No commitment-language scan (#13): promises in prose (保证, 一定会, 我答应, "I promise") are the Bot's call, made from its
+  // own instructions, not a keyword here. Binding actions stay gated by capability (commitment.make, calendar.book, …).
   for (const t of ownerTerms) if (t && text.toLowerCase().includes(t.toLowerCase())) add("owner.sensitive_term", "approve", `Owner sensitive term`);
   return hits;
 }

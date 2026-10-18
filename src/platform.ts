@@ -1896,7 +1896,7 @@ export class Platform {
       assert(inv, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
       summary = `Accept @${peerB.handle}'s meeting invite at ${isoInTz(Date.parse(inv.start), tz).slice(0, 16).replace("T", " ")} (${tz})?`;
     }
-    const dlpFlags = this.dlp(ownerId, { text: [params.title, pl.justification].filter(Boolean).join(" ") }).filter((f) => f.category !== "commitment");
+    const dlpFlags = this.dlp(ownerId, { text: [params.title, pl.justification].filter(Boolean).join(" ") });
     assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "DLP blocked this action draft");
     const id = newId("act");
     const reasons = [...def.reasons];
