@@ -80,7 +80,7 @@ test("mentions validation: wrong shapes are a 400 on MCP and REST; null and [] m
   assert.deepEqual(restOk.body.message.mentions, [coder.handle.toLowerCase()]);
 });
 
-test("an owner edit at approval drops the mention list (it described the original text)", async (t) => {
+test("an owner edit at approval drops the mention list everywhere: delivery, stored copy, both conversation views", async (t) => {
   const { a, A, B, chief, coder, approve } = await pair(t);
   const sent = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "original", mentions: [coder.handle] });
   await approve(a.owner_id, sent.message.approval_id, { decision: "approved_with_edits", edited_payload: { text: "rewritten", mentions: ["@coder.evil"] } });
@@ -88,6 +88,26 @@ test("an owner edit at approval drops the mention list (it described the origina
   assert.equal(ev.length, 1);
   assert.match(ev[0].untrusted_content, /rewritten/);
   assert.equal("mentions" in ev[0], false);
+  for (const view of [await B("get_conversation", { conversation_id: sent.conversation_id }), await A("get_conversation", { conversation_id: sent.conversation_id })]) {
+    assert.equal(view.messages.length, 1);
+    assert.equal("mentions" in view.messages[0], false, "the stored list is gone, so no view shows it");
+  }
+});
+
+test("the approval card shows the mentions the owner is approving (direct message and face room)", async (t) => {
+  const { a, A, B, chief, coder } = await pair(t);
+  const dm = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "card check", mentions: [coder.handle] });
+  const room = await A("join_face_room", { code: "717171", bots: [chief.bot_id] });
+  await B("join_face_room", { code: "717171", bots: [coder.bot_id] });
+  await A("start_face_room", { room_id: room.room_id });
+  const fr = await A("send_face_room_message", { room_id: room.room_id, text: "room card", bot_id: chief.bot_id, mentions: [coder.handle] });
+  const plain = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "no list on this one" });
+  const cards = (await A("list_approvals", {})).approvals ?? [];
+  const byId = (id: string) => cards.find((c: any) => c.approval_id === id);
+  assert.deepEqual(byId(dm.message.approval_id).message.mentions, [coder.handle.toLowerCase()]);
+  assert.deepEqual(byId(fr.approval_id).face_room.mentions, [coder.handle.toLowerCase()]);
+  assert.equal("mentions" in byId(plain.message.approval_id).message, false);
+  void a;
 });
 
 test("face room: mentions are kept to current members and reach room events, member pushes and get_face_room", async (t) => {
@@ -126,6 +146,37 @@ test("face room: mentions are kept to current members and reach room events, mem
   assert.equal(after.length, 3);
   assert.equal("mentions" in after[2], false);
   void b;
+});
+
+test("face room: a mentioned Bot that leaves while the line waits is dropped at delivery, from the card, the events and the stored copy", async (t) => {
+  const { s, a, A, B, chief, coder, approve } = await pair(t);
+  const room = await A("join_face_room", { code: "818181", bots: [chief.bot_id] });
+  await B("join_face_room", { code: "818181", bots: [coder.bot_id] });
+  await A("start_face_room", { room_id: room.room_id });
+  const sent = await A("send_face_room_message", { room_id: room.room_id, text: "Coder and Chief", bot_id: chief.bot_id, mentions: [coder.handle, chief.handle] });
+  assert.deepEqual(sent.mentions, [coder.handle.toLowerCase(), chief.handle.toLowerCase()]);
+  await B("leave_face_room", { room_id: room.room_id });
+  const card = ((await A("list_approvals", {})).approvals ?? []).find((c: any) => c.approval_id === sent.approval_id);
+  assert.deepEqual(card.face_room.mentions, [chief.handle.toLowerCase()], "the card shows who is still in the room");
+  await approve(a.owner_id, sent.approval_id);
+  const msg = (await A("get_face_room", { room_id: room.room_id })).events.filter((e: any) => e.type === "room.message");
+  assert.equal(msg.length, 1);
+  assert.deepEqual(msg[0].mentions, [chief.handle.toLowerCase()]);
+  const pushed = (await A("list_inbox", { bot_id: chief.bot_id, peek: true })).events.filter((e: any) => e.event_type === "face_room.message");
+  assert.ok(pushed.every((e: any) => !(e.mentions ?? []).includes(coder.handle.toLowerCase())));
+  const stored: any = s.platform.db.prepare("SELECT mentions FROM face_room_drafts WHERE id = ?").get(sent.message_id);
+  assert.deepEqual(JSON.parse(stored.mentions), [chief.handle.toLowerCase()]);
+});
+
+test("face room: an owner edit clears the stored list too", async (t) => {
+  const { s, a, A, B, chief, coder, approve } = await pair(t);
+  const room = await A("join_face_room", { code: "919191", bots: [chief.bot_id] });
+  await B("join_face_room", { code: "919191", bots: [coder.bot_id] });
+  await A("start_face_room", { room_id: room.room_id });
+  const sent = await A("send_face_room_message", { room_id: room.room_id, text: "orig", bot_id: chief.bot_id, mentions: [coder.handle] });
+  await approve(a.owner_id, sent.approval_id, { decision: "approved_with_edits", edited_payload: { text: "changed" } });
+  const stored: any = s.platform.db.prepare("SELECT mentions FROM face_room_drafts WHERE id = ?").get(sent.message_id);
+  assert.equal(stored.mentions, null);
 });
 
 test("a Bot's own token can send a mention list in a face room (not attested: the host decides what to trust)", async (t) => {

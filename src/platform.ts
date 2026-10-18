@@ -354,6 +354,13 @@ export class Platform {
     return out;
   }
 
+  /** The handles of `mentions` that are current members of the face room right now (lowercase `@handle`). */
+  private roomMentions(roomId: string, mentions: string[]): string[] {
+    if (!mentions.length) return [];
+    const inRoom = new Set(this.all("SELECT handle FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((r) => "@" + String(r.handle).replace(/^@/, "").toLowerCase()));
+    return mentions.filter((h) => inRoom.has(h));
+  }
+
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
   sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null }) {
     const ownerId = this.requireOwner(p);
@@ -1505,7 +1512,7 @@ export class Platform {
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       const pl = J(m.payload);
-      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
+      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
     } else if (a.kind === "action") {
       const x = this.get("SELECT * FROM actions WHERE id = ?", a.subject_id);
       card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
@@ -1518,7 +1525,11 @@ export class Platform {
       card.grant_request = { relationship_id: a.subject_id, ...J(a.note, {}), from: this.publicBot(this.bot(a.bot_id)) };
     } else if (a.kind === "face_room_message") {
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
-      if (d) card.face_room = { room_id: d.room_id, message_id: d.id, payload: J(d.payload), status: d.status };
+      if (d) {
+        // What the owner is approving includes whom the line is addressed to; only handles still in the room (as at delivery).
+        const listed = d.status === "pending_approval" ? this.roomMentions(d.room_id, mentionsOf(d.mentions)) : mentionsOf(d.mentions);
+        card.face_room = { room_id: d.room_id, message_id: d.id, payload: J(d.payload), ...(listed.length ? { mentions: listed } : {}), status: d.status };
+      }
     }
     if (a.conversation_id) {
       const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
@@ -1735,6 +1746,8 @@ export class Platform {
     this.activeRelationship(sender.id, recipient.id);
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
+    // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
+    if (edited && m.mentions) { this.run("UPDATE messages SET mentions = NULL WHERE id = ?", m.id); m.mentions = null; }
     if (edited) {
       payload = { ...payload, ...body.edited_payload, ...(payload.attachments ? { attachments: payload.attachments } : {}) };
       if (!payload.attachments) delete payload.attachments;
@@ -1752,7 +1765,7 @@ export class Platform {
       ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
       expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
       ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
-      ...(mentionsOf(m.mentions).length && !edited ? { mentions: mentionsOf(m.mentions) } : {}),
+      ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}),
       security: { injection_suspected: inj.suspected }, turn: { count: turn, max: c.max_turns },
       sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
       platform_kid: this.platformKid, delivered_at: nowIso(),
@@ -2446,8 +2459,8 @@ export class Platform {
       throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
     const id = newId("fmd");
     // Only people in the room can be mentioned in it; handles that are not (or no longer) members are dropped.
-    const inRoom = new Set(this.all("SELECT handle FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((r) => "@" + String(r.handle).replace(/^@/, "").toLowerCase()));
-    const kept = mentions.filter((h) => inRoom.has(h));
+    // Checked again when the line is delivered, since a member can leave while it waits for approval.
+    const kept = this.roomMentions(roomId, mentions);
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     const snap = this.faceSnapshot(sender);
     const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId });
@@ -2474,6 +2487,9 @@ export class Platform {
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
     const edited = body.decision === "approved_with_edits" && !!body.edited_payload; // the list described the typed text; an edited line carries none
+    // Membership is re-checked now: a mentioned Bot that left while the line waited is dropped. What is stored is what is delivered.
+    const listed = edited ? [] : this.roomMentions(d.room_id, mentionsOf(d.mentions));
+    if (d.mentions) this.run("UPDATE face_room_drafts SET mentions = ? WHERE id = ?", listed.length ? JSON.stringify(listed) : null, d.id);
     const still = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", d.room_id, d.sender_bot);
     assert(still, 409, "not_a_member", "sender is no longer in the room");
     const snap = this.faceMemberPublic(still);
@@ -2482,7 +2498,7 @@ export class Platform {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected }, edited_by_owner: body.decision === "approved_with_edits",
       ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
-      ...(mentionsOf(d.mentions).length && !edited ? { mentions: mentionsOf(d.mentions) } : {}),
+      ...(listed.length ? { mentions: listed } : {}),
     });
     this.run("UPDATE face_room_drafts SET status = 'delivered', event_seq = ? WHERE id = ?", ev.seq, d.id);
     this.faceEmitMembers(d.room_id, "face_room.message", {
@@ -2490,7 +2506,7 @@ export class Platform {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
       security: { injection_suspected: inj.suspected },
       ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
-      ...(mentionsOf(d.mentions).length && !edited ? { mentions: mentionsOf(d.mentions) } : {}),
+      ...(listed.length ? { mentions: listed } : {}),
     });
     this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
     this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
