@@ -39,6 +39,9 @@ export function openDb(path: string): Database.Database {
   if (!mcols.includes("typed_by_owner")) db.exec("ALTER TABLE messages ADD COLUMN typed_by_owner INTEGER NOT NULL DEFAULT 0");
   const dcols = (db.prepare("PRAGMA table_info(face_room_drafts)").all() as { name: string }[]).map((c) => c.name);
   if (!dcols.includes("typed_by_owner")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN typed_by_owner INTEGER NOT NULL DEFAULT 0");
+  // Optional sender-declared mention list (JSON array of Bot handles), null when absent.
+  if (!mcols.includes("mentions")) db.exec("ALTER TABLE messages ADD COLUMN mentions TEXT");
+  if (!dcols.includes("mentions")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN mentions TEXT");
   // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
   // (default deny); a legacy 'home' value is ignored and never covers members.
   const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);
