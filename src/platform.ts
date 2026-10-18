@@ -10,6 +10,7 @@ import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANT
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-look.js";
+import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
   FaceRoomLimits, isFaceCode, joinSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
@@ -59,6 +60,8 @@ export class Platform {
   private kmsKey: Buffer;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
+  /** Ephemeral "thinking" signals (memory only, see presence.ts). */
+  readonly presence = new PresenceStore();
   nowMs: () => number;
   constructor(opts: PlatformOptions = {}) {
     this.attachmentLimits = { ...DEFAULT_ATTACHMENT_LIMITS, ...Object.fromEntries(Object.entries(opts.attachments ?? {}).filter(([, v]) => typeof v === "number" && v > 0)) };
@@ -2519,7 +2522,99 @@ export class Platform {
     return { message_id: d.id, status: "rejected" };
   }
 
+  // ================================================================ presence ("thinking")
+  /** The Bot a presence call acts as: an owner names one of theirs (or has one), a Bot token is only itself. */
+  private presenceBot(p: Principal, ref?: unknown) {
+    const want = String(ref ?? "").replace(/^@/, "");
+    let b: any;
+    if (p.kind === "bot") {
+      b = this.bot(p.botId);
+      assert(!want || want === b.id || want.toLowerCase() === String(b.handle).replace(/^@/, "").toLowerCase(), 403, "forbidden", "a bot token can only act as itself");
+    } else {
+      const ownerId = this.requireOwner(p);
+      b = want
+        ? this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", want, want)
+        : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
+      assert(b, 404, "bot_not_found", "no such bot");
+      assert(b.owner_id === ownerId, 403, "forbidden", "not your bot");
+    }
+    assert(b.status === "active", 403, "bot_frozen", "bot is frozen (emergency stop)");
+    return b;
+  }
+
+  /**
+   * Say that one of my Bots is thinking toward a peer Bot (`to`) or a face room (`room_id`), or that it stopped.
+   * Ephemeral and content-free. Allowed only where the Bot could already send: an active relationship, or an open room it is in.
+   */
+  setPresence(p: Principal, body: { bot_id?: string; state?: string; to?: string; room_id?: string; ttl_seconds?: number } = {}) {
+    const state = body?.state;
+    assert(state === "thinking" || state === "idle", 400, "invalid_request", "state must be \"thinking\" or \"idle\"");
+    const to = body?.to === undefined || body?.to === null ? "" : String(body.to);
+    const roomId = body?.room_id === undefined || body?.room_id === null ? "" : String(body.room_id);
+    assert(!!to !== !!roomId, 400, "invalid_request", "exactly one of to (a Bot handle) or room_id is required");
+    let ttl = PRESENCE_DEFAULT_TTL_S;
+    if (body?.ttl_seconds !== undefined && body?.ttl_seconds !== null) {
+      assert(typeof body.ttl_seconds === "number" && Number.isFinite(body.ttl_seconds), 400, "invalid_request", "ttl_seconds must be a number");
+      ttl = Math.min(PRESENCE_MAX_TTL_S, Math.max(PRESENCE_MIN_TTL_S, Math.round(body.ttl_seconds)));
+    }
+    const me = this.presenceBot(p, body?.bot_id);
+    let target: { toBot?: string; roomId?: string };
+    if (to) {
+      const peer = this.get("SELECT * FROM bots WHERE (handle = ? OR id = ?) AND status = 'active'", to.replace(/^@/, ""), to);
+      assert(peer, 404, "bot_not_found", "no such remote bot");
+      // Same gate as sending, but a refused signal is not an audit event: it is not content and can repeat.
+      assert(this.findActiveRelationship(me.id, peer.id), 403, "no_relationship", "no active relationship between these bots");
+      target = { toBot: peer.id };
+    } else {
+      this.advanceFaceRooms();
+      const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+      const member = room && this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", roomId, me.id);
+      assert(room && member, 404, "face_room_not_found", "no such room");
+      assert(room.status === "open", 409, room.status === "closed" ? "room_closed" : "room_not_started", `room is ${room.status}`);
+      target = { roomId };
+    }
+    assert(this.presence.allow(me.id, this.nowMs()), 429, "rate_limited", `presence rate limit (${PRESENCE_WRITES_PER_MIN}/min per bot)`, { retry_after: 10 });
+    if (state === "idle") { this.presence.clear({ botId: me.id, ...target }); return { ok: true, state: "idle" }; }
+    const expires = this.presence.set({ botId: me.id, ...target, state: "thinking" }, ttl * 1000, this.nowMs());
+    return { ok: true, state: "thinking", expires_at: new Date(expires).toISOString() };
+  }
+
+  /**
+   * Who is thinking toward me: other people's Bots that are thinking toward one of my Bots (direct) or in a face room I am in.
+   * Never my own Bots, never anyone I could not already hear from; relationship and membership are checked now, not when it was set.
+   */
+  listPresence(p: Principal, opts: { bot_id?: string; room_id?: string } = {}) {
+    const viewerOwner = p.ownerId;
+    const mine: any[] = p.kind === "bot"
+      ? [this.presenceBot(p, opts?.bot_id)]
+      : opts?.bot_id ? [this.presenceBot(p, opts.bot_id)] : this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active'", viewerOwner);
+    const mineIds = new Set(mine.map((b) => b.id as string));
+    const handle = (h: string) => "@" + String(h).replace(/^@/, "");
+    const out: any[] = [];
+    const now = this.nowMs();
+    this.advanceFaceRooms();
+    for (const e of this.presence.live(now)) {
+      const writer = this.get("SELECT * FROM bots WHERE id = ?", e.botId);
+      if (!writer || writer.status !== "active" || writer.owner_id === viewerOwner) continue;
+      if (e.toBot) {
+        if (opts?.room_id || !mineIds.has(e.toBot) || !this.findActiveRelationship(e.botId, e.toBot)) continue;
+        const peer = this.bot(e.toBot);
+        out.push({ scope: "direct", bot: { handle: handle(writer.handle), display_name: sanitizePeerName(writer.display_name, "Bot") }, to: handle(peer.handle), state: e.state, expires_at: new Date(e.expiresMs).toISOString() });
+      } else if (e.roomId) {
+        if (opts?.room_id && opts.room_id !== e.roomId) continue;
+        const room = this.get("SELECT status FROM face_rooms WHERE id = ?", e.roomId);
+        const member = room?.status === "open" && this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", e.roomId, e.botId);
+        if (!member) continue;
+        const sees = this.all("SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR added_by_owner_id = ?)", e.roomId, viewerOwner, viewerOwner)
+          .some((m: any) => p.kind !== "bot" || m.bot_id === p.botId);
+        if (!sees) continue;
+        out.push({ scope: "face_room", room_id: e.roomId, bot: { handle: handle(member.handle), display_name: sanitizePeerName(member.display_name, "Bot") }, state: e.state, expires_at: new Date(e.expiresMs).toISOString() });
+      }
+    }
+    return { presence: out, server_time: this.ts() };
+  }
+
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence"] };
   }
 }

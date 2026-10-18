@@ -275,6 +275,14 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     description: "Draft a message to a face-to-face room." + FACE_SEND,
     inputSchema: { room_id: z.string(), text: z.string().min(1), bot_id: z.string().optional(), typed_by_owner: TYPED, mentions: MENTIONS }, annotations: WRITE,
   }, wrap((a) => tagged(() => platform.draftFaceRoomMessage(p, a.room_id, a))));
+  server.registerTool("set_presence", {
+    description: "Say that one of your Bots is thinking (state=thinking) toward a peer Bot (to) or a face room (room_id), or that it stopped (idle). Ephemeral and content-free: only the Bot's handle and state reach the other side, it expires after ttl_seconds (default 20, 5-60) and is never stored. Allowed only where the Bot could already send (active relationship, or an open room it is in). Send thinking again every ~10 s while it works; at most 30 writes/min per Bot.",
+    inputSchema: { state: z.enum(["thinking", "idle"]), to: z.string().optional().describe("Peer Bot handle (direct chat). Exactly one of to or room_id."), room_id: z.string().optional(), bot_id: z.string().optional(), ttl_seconds: z.number().optional() }, annotations: { ...WRITE, openWorldHint: false },
+  }, wrap((a) => platform.setPresence(p, a)));
+  server.registerTool("list_presence", {
+    description: "Who is thinking toward you right now: other people's Bots that are thinking toward one of your Bots or in a face room you are in. Handle, display name and state only; entries expire on their own. Never your own Bots." + PEER,
+    inputSchema: { bot_id: z.string().optional(), room_id: z.string().optional() }, annotations: READ,
+  }, wrap((a) => platform.listPresence(p, a)));
   return server;
 }
 
