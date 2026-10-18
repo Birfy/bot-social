@@ -80,11 +80,12 @@ function cnIdValid(id: string): boolean {
  * everyday replies for approval. Only a first-person promise counts: 我/我们/咱们/本人, optionally with a
  * modal or "to you" (在此, 郑重, 一定, 绝对, 可以, 能, 会, 将, 向你), then 保证/承诺, or 我(们)一定会/必定会 + a clause.
  * Not flagged: 保证 without a first-person subject, "我来保证…" / "我负责保证…" (taking charge, not promising),
- * past or negated forms (我保证了/我保证过/我不保证), and 保证金/保证书/保证人.
+ * past or negated forms (我保证了/我保证过这个接口/我不保证), and the nouns 保证金/保证书/承诺书/保证人. A clause that merely starts
+ * with one of those characters is still a promise: 我保证过两天交付, 我承诺书面回复, 我保证人员安全.
  * 我答应 and "没问题，…交/做/到" are kept as they were; English phrases are unchanged.
  */
 const COMMITMENT = new RegExp([
-  "(?:我们?|咱们|本人)(?:(?:在此|郑重|一定|绝对|可以|能够?|会|将|向[你您]们?){0,2})(?:保证|承诺)(?![了过金书人])",
+  "(?:我们?|咱们|本人)(?:(?:在此|郑重|一定|绝对|可以|能够?|会|将|向[你您]们?){0,2})(?:保证|承诺)(?!了|金|书(?!面)|人(?![人员家])|过(?!两|几|一|半|数|十|[二三四五六七八九]|\\d|会|阵|些|天|周|月|年|个))",
   "(?:我们?|咱们|本人)(?:一定|必定)会",
   "我答应",
   "没问题[，,].{0,6}(?:交|做|到)",

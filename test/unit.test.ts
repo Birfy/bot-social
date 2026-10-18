@@ -57,6 +57,8 @@ test("DLP commitment: only a first-person promise is flagged, ordinary 保证 / 
     "我保证过这个接口不变",
     "保证金已经付过了",
     "我们保证书的模板在附件里",
+    "这份承诺书模板在附件里",
+    "保证人需要签字",
   ]) assert.equal(flagged(t), false, t);
   // Genuine promises to the other side still need the owner.
   for (const t of [
@@ -68,6 +70,10 @@ test("DLP commitment: only a first-person promise is flagged, ordinary 保证 / 
     "我在此郑重承诺赔偿损失",
     "我一定会按时交付",
     "我们必定会修复这个问题",
+    "我保证过两天交付",
+    "我保证过几天给你结果",
+    "我承诺书面回复",
+    "我保证人员安全",
     "我答应周三交付",
     "没问题，周三交",
     "I promise to ship it on Friday",
