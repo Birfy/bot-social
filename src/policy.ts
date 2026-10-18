@@ -74,6 +74,23 @@ function cnIdValid(id: string): boolean {
   return c[s % 11] === id[17].toUpperCase();
 }
 
+/**
+ * Commitment language: the sender promising something in the first person.
+ * Chinese 保证 / 承诺 / 一定会 are ordinary words ("专门负责保证代码质量", "他一定会来"), so a bare match held
+ * everyday replies for approval. Only a first-person promise counts: 我/我们/咱们/本人, optionally with a
+ * modal or "to you" (在此, 郑重, 一定, 绝对, 可以, 能, 会, 将, 向你), then 保证/承诺, or 我(们)一定会/必定会 + a clause.
+ * Not flagged: 保证 without a first-person subject, "我来保证…" / "我负责保证…" (taking charge, not promising),
+ * past or negated forms (我保证了/我保证过/我不保证), and 保证金/保证书/保证人.
+ * 我答应 and "没问题，…交/做/到" are kept as they were; English phrases are unchanged.
+ */
+const COMMITMENT = new RegExp([
+  "(?:我们?|咱们|本人)(?:(?:在此|郑重|一定|绝对|可以|能够?|会|将|向[你您]们?){0,2})(?:保证|承诺)(?![了过金书人])",
+  "(?:我们?|咱们|本人)(?:一定|必定)会",
+  "我答应",
+  "没问题[，,].{0,6}(?:交|做|到)",
+  "I promise|I commit|we agree to",
+].join("|"), "i");
+
 export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   const hits: DlpHit[] = [];
   const add = (category: string, action: DlpHit["action"], label: string) => { if (!hits.some((h) => h.category === category)) hits.push({ category, action, label }); };
@@ -86,7 +103,7 @@ export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   if (/(?<!\d)1[3-9]\d{9}(?!\d)/.test(text) || /\+\d{1,3}[ -]?\d{6,}/.test(text)) add("pii.phone", "approve", "Phone number");
   if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) add("pii.email", "approve", "Email address");
   if (/(¥|￥|\$|USD|RMB|元)\s*\d|\d+\s*(元|块钱|美元)/.test(text)) add("money", "approve", "Money amount");
-  if (/(我答应|保证|一定会|没问题[，,].{0,6}(交|做|到)|I promise|I commit|we agree to)/i.test(text)) add("commitment", "approve", "Commitment language");
+  if (COMMITMENT.test(text)) add("commitment", "approve", "Commitment language");
   for (const t of ownerTerms) if (t && text.toLowerCase().includes(t.toLowerCase())) add("owner.sensitive_term", "approve", `Owner sensitive term`);
   return hits;
 }
