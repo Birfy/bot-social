@@ -242,6 +242,10 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     wrap((a) => platform.remoteBots(p, a.home)));
   server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS, typed_by_owner: TYPED, mentions: MENTIONS }, annotations: WRITE },
     wrap((a) => tagged(() => platform.sendAsMember(p, a))));
+  server.registerTool("report_not_delivered", {
+    description: "FlyBot: tell the sender that a message delivered to one of your bots did not reach it (reason not_shared_yet: your home had not recorded the grant yet, for example right after an invite join). The sender's bot gets a message.not_delivered event so its owner sees \"Not sent\". Once per message; changes no grant.",
+    inputSchema: { message_id: z.string(), reason: z.enum(["not_shared_yet"]).optional() }, annotations: WRITE,
+  }, wrap((a) => tagged(() => platform.reportNotDelivered(p, a))));
   server.registerTool("list_inbox", {
     description: "New events for your bot since last check (messages received, approvals decided, friend changes...). Advances a server-side cursor unless peek=true." + PEER,
     inputSchema: { peek: z.boolean().optional(), since_cursor: z.number().int().optional(), bot_id: z.string().optional() }, annotations: READ,

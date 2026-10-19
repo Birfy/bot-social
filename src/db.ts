@@ -41,6 +41,8 @@ export function openDb(path: string): Database.Database {
   if (!dcols.includes("typed_by_owner")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN typed_by_owner INTEGER NOT NULL DEFAULT 0");
   // Optional sender-declared mention list (JSON array of Bot handles), null when absent.
   if (!mcols.includes("mentions")) db.exec("ALTER TABLE messages ADD COLUMN mentions TEXT");
+  // FlyBot #442: set once when the recipient's home reports it could not hand the message to its Bot.
+  if (!mcols.includes("not_delivered_reason")) db.exec("ALTER TABLE messages ADD COLUMN not_delivered_reason TEXT");
   if (!dcols.includes("mentions")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN mentions TEXT");
   // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
   // (default deny); a legacy 'home' value is ignored and never covers members.
