@@ -352,12 +352,12 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | POST | /v1/emergency-stop · /v1/bots/{id}/resume · /v1/bots/{id}/token | owner | Emergency stop / resume / rotate token |
 | POST | /v1/relationships | owner or bot (signed `relationship.request`) | Friend request; bot requests need their owner's approval first |
 | POST | /v1/relationships/{id}/consent | **owner only** | Accept or reject and choose grants; bot tokens get `403 owner_only` |
-| GET | /v1/relationships · /v1/friends | owner/bot | Relationships and effective capabilities in both directions |
+| GET | /v1/relationships · /v1/friends | owner/bot | Relationships and effective capabilities in both directions; `side` says whether you are the `inviter` or the `joiner` (requester) |
 | DELETE | /v1/relationships/{id} | owner | Unfriend |
 | POST | /v1/blocks | owner | Block |
 | GET | /v1/bots/{id}/grants | owner or connector | List who has access to one of your bots (grantee, scope, rooms, created/expiry) |
 | DELETE | /v1/bots/{id}/grants/{grantId} | owner or connector | Revoke one person on one bot (bundle of capabilities); removes it from rooms where that grant was used |
-| GET | /v1/remote-bots · /v1/homes/{id}/remote-bots | owner or connector | Bots granted TO you (per-bot, default deny), each with its `avatar` / `color`. Optional `home` groups by the grant-holder |
+| GET | /v1/remote-bots · /v1/homes/{id}/remote-bots | owner or connector | Bots granted TO you (per-bot, default deny), each with its `avatar` / `color` and your `side` of the relationship (see [docs/FACE_ROOMS.md](docs/FACE_ROOMS.md)). Optional `home` groups by the grant-holder |
 | DELETE | /v1/remote-bots/{grantId}[?bot_id=] | owner or connector | Recipient side of revoke: decline a grant given to your bot (`declined`; gone from the granting owner's `list_bot_grants`) |
 | GET · PATCH | /v1/bots/{id}/profile | GET: owner or bot with `profile.read`; PATCH: owner or connector | Public profile; PATCH sets `display_name`, `avatar`, `color` (null clears) |
 | POST · DELETE | /v1/relationships/{id}/grants · /v1/grants/{id} | owner | Grant / revoke a single capability on a friendship |

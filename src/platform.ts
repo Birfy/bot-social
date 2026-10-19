@@ -1006,6 +1006,14 @@ export class Platform {
     return { grant_id: grantId, status: "declined", declined: ids, granted_bot: granted, grantee_bot: g.grantee_bot, rooms_removed: rooms };
   }
 
+  /** This owner's side of a relationship: "joiner" when their Bot joined the other's invite (or sent the friend
+   *  request, the requester), "inviter" when the other side joined theirs. Derived from what every relationship
+   *  already stores (requester_* / target_*), so old relationships are classified too. Null for room-only grants. */
+  private sideOf(r: { requester_owner: string; rel_status?: string; status?: string }, ownerId: string): "joiner" | "inviter" | null {
+    if ((r.rel_status ?? r.status) === "room") return null;
+    return r.requester_owner === ownerId ? "joiner" : "inviter";
+  }
+
   /** Grants of one of my bots: who has it, scope, rooms, created/expiry. */
   listBotGrants(p: Principal, botId: string) {
     const ownerId = this.requireOwner(p);
@@ -1028,7 +1036,7 @@ export class Platform {
         grant_id: g.id, grantee: this.publicBot(grantee, true), scope,
         room: g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null,
         rooms: [] as any[], capabilities: [] as string[], created_at: g.created_at, expires_at: g.expires_at,
-        relationship_id: g.rel_status === "room" ? null : g.relationship_id,
+        relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
       };
       for (const room of moreRooms) if (!cur.rooms.some((x: any) => x.room_id === room.room_id)) cur.rooms.push(room);
       if (moreRooms.length && cur.scope === "person") cur.scope = "group";
@@ -1074,18 +1082,18 @@ export class Platform {
         owner_display_name: this.owner(granted.owner_id).display_name,
         grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
         via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
-        relationship_id: g.rel_status === "room" ? null : g.relationship_id,
+        relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
       };
       bots.push(item);
       const peerHome = this.bot(this.homeOf(granted.id));
       const entry = byHome.get(peerHome.id) ?? {
-        relationship_id: item.relationship_id, relationship_ids: [] as string[],
+        relationship_id: item.relationship_id, relationship_ids: [] as string[], side: item.side, relationship_sides: {} as Record<string, "joiner" | "inviter" | null>,
         home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, ...lookOf(peerHome), owner_display_name: this.owner(peerHome.owner_id).display_name },
         bots: [] as any[], scope: "member", via: [] as string[],
       };
-      if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) entry.relationship_ids.push(item.relationship_id);
+      if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) { entry.relationship_ids.push(item.relationship_id); entry.relationship_sides[item.relationship_id] = item.side; }
       if (!entry.bots.some((x: any) => x.bot_id === granted.id)) {
-        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at });
+        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at, relationship_id: item.relationship_id, side: item.side });
       }
       if (!entry.via.includes(item.via)) entry.via.push(item.via);
       byHome.set(peerHome.id, entry);
@@ -1234,7 +1242,7 @@ export class Platform {
       const grants = this.grantsFor(r.id);
       const fmt = (g: any) => ({ grant_id: g.id, capability: g.capability, scope: g.scope, expires_at: g.expires_at });
       return {
-        relationship_id: r.id, status: r.status, direction: meIsRequester ? "outgoing" : "incoming", my_bot_id: myBot,
+        relationship_id: r.id, status: r.status, direction: meIsRequester ? "outgoing" : "incoming", side: meIsRequester ? "joiner" : "inviter", my_bot_id: myBot,
         peer: this.publicBot(this.bot(peerBot), r.status === "active"), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
         created_at: r.created_at, expires_at: r.expires_at, blocked_by_me: r.blocked_by === p.ownerId,
         settings: this.settingsFor(r.id, p.ownerId),
@@ -1426,7 +1434,7 @@ export class Platform {
       const last = convs[0];
       const times = [r.updated_at, last?.updated_at, lastMsg].filter(Boolean).sort();
       return {
-        relationship_id: r.id, status: r.status, direction: outgoing ? "outgoing" : "incoming",
+        relationship_id: r.id, status: r.status, direction: outgoing ? "outgoing" : "incoming", side: outgoing ? "joiner" : "inviter",
         peer: this.publicBot(this.bot(peerId), r.status === "active"),
         connected_at: r.status === "active" || r.status === "revoked" || r.status === "blocked" ? r.updated_at : null,
         requested_at: r.created_at, expires_at: r.expires_at, message: r.message, settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,

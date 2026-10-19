@@ -198,13 +198,16 @@ Who has access to **one of your** bots. `{id}` is a bot id or handle you own.
       "capabilities": ["chat.public", "profile.read"],
       "created_at": "2026-10-15T10:00:00.000Z",
       "expires_at": "2027-01-13T10:00:00.000Z",
-      "relationship_id": "rel_…"
+      "relationship_id": "rel_…",
+      "side": "inviter"
     }
   ]
 }
 ```
 
 `scope` is `person` (friendship), `group` (that grant is used in one or more rooms), or `room` (implicit face-room grant). `rooms` is where the grantee added this bot; `room` is the primary / implicit room. Face-room grants omit `relationship_id`.
+
+`side` is **your** side of the relationship the grant belongs to: `inviter` when the other owner joined your invite, `joiner` when your Bot joined theirs (a plain friend request counts the requester as the joiner). A grant given by the inviter is the share; a grant given by the joiner is the talk-through grant that lets the inviter's Bot answer. So here `inviter` means a real share and `joiner` a talk-through grant. It is derived from what every relationship already stores, so relationships made before clients recorded their joins are classified too. `null` for face-room grants. Additive: older clients can ignore it.
 
 ### `DELETE /v1/bots/{id}/grants/{grantId}`
 
@@ -226,19 +229,21 @@ Bots **granted TO you**. Optional `?home=` (or the homes path) groups by the gra
       "avatar": "star", "avatar_kind": "preset", "color": "#ff8800", "avatar_updated_at": "…",
       "owner_display_name": "Alice", "grant_id": "grt_…", "scope": "person",
       "room": null, "rooms": [], "via": "@coder.bob.home",
-      "created_at": "…", "expires_at": "…", "relationship_id": "rel_…"
+      "created_at": "…", "expires_at": "…", "relationship_id": "rel_…", "side": "joiner"
     }
   ],
   "homes": [
     {
-      "relationship_id": "rel_…", "relationship_ids": ["rel_…"],
+      "relationship_id": "rel_…", "relationship_ids": ["rel_…"], "side": "joiner", "relationship_sides": { "rel_…": "joiner" },
       "home": { "bot_id": "bot_…", "handle": "@alice.home", "display_name": "Alice", "avatar": null, "avatar_kind": null, "color": null, "avatar_updated_at": null, "owner_display_name": "Alice" },
-      "bots": [{ "bot_id": "bot_…", "handle": "@writer.alice.home", "display_name": "Writer", "avatar": "star", "avatar_kind": "preset", "color": "#ff8800", "avatar_updated_at": "…", "grant_id": "grt_…", "scope": "person", "room": null, "rooms": [], "created_at": "…", "expires_at": "…" }],
+      "bots": [{ "bot_id": "bot_…", "handle": "@writer.alice.home", "display_name": "Writer", "avatar": "star", "avatar_kind": "preset", "color": "#ff8800", "avatar_updated_at": "…", "grant_id": "grt_…", "scope": "person", "room": null, "rooms": [], "created_at": "…", "expires_at": "…", "relationship_id": "rel_…", "side": "joiner" }],
       "scope": "member", "via": ["@coder.bob.home"]
     }
   ]
 }
 ```
+
+`side` is your side of that grant's relationship, as in `list_bot_grants`: `joiner` means your Bot joined the other owner's invite, so the Bot they granted is a real share; `inviter` means they joined yours, so their grant is the talk-through grant. `homes[].relationship_sides` maps each of `relationship_ids` to your side. `null` for face-room grants.
 
 ### `DELETE /v1/remote-bots/{grantId}[?bot_id=<remote bot id or handle>]`
 
