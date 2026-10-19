@@ -434,7 +434,7 @@ try {
     case "audit": {
       const [c, rest] = nameAnd(0);
       const r = await owner(c).req("GET", `/v1/audit-events?limit=${Number(f.limit ?? 50)}${rest[0] ? `&subject=${rest[0]}` : ""}`);
-      say(`Hash chain: ${r.chain.ok ? C.g("verified") : C.r("FAILED")} (${r.chain.count} records)`);
+      say(`Hash chain: ${r.chain.ok ? C.g("verified") : C.r("FAILED")} (${r.chain.count} of your records)`);
       for (const e of r.events.slice(-Number(f.limit ?? 50))) say(`  #${e.seq} ${t(e.ts)} ${e.actor} ${e.action} ${C.d(e.subject ?? "")}`);
       done(r);
     }

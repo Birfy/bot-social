@@ -371,7 +371,7 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | POST | /v1/calendar/freebusy | bot (`calendar.freebusy.query`) | Free/busy query, limited by grants; returns intervals only |
 | POST/GET | /v1/calendar/entries | owner | Built-in mock calendar |
 | GET | /v1/events?since= | bot | Pull events (the same events webhooks push) |
-| GET | /v1/audit-events?subject= | owner | Your audit records, with whole-chain verification |
+| GET | /v1/audit-events?subject= | owner | Your audit records, with whole-chain verification (`chain` reports `ok` and your own record count) |
 | POST | /v1/face-rooms/join | owner, connector or bot | Join or open a face-to-face room by 6-digit code (`{code, bots?}`). Connector tokens **are** accepted here (the token FlyBot already has). |
 | GET | /v1/face-rooms[/{id}] | owner, connector or bot | List your rooms / members + windowed events (`?after=` cursor) |
 | POST | /v1/face-rooms/{id}/start · /leave · /messages | owner, connector or bot | Start (void the number), leave, or draft a room message (held for approval unless `auto_approve_face_rooms`) |
