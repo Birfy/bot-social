@@ -21,6 +21,8 @@ export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; t
 export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
 
 const nowIso = () => new Date().toISOString();
+/** Why a home could not hand a delivered message to its Bot (reportNotDelivered). A fixed list: the sender is shown a fixed line. */
+const NOT_DELIVERED_REASONS = ["not_shared_yet"];
 const J = (s: string | null | undefined, d: any = null) => (s ? JSON.parse(s) : d);
 const ms = (iso: string) => {
   const t = Date.parse(iso);
@@ -877,9 +879,15 @@ export class Platform {
 
   /** Activate a relationship: minimal defaults both ways + target owner's choices + requester's offered caps. */
   private activateRelationship(r: any, targetSpecs: { capability: string; scope?: any; expires_in_days?: number }[], actor: string) {
+    this.writeActivation(r, targetSpecs, actor);
+    this.announceActivation(r, targetSpecs, actor);
+  }
+
+  /** #30: the grants are written before the relationship reads `active`, in one transaction, so nothing can see a
+   *  confirmed friendship whose grants are not durable yet. Announcing it is announceActivation, after the commit. */
+  private writeActivation(r: any, targetSpecs: { capability: string; scope?: any; expires_in_days?: number }[], actor: string) {
     const fbScope = { window_days: 14, hours: "09:00-18:00" };
     this.db.transaction(() => {
-      this.run("UPDATE relationships SET status = 'active', updated_at = ?, expires_at = NULL WHERE id = ?", nowIso(), r.id);
       const targetToRequester = new Map<string, any>(DEFAULT_CAPABILITIES.map((c) => [c, { capability: c }]));
       for (const s of targetSpecs) targetToRequester.set(s.capability, { scope: s.capability === "calendar.freebusy.read" ? fbScope : {}, ...s });
       for (const s of targetToRequester.values()) this.insertGrant(r.id, r.target_owner, r.requester_bot, s.capability, s.scope, s.expires_in_days, actor);
@@ -888,9 +896,33 @@ export class Platform {
       // by joining is reply-only: it may answer in a conversation the joiner's Bot started, never start one.
       const replyOnly = !!this.get("SELECT 1 FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id WHERE ri.relationship_id = ? AND i.bot_id = ?", r.id, r.target_bot);
       for (const c of requesterToTarget) this.insertGrant(r.id, r.requester_owner, r.target_bot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${r.requester_owner}`, { replyOnly });
+      this.run("UPDATE relationships SET status = 'active', updated_at = ?, expires_at = NULL WHERE id = ?", nowIso(), r.id);
     })();
+  }
+
+  /** Runs only after writeActivation committed. Both Bots' `relationship.changed` carries the grants already written
+   *  (`grants_ready: true`), so a home can record them before it handles the first message (FlyBot #442). */
+  private announceActivation(r: any, targetSpecs: { capability: string }[], actor: string) {
     this.audit.append(actor, "relationship.accepted", r.id, [r.requester_owner, r.target_owner], { granted_to_requester: targetSpecs.map((s) => s.capability) });
-    for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status: "active" });
+    const grants = this.grantSummary(r.id);
+    for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status: "active", grants_ready: true, grants });
+  }
+
+  /** The active relationship-level grants of one relationship, one entry per direction: the Bot that is shared
+   *  (`granted_bot`), the Bot it is shared with (`grantee_bot`), the capabilities, and whether it is reply-only (#23). */
+  grantSummary(relId: string) {
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
+    if (!r) return [];
+    const groups = new Map<string, any>();
+    for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL ORDER BY created_at, id", relId)) {
+      const key = `${g.grantor_owner}:${g.grantee_bot}`;
+      const granted = this.bot(this.grantedBotOf(g, r));
+      const grantee = this.bot(g.grantee_bot);
+      const cur = groups.get(key) ?? { grant_id: g.id, granted_bot: { bot_id: granted.id, handle: "@" + granted.handle }, grantee_bot: { bot_id: grantee.id, handle: "@" + grantee.handle }, capabilities: [] as string[], reply_only: this.replyOnlyAccess(relId, g.grantor_owner, g.grantee_bot) };
+      if (!cur.capabilities.includes(g.capability)) cur.capabilities.push(g.capability);
+      groups.set(key, cur);
+    }
+    return [...groups.values()];
   }
 
   /** `extra.replyOnly` (#23): the grantee may answer in a conversation the granted Bot started, but not start one
@@ -1402,16 +1434,23 @@ export class Platform {
     // Per-bot only. Legacy invite.scope / home endpoints are recorded as 'bot' and never cover members.
     const targetScope = "bot";
     const requesterScope = "bot";
-    this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at, requester_scope, target_scope)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, joiner.id, inviter.id, joiner.owner_id, inviter.owner_id, status, payload.message ?? `Joined via invite link`, i.offered_caps, JSON.stringify(offered), nowIso(), nowIso(), new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString(), requesterScope, targetScope);
-    this.run("INSERT INTO relationship_invites (relationship_id, invite_id) VALUES (?,?)", id, i.id);
-    this.run("UPDATE invites SET uses = uses + 1 WHERE id = ?", i.id);
+    // #30: the relationship, the invite use and (for an auto-accept invite) every grant are written in one
+    // transaction, and only then announced, so a join is never confirmed before its grants are durable.
+    const autoAccept = this.db.transaction(() => {
+      this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at, requester_scope, target_scope)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, joiner.id, inviter.id, joiner.owner_id, inviter.owner_id, status, payload.message ?? `Joined via invite link`, i.offered_caps, JSON.stringify(offered), nowIso(), nowIso(), new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString(), requesterScope, targetScope);
+      this.run("INSERT INTO relationship_invites (relationship_id, invite_id) VALUES (?,?)", id, i.id);
+      this.run("UPDATE invites SET uses = uses + 1 WHERE id = ?", i.id);
+      return viaBot ? null : this.autoAcceptSpecs(id);
+    })();
     this.audit.append(viaBot ? `bot:${joiner.id}` : `owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: id, offered });
     let approval_id: string | undefined;
     if (viaBot) approval_id = this.createApproval(joiner.owner_id, "relationship_request", id, joiner.id, null, `Your bot wants to befriend @${inviter.handle} via invite (you grant: ${offered.join(", ")})`, ["relationship.requires_owner", "invite"], [], LIMITS.relationshipRequestTtlMs);
-    else if (!this.maybeAutoAcceptInvite(id)) this.notifyTarget(id);
+    else if (autoAccept) this.announceActivation(this.get("SELECT * FROM relationships WHERE id = ?", id), autoAccept.specs, autoAccept.actor);
+    else this.notifyTarget(id);
     const r = this.get("SELECT status FROM relationships WHERE id = ?", id);
-    return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: r.status === "active" ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent" };
+    const active = r.status === "active";
+    return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: active ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent", ...(active ? { grants_ready: true, grants: this.grantSummary(id) } : {}) };
   }
 
   /** Does `grantorOwner` still share its Bot with `granteeBot` on this relationship (an unexpired, active relationship-level
@@ -1451,12 +1490,23 @@ export class Platform {
 
   /** If the relationship came from an auto-accept invite, the inviter owner already consented: activate it. */
   private maybeAutoAcceptInvite(relId: string): boolean {
-    const link = this.get("SELECT i.* FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id WHERE ri.relationship_id = ?", relId);
-    if (!link || !link.auto_accept || link.status === "revoked" || link.status === "pending_owner") return false;
-    const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
-    if (r.status !== "pending_target") return false;
-    this.activateRelationship(r, J(link.offered_caps, []).map((c: string) => ({ capability: c })), `owner:${link.owner_id}(invite:${link.id})`);
+    const accepted = this.autoAcceptSpecs(relId);
+    if (!accepted) return false;
+    this.announceActivation(this.get("SELECT * FROM relationships WHERE id = ?", relId), accepted.specs, accepted.actor);
     return true;
+  }
+
+  /** Writes (grants first, #30) the activation of an auto-accept invite's relationship without announcing it; the
+   *  caller announces once its own transaction has committed. Null when the invite does not auto-accept. */
+  private autoAcceptSpecs(relId: string): { specs: { capability: string }[]; actor: string } | null {
+    const link = this.get("SELECT i.* FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id WHERE ri.relationship_id = ?", relId);
+    if (!link || !link.auto_accept || link.status === "revoked" || link.status === "pending_owner") return null;
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
+    if (r.status !== "pending_target") return null;
+    const specs = J(link.offered_caps, []).map((c: string) => ({ capability: c }));
+    const actor = `owner:${link.owner_id}(invite:${link.id})`;
+    this.writeActivation(r, specs, actor);
+    return { specs, actor };
   }
 
   /** Per-bot friend overview for the /friends page. Owners may view any of their own bots; a bot only itself. */
@@ -1798,6 +1848,29 @@ export class Platform {
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
     this.audit.append("platform", "conversation.paused", c.id, owners, { status, reason, turn_count: c.turn_count });
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.paused", { conversation_id: c.id, status, reason, trust: "platform" });
+  }
+
+  /**
+   * FlyBot #442: the recipient's home took a delivered message but its Bot did not receive it, because the home had
+   * not yet recorded the grant (for example in the seconds after an invite join). The recipient's owner reports it
+   * here, and the sender's Bot gets a platform `message.not_delivered` event, so the sender sees "Not sent" instead
+   * of silence. Owner-only (owner MCP at /mcp); `reason` is a fixed code, never free
+   * text from the recipient; once per message; nothing is stored or forwarded beyond the event and the audit entry.
+   */
+  reportNotDelivered(p: Principal, body: { message_id: string; reason?: string }) {
+    const ownerId = this.requireOwner(p);
+    const m = this.get("SELECT * FROM messages WHERE id = ?", String(body?.message_id ?? ""));
+    assert(m && this.bot(m.recipient_bot).owner_id === ownerId, 404, "message_not_found", "no such message delivered to one of your bots");
+    assert(m.status === "delivered", 409, "invalid_state", `message is ${m.status}`);
+    const reason = body?.reason ?? "not_shared_yet";
+    assert(NOT_DELIVERED_REASONS.includes(reason), 400, "invalid_request", `reason must be one of ${NOT_DELIVERED_REASONS.join(", ")}`);
+    if (m.not_delivered_reason) return { message_id: m.id, status: "not_delivered", reason: m.not_delivered_reason, already_reported: true };
+    this.run("UPDATE messages SET not_delivered_reason = ? WHERE id = ?", reason, m.id);
+    const recipient = this.bot(m.recipient_bot);
+    const sender = this.bot(m.sender_bot);
+    this.audit.append(`owner:${ownerId}`, "message.not_delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: m.conversation_id, reason });
+    this.emit(sender.id, "message.not_delivered", { message_id: m.id, conversation_id: m.conversation_id, to: this.publicBot(recipient), reason, trust: "platform" });
+    return { message_id: m.id, status: "not_delivered", reason };
   }
 
   private deliverMessage(a: any, body: any) {
@@ -2691,6 +2764,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered"] };
   }
 }
