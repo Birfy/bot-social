@@ -108,7 +108,7 @@ export async function runDemo(opts: { baseUrl?: string; log?: (s: string) => voi
       params: { duration_minutes: 30, window, timezone: TZ, modality: "video" }, success_criteria: "both sides confirm a slot and a calendar invite is created",
     });
     const cid = conv.conversation_id as string;
-    say(`[A] new conversation ${cid} intent=schedule_meeting max_turns=${conv.limits.max_turns} me_on_peer=${conv.effective_capabilities.me_on_peer.join(",")}`);
+    say(`[A] new conversation ${cid} intent=schedule_meeting me_on_peer=${conv.effective_capabilities.me_on_peer.join(",")}`);
 
     let curA = 0, curB = 0, done = false;
     let bookedSlot = null as DemoResult["bookedSlot"];
@@ -119,7 +119,7 @@ export async function runDemo(opts: { baseUrl?: string; log?: (s: string) => voi
         if (ev.conversation_id !== cid) continue;
         if (ev.event_type === "message.received") {
           const content = ev.untrusted_content; // untrusted data: only structured fields are parsed
-          say(`[A] message from bot B (trust=${ev.trust}, injection_suspected=${ev.security.injection_suspected}, turn ${ev.turn.count}/${ev.turn.max}): ${content.text}`);
+          say(`[A] message from bot B (trust=${ev.trust}, injection_suspected=${ev.security.injection_suspected}, turn ${ev.turn.count}): ${content.text}`);
           const s = content.structured;
           if (s?.schema === "meeting.accept/1" && s.slot) {
             const r = await botA.draftAction(cid, "calendar.book", { title: "Q4 collaboration sync", start: s.slot.start, end: s.slot.end, attendees: [botB.id], conference: "auto" }, "the other side confirmed this slot");
@@ -189,7 +189,7 @@ export async function runDemo(opts: { baseUrl?: string; log?: (s: string) => voi
     const audit = await ownerA.req("GET", `/v1/audit-events?subject=${cid}`);
     const calB = await ownerB.req("GET", "/v1/calendar/entries");
     const inv = calB.entries.find((e: any) => e.source === "botsocial");
-    say(`== result: conversation ${view.status}/${view.outcome}, turns ${view.turn.count}/${view.turn.max}, meeting ${bookedSlot ? `${isoInTz(Date.parse(bookedSlot!.start), TZ)} – ${isoInTz(Date.parse(bookedSlot!.end), TZ).slice(11, 16)}` : "none"}, Bob calendar status=${inv?.status}`);
+    say(`== result: conversation ${view.status}/${view.outcome}, turns ${view.turn.count}, meeting ${bookedSlot ? `${isoInTz(Date.parse(bookedSlot!.start), TZ)} – ${isoInTz(Date.parse(bookedSlot!.end), TZ).slice(11, 16)}` : "none"}, Bob calendar status=${inv?.status}`);
     say(`== approvals: owner A ${approvals.ownerA}, owner B ${approvals.ownerB}; audit chain ok=${audit.chain.ok} (${audit.chain.count} records for owner A); ${audit.events.length} audit records for this conversation; bot B webhook signatures verified ${webhooksVerified} times`);
     return { conversationId: cid, outcome: view.outcome, bookedSlot, approvals, auditOk: audit.chain.ok, auditCount: audit.chain.count, webhooksVerified, transcript };
   } finally {

@@ -16,15 +16,14 @@ const connect = async (token: string) => {
 const text = (r: any) => JSON.parse(r.content[0].text);
 const errText = (r: any) => String(r.content[0].text);
 
-/** Two friends with a chat paused at its 2-turn budget, plus a connector token for B's owner. */
+/** Two friends with a chat Bot Social paused (a Bot repeated its line: loop detected), plus a connector token for B's owner. */
 async function pausedChat() {
   const { A, B } = await friends(S.base);
-  const cid = (await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "short", max_turns: 2 })).conversation_id as string;
+  const cid = (await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "short" })).conversation_id as string;
   await A.bot.draftMessage(cid, { text: "message one about the plan" });
   await approveAll(A.owner);
-  await B.bot.draftMessage(cid, { text: "reply two with details" });
-  await approveAll(B.owner);
-  assert.equal((await A.bot.getConversation(cid)).status, "paused_limit");
+  await assert.rejects(A.bot.draftMessage(cid, { text: "message one about the plan" }), /conversation_paused|loop detected/);
+  assert.equal((await A.bot.getConversation(cid)).status, "paused_loop");
   const ctk = (await B.owner.req("POST", "/v1/connector-tokens", { label: "test" })).token as string;
   return { A, B, cid, ctk };
 }
@@ -40,17 +39,17 @@ test("extend_conversation is listed as a human-decision tool", async () => {
   await c.close();
 });
 
-test("a connector token extends a paused chat only after the owner's confirm code", async () => {
+test("a connector token resumes a paused chat only after the owner's confirm code", async () => {
   const { A, B, cid, ctk } = await pausedChat();
   const c = await connect(ctk);
   const args = { conversation_id: cid, extra_turns: 2 };
   const s1 = text(await c.callTool({ name: "extend_conversation", arguments: args }));
   assert.equal(s1.status, "confirmation_required");
   assert.match(s1.confirm_code, /^[A-Z2-9]{6}$/);
-  assert.equal(s1.summary.conversation.status, "paused_limit");
-  assert.deepEqual(s1.summary.conversation.turn, { count: 2, max: 2 });
+  assert.equal(s1.summary.conversation.status, "paused_loop");
+  assert.deepEqual(s1.summary.conversation.turn, { count: 1, max: null });
   // step 1 changed nothing
-  assert.equal((await A.bot.getConversation(cid)).status, "paused_limit");
+  assert.equal((await A.bot.getConversation(cid)).status, "paused_loop");
   // the code is bound to the exact arguments and burns on mismatch
   const wrong = await c.callTool({ name: "extend_conversation", arguments: { ...args, extra_turns: 20, confirm_code: s1.confirm_code } });
   assert.equal(wrong.isError, true);
@@ -59,17 +58,17 @@ test("a connector token extends a paused chat only after the owner's confirm cod
   assert.equal(reused.isError, true, "code is single use");
   const bogus = await c.callTool({ name: "extend_conversation", arguments: { ...args, confirm_code: "ZZZZZZ" } });
   assert.equal(bogus.isError, true);
-  assert.equal((await A.bot.getConversation(cid)).status, "paused_limit", "failed confirmations change nothing");
+  assert.equal((await A.bot.getConversation(cid)).status, "paused_loop", "failed confirmations change nothing");
 
   const s2 = text(await c.callTool({ name: "extend_conversation", arguments: args }));
   const done = await c.callTool({ name: "extend_conversation", arguments: { ...args, confirm_code: s2.confirm_code } });
   assert.ok(!done.isError, JSON.stringify(done));
   const r = text(done);
   assert.equal(r.status, "open");
-  assert.equal(r.max_turns, 4);
+  assert.equal(r.max_turns, null, "no turn limit: nothing is added");
   const conv = await A.bot.getConversation(cid);
   assert.equal(conv.status, "open");
-  assert.deepEqual(conv.turn, { count: 2, max: 4 });
+  assert.deepEqual(conv.turn, { count: 1, max: null });
   const d = await A.bot.draftMessage(cid, { text: "three, after extension" });
   assert.equal(d.status, "pending_approval");
   const audit = JSON.stringify(S.platform.auditEvents({ kind: "owner", ownerId: B.owner_id }, { limit: 200 }));
@@ -109,5 +108,5 @@ test("REST extend stays closed to connector tokens and Bot tokens; /mcp refuses 
   assert.equal(botRest.status, 403);
   const botMcp = await fetch(`${S.base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${A.reg.bot_token}` }, body: "{}" });
   assert.equal(botMcp.status, 403);
-  assert.equal((await A.bot.getConversation(cid)).status, "paused_limit");
+  assert.equal((await A.bot.getConversation(cid)).status, "paused_loop");
 });

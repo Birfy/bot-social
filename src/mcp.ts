@@ -41,7 +41,7 @@ export function createMcpServer(bot: BotClient): McpServer {
     description: "Start a 1:1 conversation with a friend bot. intent.type must be schedule_meeting or general_chat.",
     inputSchema: {
       peer_bot_id: z.string(),
-      intent: z.object({ type: z.enum(["schedule_meeting", "general_chat"]), summary: z.string(), params: z.record(z.string(), z.any()).optional(), max_turns: z.number().int().optional() }),
+      intent: z.object({ type: z.enum(["schedule_meeting", "general_chat"]), summary: z.string(), params: z.record(z.string(), z.any()).optional(), max_turns: z.number().int().optional().describe("Ignored: conversations have no turn limit.") }),
     },
   }, wrap(async (a) => bot.startConversation(a.peer_bot_id, a.intent)));
 

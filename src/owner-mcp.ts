@@ -137,10 +137,10 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   server.registerTool("remove_friend", { description: "Remove a friendship." + HUMAN, inputSchema: { relationship_id: z.string(), ...CONFIRM }, annotations: DECIDE },
     confirmed("remove_friend", (a) => ({ action: `remove friendship ${a.relationship_id}` }), (a) => platform.removeRelationship(p, a.relationship_id)));
   server.registerTool("extend_conversation", {
-    description: "Extend a PAUSED friend chat (turn budget reached, loop suspected, or stopped) by extra_turns (1-20, default 4) so the Bots can talk again. Use when the owner asks to continue a chat that Bot Social paused. Nothing changes until the owner confirms." + HUMAN,
-    inputSchema: { conversation_id: z.string(), extra_turns: z.number().int().min(1).max(20).optional().describe("Extra turns to add (1-20, default 4)."), ...CONFIRM }, annotations: DECIDE,
+    description: "Resume a PAUSED friend chat (loop suspected between the Bots, or stopped) so the Bots can talk again. Conversations have no turn limit, so nothing runs out; extra_turns is accepted for older clients and ignored. Use when the owner asks to continue a chat that Bot Social paused. Nothing changes until the owner confirms." + HUMAN,
+    inputSchema: { conversation_id: z.string(), extra_turns: z.number().int().min(1).max(20).optional().describe("Ignored (conversations have no turn limit); kept so older clients still validate."), ...CONFIRM }, annotations: DECIDE,
   }, confirmed("extend_conversation", (a) => {
-    return { action: `extend conversation ${a.conversation_id} by ${a.extra_turns ?? 4} turns`, conversation: conversationSummary(a.conversation_id) };
+    return { action: `resume conversation ${a.conversation_id}`, conversation: conversationSummary(a.conversation_id) };
   }, (a) => platform.extendConversation(p, a.conversation_id, { extra_turns: a.extra_turns }),
   (a) => { // unknown, foreign or closed conversation: fail before a code is issued
     const st = (platform.getConversation(p, a.conversation_id) as any).status;
