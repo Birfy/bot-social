@@ -28,7 +28,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   const auth = (req: FastifyRequest): Principal => {
     const h = req.headers.authorization;
     const p = platform.authenticate(h?.startsWith("Bearer ") ? h.slice(7) : undefined);
-    if (p.kind === "owner" && p.scope === "connector") throw new ApiError(403, "connector_token_rest_forbidden", "connector tokens only work at /mcp; log in for the REST API");
+    if (p.kind === "owner" && p.scope === "connector") throw new ApiError(403, "connector_token_rest_forbidden", "connector tokens work at /mcp and the FlyBot REST routes only; use the MCP tools at /mcp or log in for this route");
     return p;
   };
   // Connector token (FlyBot / MCP) or owner login. Used for per-bot access management and webhooks.
