@@ -171,6 +171,23 @@ test("migration: an existing database gets the column and its join-time joiner g
   const j = await B.owner.req("POST", `/v1/invites/${inv.code}/join`, { from_bot_id: B.bot.id });
   // A grant B's owner added later on purpose (here: freebusy) keeps full access.
   const later = await B.owner.req("POST", `/v1/relationships/${j.relationship_id}/grants`, { capability: "calendar.freebusy.read" });
+  // A plain friend request (full grants both ways) later re-shared through an invite also gets a relationship_invites
+  // link; its requester's grants must stay full.
+  const C = await ownerWithBot(S.base, "plainreq");
+  const D = await ownerWithBot(S.base, "plaintgt");
+  const fr = await C.owner.req("POST", "/v1/relationships", { from_bot_id: C.bot.id, target_handle: D.handle, requested_capabilities: ["chat.public"] });
+  await D.owner.req("POST", `/v1/relationships/${fr.relationship_id}/consent`, { decision: "accept", grant_capabilities: [] });
+  const [dGrant] = (await C.owner.req("GET", "/v1/remote-bots")).bots;
+  await C.owner.req("DELETE", `/v1/remote-bots/${dGrant.grant_id}`);
+  const reshare = await D.owner.req("POST", "/v1/invites", { bot_id: D.bot.id });
+  assert.equal((await C.owner.req("POST", `/v1/invites/${reshare.code}/join`, { from_bot_id: C.bot.id })).regranted, true);
+  // An invite join whose chat.public was then granted through an approved grant.request (here within the same second).
+  const E = await ownerWithBot(S.base, "reqinv");
+  const F = await ownerWithBot(S.base, "reqjoin");
+  const inv2 = await E.owner.req("POST", "/v1/invites", { bot_id: E.bot.id });
+  const j2 = await F.owner.req("POST", `/v1/invites/${inv2.code}/join`, { from_bot_id: F.bot.id });
+  await E.bot.requestGrant(j2.relationship_id, "chat.public", {}, "to start chats");
+  await approveAll(F.owner);
   await S.stop();
 
   // Turn it into a database from before #23: no reply_only column, the later grant created a minute after the join.
@@ -186,5 +203,9 @@ test("migration: an existing database gets the column and its join-time joiner g
   const alice = rows.filter((r) => r.grantor_owner === A.owner_id);
   assert.deepEqual(bob.map((r) => [r.capability, r.reply_only]), [["calendar.freebusy.read", 0], ["chat.public", 1], ["profile.read", 1]]);
   assert.ok(alice.length > 0 && alice.every((r) => r.reply_only === 0), "the inviter's share stays full");
+  const plain = db.prepare("SELECT reply_only FROM grants WHERE status = 'active' AND relationship_id = ?").all(fr.relationship_id) as any[];
+  assert.ok(plain.length > 0 && plain.every((r) => r.reply_only === 0), "a re-shared plain friend request keeps full grants");
+  const requested = db.prepare("SELECT capability, reply_only FROM grants WHERE status = 'active' AND relationship_id = ? AND grantor_owner = ? ORDER BY capability").all(j2.relationship_id, F.owner_id) as any[];
+  assert.deepEqual(requested.map((r) => [r.capability, r.reply_only]), [["chat.public", 0], ["profile.read", 1]], "an approved grant request stays full");
   assert.equal(markJoinGrantsReplyOnly(db), 0, "idempotent");
 });

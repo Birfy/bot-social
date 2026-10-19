@@ -886,7 +886,7 @@ export class Platform {
       const requesterToTarget = new Set<string>([...DEFAULT_CAPABILITIES, ...J(r.offered_caps, [])]);
       // #23: on an invite-born friendship the requester is the joiner. What the joiner's owner gives the inviter's Bot
       // by joining is reply-only: it may answer in a conversation the joiner's Bot started, never start one.
-      const replyOnly = !!this.get("SELECT 1 FROM relationship_invites WHERE relationship_id = ?", r.id);
+      const replyOnly = !!this.get("SELECT 1 FROM relationship_invites ri JOIN invites i ON i.id = ri.invite_id WHERE ri.relationship_id = ? AND i.bot_id = ?", r.id, r.target_bot);
       for (const c of requesterToTarget) this.insertGrant(r.id, r.requester_owner, r.target_bot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${r.requester_owner}`, { replyOnly });
     })();
     this.audit.append(actor, "relationship.accepted", r.id, [r.requester_owner, r.target_owner], { granted_to_requester: targetSpecs.map((s) => s.capability) });
