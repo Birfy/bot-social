@@ -884,21 +884,27 @@ export class Platform {
       for (const s of targetSpecs) targetToRequester.set(s.capability, { scope: s.capability === "calendar.freebusy.read" ? fbScope : {}, ...s });
       for (const s of targetToRequester.values()) this.insertGrant(r.id, r.target_owner, r.requester_bot, s.capability, s.scope, s.expires_in_days, actor);
       const requesterToTarget = new Set<string>([...DEFAULT_CAPABILITIES, ...J(r.offered_caps, [])]);
-      for (const c of requesterToTarget) this.insertGrant(r.id, r.requester_owner, r.target_bot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${r.requester_owner}`);
+      // #23: on an invite-born friendship the requester is the joiner. What the joiner's owner gives the inviter's Bot
+      // by joining is reply-only: it may answer in a conversation the joiner's Bot started, never start one.
+      const replyOnly = !!this.get("SELECT 1 FROM relationship_invites WHERE relationship_id = ?", r.id);
+      for (const c of requesterToTarget) this.insertGrant(r.id, r.requester_owner, r.target_bot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${r.requester_owner}`, { replyOnly });
     })();
     this.audit.append(actor, "relationship.accepted", r.id, [r.requester_owner, r.target_owner], { granted_to_requester: targetSpecs.map((s) => s.capability) });
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status: "active" });
   }
 
-  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: number | undefined, actor: string, extra: { roomId?: string } = {}) {
+  /** `extra.replyOnly` (#23): the grantee may answer in a conversation the granted Bot started, but not start one
+   *  or bring the Bot into a face room. Set only for the joiner-side grants a join writes; every explicit grant is full. */
+  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: number | undefined, actor: string, extra: { roomId?: string; replyOnly?: boolean } = {}) {
     this.run("UPDATE grants SET status = 'superseded' WHERE relationship_id = ? AND grantor_owner = ? AND capability = ? AND status = 'active' AND IFNULL(room_id,'') = ?", relId, grantorOwner, cap, extra.roomId ?? "");
     const id = newId("grt");
     const exp = extra.roomId ? null : new Date(Date.now() + (expiresInDays ?? LIMITS.grantDefaultDays) * 86400e3).toISOString();
     const sc = extra.roomId ? { ...(scope ?? {}), kind: "room", room_id: extra.roomId } : { ...(scope ?? {}) };
-    this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at, room_id) VALUES (?,?,?,?,?,?,?,?,?)",
-      id, relId, grantorOwner, granteeBot, cap, JSON.stringify(sc), nowIso(), exp, extra.roomId ?? null);
+    const replyOnly = !!extra.replyOnly && !extra.roomId;
+    this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at, room_id, reply_only) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      id, relId, grantorOwner, granteeBot, cap, JSON.stringify(sc), nowIso(), exp, extra.roomId ?? null, replyOnly ? 1 : 0);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
-    this.audit.append(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: sc, expires_at: exp, room_id: extra.roomId ?? null });
+    this.audit.append(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: sc, expires_at: exp, room_id: extra.roomId ?? null, ...(replyOnly ? { reply_only: true } : {}) });
     return id;
   }
 
@@ -906,8 +912,9 @@ export class Platform {
     return this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId).map((g) => ({ ...g, scope: J(g.scope, {}) }));
   }
 
+  /** An active relationship-level grant; a full grant wins over a reply-only one (#23), so check `reply_only` on the result. */
   findGrant(grantorOwner: string, granteeBot: string, cap: string, grantedBot?: string): any {
-    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL", grantorOwner, granteeBot, cap);
+    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL ORDER BY g.reply_only", grantorOwner, granteeBot, cap);
     for (const g of rows) {
       if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
       if (grantedBot && this.grantedBotOf(g, g) !== grantedBot) continue;
@@ -1037,7 +1044,9 @@ export class Platform {
         room: g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null,
         rooms: [] as any[], capabilities: [] as string[], created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
+        reply_only: !!g.reply_only,
       };
+      if (!g.reply_only) cur.reply_only = false;
       for (const room of moreRooms) if (!cur.rooms.some((x: any) => x.room_id === room.room_id)) cur.rooms.push(room);
       if (moreRooms.length && cur.scope === "person") cur.scope = "group";
       if (!cur.room) cur.room = g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null;
@@ -1083,6 +1092,7 @@ export class Platform {
         grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
         via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
+        reply_only: this.replyOnlyAccess(g),
       };
       bots.push(item);
       const peerHome = this.bot(this.homeOf(granted.id));
@@ -1093,12 +1103,41 @@ export class Platform {
       };
       if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) { entry.relationship_ids.push(item.relationship_id); entry.relationship_sides[item.relationship_id] = item.side; }
       if (!entry.bots.some((x: any) => x.bot_id === granted.id)) {
-        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at, relationship_id: item.relationship_id, side: item.side });
+        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at, relationship_id: item.relationship_id, side: item.side, reply_only: item.reply_only });
       }
       if (!entry.via.includes(item.via)) entry.via.push(item.via);
       byHome.set(peerHome.id, entry);
     }
     return { bots, homes: [...byHome.values()] };
+  }
+
+  /** True when every active relationship-level grant this grantor gave this grantee on this relationship is
+   *  reply-only (#23): the grantee may answer the granted Bot but not start a conversation with it. */
+  private replyOnlyAccess(g: { relationship_id: string; grantor_owner: string; grantee_bot: string; room_id?: string | null; reply_only?: number }): boolean {
+    if (g.room_id || !g.reply_only) return false;
+    return !this.get("SELECT 1 FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND reply_only = 0", g.relationship_id, g.grantor_owner, g.grantee_bot);
+  }
+
+  /**
+   * #23: `senderBot` holds only the reply-only grant a join gave it on `target`, so it may not start a conversation
+   * with `target` (or bring it into a face room). Refuse with 403 bot_not_shared, store nothing, and tell the target's
+   * owner with a `share.requested` event on the target Bot (at most once a day per sender) so they can choose to
+   * share the Bot. Nothing is ever granted automatically.
+   */
+  private refuseUnshared(senderBot: string, target: any, relId: string, attempted: "conversation.create" | "message.draft" | "face_room.join", convId: string | null = null): never {
+    const sender = this.bot(senderBot);
+    this.policyDecision(senderBot, convId, [sender.owner_id, target.owner_id], attempted, "deny", ["grant.reply_only:chat.public"]);
+    const since = new Date(Date.now() - 86400e3).toISOString();
+    const recent = this.get("SELECT 1 FROM events WHERE bot_id = ? AND type = 'share.requested' AND created_at > ? AND json_extract(data, '$.from.bot_id') = ?", target.id, since, senderBot);
+    if (!recent) {
+      this.emit(target.id, "share.requested", {
+        relationship_id: relId, bot_id: target.id, from: this.publicBot(sender), attempted, trust: "platform",
+        note: "This Bot is not shared with the sender, so their attempt to start a conversation was refused and nothing was delivered. Only your owner can share this Bot (for example with an invite link for this Bot); nothing is shared automatically.",
+      });
+    }
+    throw new ApiError(403, "bot_not_shared",
+      `@${target.handle} is not shared with your Bot: its owner allows replies only in conversations their Bot starts. Nothing was delivered. Their owner has been told and can choose to share it.`,
+      { suggestion: "ask_owner_to_share", bot_id: target.id, relationship_id: relId, owner_notified: true });
   }
 
   private resolveOwnBot(ownerId: string, ref: string) {
@@ -1166,7 +1205,8 @@ export class Platform {
     const marks = myBotIds.map(() => "?").join(",");
     const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
       FROM grants g JOIN relationships r ON r.id = g.relationship_id
-      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL`,
+      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL
+      ORDER BY g.reply_only`,
       ...myBotIds, ownerId);
     return rows.find((g: any) => this.grantedBotOf(g, g) === targetBotId) ?? null;
   }
@@ -1240,7 +1280,7 @@ export class Platform {
       const myBot = meIsRequester ? r.requester_bot : r.target_bot;
       const peerBot = meIsRequester ? r.target_bot : r.requester_bot;
       const grants = this.grantsFor(r.id);
-      const fmt = (g: any) => ({ grant_id: g.id, capability: g.capability, scope: g.scope, expires_at: g.expires_at });
+      const fmt = (g: any) => ({ grant_id: g.id, capability: g.capability, scope: g.scope, expires_at: g.expires_at, reply_only: !!g.reply_only });
       return {
         relationship_id: r.id, status: r.status, direction: meIsRequester ? "outgoing" : "incoming", side: meIsRequester ? "joiner" : "inviter", my_bot_id: myBot,
         peer: this.publicBot(this.bot(peerBot), r.status === "active"), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
@@ -1372,9 +1412,10 @@ export class Platform {
     return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: r.status === "active" ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent" };
   }
 
-  /** Does `grantorOwner` still hold an unexpired, active relationship-level grant to `granteeBot` on this relationship? */
+  /** Does `grantorOwner` still hold an unexpired, active, full (not reply-only) relationship-level grant to `granteeBot`
+   *  on this relationship? A reply-only join grant (#23) is not a share: a fresh invite for that Bot shares it. */
   private hasLiveGrant(grantorOwner: string, granteeBot: string, relId: string): boolean {
-    return this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL", relId, grantorOwner, granteeBot)
+    return this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND reply_only = 0", relId, grantorOwner, granteeBot)
       .some((g: any) => !g.expires_at || Date.parse(g.expires_at) >= Date.now());
   }
 
@@ -1387,9 +1428,10 @@ export class Platform {
       const fbScope = { window_days: 14, hours: "09:00-18:00" };
       // inviter owner -> joiner bot: the same bundle a fresh friendship would give
       for (const c of new Set<string>([...DEFAULT_CAPABILITIES, ...J(i.offered_caps, [])])) this.insertGrant(rel.id, inviter.owner_id, joiner.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, actor);
-      // joiner owner -> inviter bot: add only what is missing; never replaces grants the joiner already holds
+      // joiner owner -> inviter bot: add only what is missing; never replaces grants the joiner already holds.
+      // What a join adds on the joiner's side is reply-only (#23), as on a first join.
       for (const c of new Set<string>([...DEFAULT_CAPABILITIES, ...offered])) {
-        if (!this.findGrant(joiner.owner_id, inviter.id, c, joiner.id)) this.insertGrant(rel.id, joiner.owner_id, inviter.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${joiner.owner_id}`);
+        if (!this.findGrant(joiner.owner_id, inviter.id, c, joiner.id)) this.insertGrant(rel.id, joiner.owner_id, inviter.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${joiner.owner_id}`, { replyOnly: true });
       }
     })();
     this.audit.append(`owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: rel.id, regrant: true, offered });
@@ -1633,10 +1675,12 @@ export class Platform {
       this.policyDecision(botId, null, [ownerId], "conversation.create", "deny", ["intent.unsupported"]);
       throw new ApiError(403, "intent_scope_violation", "MVP intents: schedule_meeting, general_chat");
     }
-    if (!this.findGrant(peer.owner_id, botId, "chat.public", peer.id)) {
+    const chat = this.findGrant(peer.owner_id, botId, "chat.public", peer.id);
+    if (!chat) {
       this.policyDecision(botId, null, [ownerId, peer.owner_id], "conversation.create", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
     }
+    if (chat.reply_only) this.refuseUnshared(botId, peer, rel.id, "conversation.create");
     const since = new Date(Date.now() - 86400e3).toISOString();
     const today = this.get("SELECT COUNT(*) n FROM conversations WHERE relationship_id = ? AND created_at > ?", rel.id, since).n;
     if (today >= LIMITS.newConversationsPerPairPerDay) throw new ApiError(429, "rate_limited", "too many new conversations for this relationship today", { retry_after: 3600 });
@@ -1681,9 +1725,14 @@ export class Platform {
     assert(typeof pl.text === "string" && pl.text.length > 0 && pl.text.length <= 4000, 400, "invalid_request", "payload.text (1-4000 chars) required");
     // Refs live in the signed payload, so the sender's signature covers them.
     const refs = this.checkRefs(botId, pl.attachments);
-    if (!this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id)) {
+    const chat = this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id);
+    if (!chat) {
       this.policyDecision(botId, convId, owners, "message.draft", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
+    }
+    // #23: a reply-only grant may answer, never start: the peer started this conversation or already wrote in it.
+    if (chat.reply_only && c.initiator_bot !== peer && !this.get("SELECT 1 FROM messages WHERE conversation_id = ? AND sender_bot = ? AND status = 'delivered'", convId, peer)) {
+      this.refuseUnshared(botId, peerB, c.relationship_id, "message.draft", convId);
     }
     // rate limits
     const minuteAgo = Date.now() - 60e3, hourAgo = Date.now() - 3600e3;
@@ -2180,6 +2229,8 @@ export class Platform {
       assert(other && other.status === "active", 404, "bot_not_found", `no bot matching ${ref} on this account`);
       const grant = this.accessGrantTo(p.ownerId, mine, other.id);
       assert(grant, 404, "bot_not_found", `no bot matching ${ref} on this account`);
+      // #23: a reply-only grant (from joining an invite) never lets you bring the other owner's Bot into a room.
+      if (grant.reply_only) this.refuseUnshared(grant.grantee_bot, other, grant.relationship_id, "face_room.join");
       if (!out.some((x) => x.bot.id === other.id)) out.push(wrap(other, grant));
     }
     return out;
@@ -2626,6 +2677,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants"] };
   }
 }

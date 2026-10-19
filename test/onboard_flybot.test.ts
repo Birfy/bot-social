@@ -61,6 +61,12 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   assert.equal(remote.homes.length, 1);
   assert.equal(remote.homes[0].home.handle, "@bob.home");
   assert.deepEqual(remote.homes[0].bots.map((x: any) => x.handle), ["@coder.bob.home"]);
+  // Joining only lets Writer answer Coder (#23): starting is refused until Bob shares Coder with Writer.
+  const unshared = await fetch(s.base + "/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${a.connector.token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "send_as_member", arguments: { from_bot_id: writer.bot_id, to: coder.handle, text: "hi" } } }) }).then((r) => r.json()) as any;
+  assert.equal(unshared.result.isError, true);
+  assert.match(unshared.result.content[0].text, /bot_not_shared/);
+  const back = await B("create_invite", { bot_id: coder.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  await A("join_invite", { code: back.code, from_bot_id: writer.bot_id });
   const sent = await A("send_as_member", { from_bot_id: writer.bot_id, to: coder.handle, text: "hello from writer" });
   assert.match(sent.conversation_id, /.+/);
   // Regression: later sends in the same relationship reuse the open conversation instead of

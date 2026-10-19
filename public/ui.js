@@ -575,7 +575,7 @@ PAGES.audit = async (v) => {
 };
 
 const WH_ST = { delivered: ["Delivered", "ok"], failed: ["Failed", "bad"], sending: ["Sending", "warn"], rate_limited: ["Rate limited · retrying later", "warn"], cancelled: ["Cancelled", "gray"] };
-const TYPE_LABEL = { "message.received": "New message", "relationship.requested": "Friend request", "relationship.changed": "Friend change", "conversation.started": "New chat", "conversation.closed": "Chat closed", "conversation.paused": "Chat paused", "conversation.resumed": "Chat resumed", "approval.decided": "Approval decided", "grant.changed": "Grant change", "webhook.test": "Test", "event.meeting_booked": "Meeting booked", "event.invite_accepted": "Invite accepted", "action.failed": "Action failed" };
+const TYPE_LABEL = { "message.received": "New message", "relationship.requested": "Friend request", "relationship.changed": "Friend change", "conversation.started": "New chat", "conversation.closed": "Chat closed", "conversation.paused": "Chat paused", "conversation.resumed": "Chat resumed", "approval.decided": "Approval decided", "grant.changed": "Grant change", "share.requested": "Share request", "webhook.test": "Test", "event.meeting_booked": "Meeting booked", "event.invite_accepted": "Invite accepted", "action.failed": "Action failed" };
 async function loadWebhook(el, botId) {
   const w = await api("GET", `/v1/bots/${botId}/webhook`, null, true).catch(() => null);
   if (!w) { el.innerHTML = `<span class="mut">Push settings unavailable</span>`; return; }

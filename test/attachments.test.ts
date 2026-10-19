@@ -25,6 +25,9 @@ async function pair(opts = {}) {
   const coder = await B("add_home_member", { home: b.home.bot_id, name: "coder" });
   const inv = await A("create_invite", { bot_id: writer.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
   await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: coder.bot_id });
+  // Joining only lets Writer answer Coder (#23); Bob shares Coder with Writer too, so either side may start.
+  const back = await B("create_invite", { bot_id: coder.bot_id, auto_accept: true, offered_capabilities: ["chat.public"], requested_capabilities: ["chat.public"] });
+  await A("join_invite", { code: back.code, from_bot_id: writer.bot_id });
   return { s, a, b, A, B, writer, coder };
 }
 
