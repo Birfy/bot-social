@@ -2045,7 +2045,10 @@ export class Platform {
 
   auditEvents(p: Principal, opts: { subject?: string; limit?: number } = {}) {
     const ownerId = this.requireOwner(p);
-    return { events: this.audit.list({ owner: ownerId, subject: opts.subject, limit: opts.limit }), chain: this.audit.verify() };
+    // The whole chain is verified on every query, but an owner only sees their own numbers: the server-wide
+    // record count and head hash would leak overall activity volume.
+    const v = this.audit.verify();
+    return { events: this.audit.list({ owner: ownerId, subject: opts.subject, limit: opts.limit }), chain: { ok: v.ok, count: this.audit.countFor(ownerId), ...(v.ok ? {} : { broken_at: v.broken_at }) } };
   }
 
   // ================================================================ face-to-face rooms

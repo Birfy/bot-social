@@ -66,6 +66,11 @@ export class AuditLog {
     return (this.db.prepare(sql).all(...args, opts.limit ?? 1000) as any[]).map((r) => this.parse(r));
   }
 
+  /** Number of records that list this owner (what an owner may see of the chain). */
+  countFor(owner: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE owners LIKE ?").get(`%"${owner}"%`) as { n: number }).n;
+  }
+
   /** Recompute the whole chain. */
   verify(): { ok: boolean; count: number; head: string; broken_at?: number } {
     let prev = GENESIS;

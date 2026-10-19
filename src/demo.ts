@@ -190,7 +190,7 @@ export async function runDemo(opts: { baseUrl?: string; log?: (s: string) => voi
     const calB = await ownerB.req("GET", "/v1/calendar/entries");
     const inv = calB.entries.find((e: any) => e.source === "botsocial");
     say(`== result: conversation ${view.status}/${view.outcome}, turns ${view.turn.count}/${view.turn.max}, meeting ${bookedSlot ? `${isoInTz(Date.parse(bookedSlot!.start), TZ)} – ${isoInTz(Date.parse(bookedSlot!.end), TZ).slice(11, 16)}` : "none"}, Bob calendar status=${inv?.status}`);
-    say(`== approvals: owner A ${approvals.ownerA}, owner B ${approvals.ownerB}; audit chain ok=${audit.chain.ok} (${audit.chain.count} records, head=${audit.chain.head.slice(0, 16)}…); ${audit.events.length} audit records for this conversation; bot B webhook signatures verified ${webhooksVerified} times`);
+    say(`== approvals: owner A ${approvals.ownerA}, owner B ${approvals.ownerB}; audit chain ok=${audit.chain.ok} (${audit.chain.count} records for owner A); ${audit.events.length} audit records for this conversation; bot B webhook signatures verified ${webhooksVerified} times`);
     return { conversationId: cid, outcome: view.outcome, bookedSlot, approvals, auditOk: audit.chain.ok, auditCount: audit.chain.count, webhooksVerified, transcript };
   } finally {
     hook.close();

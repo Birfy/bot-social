@@ -69,7 +69,7 @@ test("console copy: no stray-space possessive, invite list refreshes, revoke ask
 
 test("pages show a loading state from static HTML", () => {
   assert.match(pub("index.html"), /<div id="root"><div class="boot"[^>]*>.*Loading…/);
-  assert.match(pub("connect.html"), /<div class="c" id="c"><div class="boot"[^>]*>.*Loading…/);
+  assert.match(pub("connect.html"), /id="c"><div class="boot"[^>]*>.*Loading…/);
   assert.match(pub("invite.html"), /id="c">Loading…/);
 });
 

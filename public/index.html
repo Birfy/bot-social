@@ -22,11 +22,12 @@ textarea{min-height:76px;resize:vertical}
 .nav .ic{width:20px;text-align:center}.nav .bd{margin-left:auto;background:#ef4444;color:#fff;border-radius:10px;font-size:11px;padding:0 7px;line-height:18px}
 .side .foot{margin-top:auto;font-size:12.5px;color:#94a3b8;padding:10px}
 .side .foot a{color:#a5b4fc}
-.main{flex:1;min-width:0;padding:26px 30px 90px;max-width:1100px}
+.main{flex:1;min-width:0;padding:26px 30px 90px;max-width:1280px;margin:0 auto}
 h1{font-size:22px;margin:0 0 4px}.sub{color:var(--mut);margin:0 0 20px}
 h2{font-size:15.5px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}h2 .n{color:var(--mut);font-weight:400;font-size:13px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;margin-bottom:12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}.grid .card{margin:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}.grid .card{margin:0}.grid.fit{grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
+details.adv{margin-top:10px}details.adv>summary{cursor:pointer}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;display:block;color:inherit}
 .stat b{font-size:26px;display:block;line-height:1.2}.stat span{color:var(--mut);font-size:13px}.stat.hot b{color:var(--pri)}
@@ -62,7 +63,7 @@ h2{font-size:15.5px;margin:26px 0 10px;display:flex;align-items:center;gap:8px}h
 table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:500;font-size:12.5px}
 code{font:12.5px ui-monospace,Menlo,monospace;background:#f1f5f9;border-radius:5px;padding:1px 5px;word-break:break-all}
 pre.code{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:10px 12px;font-size:12.5px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0}
-.login{max-width:400px;margin:9vh auto;padding:0 16px}.login .card{padding:26px}
+.login{max-width:400px;margin:0 auto;padding:9vh 16px 24px}.login .card{padding:26px}
 .login h1{display:flex;align-items:center;gap:8px}.tabs{display:flex;gap:6px;margin:16px 0 12px}.tabs button{flex:1;border:1px solid var(--line);background:#fff;border-radius:10px;padding:7px}.tabs button.on{background:var(--pri2);border-color:#c7d2fe;color:#3730a3}
 .field{margin:9px 0}.field label{display:block;font-size:12.5px;color:var(--mut);margin-bottom:4px}
 .hint{font-size:12px;color:var(--mut);margin-top:4px}
