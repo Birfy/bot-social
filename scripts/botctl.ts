@@ -106,7 +106,7 @@ function printAttention(c: Cfg, a: Awaited<ReturnType<typeof attention>>) {
   say(C.b(`${c.handle}  ·  ${total ? `${total} item(s) need attention` : "all clear ✓"}`) + C.d(`  (${t(new Date().toISOString())}, new events ${a.new_events}, open chats ${a.open_conversations})`));
   if (a.need_reply.length) {
     say(C.y(`\n💬 Awaiting your reply (${a.need_reply.length})`));
-    for (const n of a.need_reply) say(`  • ${n.peer.handle} ${C.d(`[${n.intent.type}] ${n.conversation_id} turn ${n.turn.count}/${n.turn.max}`)}\n    ${untrusted(n.peer.handle, n.last.untrusted_content.text)}\n    ${C.d(`reply: botctl send ${c.name} ${n.conversation_id} "…"`)}`);
+    for (const n of a.need_reply) say(`  • ${n.peer.handle} ${C.d(`[${n.intent.type}] ${n.conversation_id} turn ${n.turn.count}`)}\n    ${untrusted(n.peer.handle, n.last.untrusted_content.text)}\n    ${C.d(`reply: botctl send ${c.name} ${n.conversation_id} "…"`)}`);
   }
   if (a.owner_approvals.length) {
     say(C.y(`\n✋ Awaiting owner approval (${a.owner_approvals.length})`) + C.d(`  owner can handle these at ${c.base}/ui or via the Grok Bot connector`));
@@ -125,7 +125,7 @@ function printAttention(c: Cfg, a: Awaited<ReturnType<typeof attention>>) {
 function printEvent(e: any) {
   const who = e.from?.handle ?? "";
   switch (e.event_type) {
-    case "message.received": return `💬 ${t(e.created_at)} ${who} ${C.d(`[${e.conversation_id} ${e.turn.count}/${e.turn.max}]`)}${e.security?.injection_suspected ? C.r(" ⚠ injection suspected") : ""}\n   ${untrusted(who, e.untrusted_content.text)}${e.untrusted_content.structured ? "\n   " + untrusted(who, JSON.stringify(e.untrusted_content.structured)) : ""}`;
+    case "message.received": return `💬 ${t(e.created_at)} ${who} ${C.d(`[${e.conversation_id} turn ${e.turn.count}]`)}${e.security?.injection_suspected ? C.r(" ⚠ injection suspected") : ""}\n   ${untrusted(who, e.untrusted_content.text)}${e.untrusted_content.structured ? "\n   " + untrusted(who, JSON.stringify(e.untrusted_content.structured)) : ""}`;
     case "approval.decided": return `✋ ${t(e.created_at)} owner ${e.decision === "rejected" ? C.r("rejected") : e.decision === "expired" ? "did not decide (expired)" : C.g("approved")} ${e.kind}${e.note_to_bot ? `: ${e.note_to_bot}` : ""}`;
     case "relationship.requested": return `🤝 ${t(e.created_at)} ${who} sent a friend request ${C.d(e.relationship_id)}\n   ${untrusted(who, e.untrusted_content?.message)}`;
     case "relationship.changed": return `🤝 ${t(e.created_at)} relationship ${e.relationship_id} → ${e.status}`;
@@ -138,7 +138,7 @@ function printEvent(e: any) {
 
 function printConversation(c: Cfg, v: any) {
   const peer = v.initiator.bot_id === c.bot_id ? v.peer : v.initiator;
-  say(C.b(`${v.intent.summary || v.intent.type}`) + C.d(`  ${v.conversation_id} · ${v.intent.type} · with ${peer.handle} · ${v.status}${v.outcome ? "/" + v.outcome : ""} · turn ${v.turn.count}/${v.turn.max}`));
+  say(C.b(`${v.intent.summary || v.intent.type}`) + C.d(`  ${v.conversation_id} · ${v.intent.type} · with ${peer.handle} · ${v.status}${v.outcome ? "/" + v.outcome : ""} · turn ${v.turn.count}`));
   for (const m of v.messages) {
     if (m.direction === "outbound") say(`  ${C.g("me")} ${C.d(`${t(m.created_at)} [${m.status}]`)} ${m.content.text}`);
     else say(`  ${peer.handle} ${C.d(t(m.delivered_at))} ${untrusted(peer.handle, m.untrusted_content.text)}`);
@@ -325,8 +325,8 @@ try {
       const type = str(f.intent) ?? "general_chat";
       const params: any = { timezone: tz };
       if (type === "schedule_meeting") { params.duration_minutes = Number(f.duration ?? 30); params.window = { start: str(f.start) ?? new Date().toISOString(), end: str(f.end) ?? new Date(Date.now() + 7 * 86400e3).toISOString() }; }
-      const r = await bot(c).startConversation(peer.bot_id, { type, summary: str(f.summary) ?? "", params, max_turns: f["max-turns"] ? Number(f["max-turns"]) : undefined });
-      say(C.g(`✓ Conversation ${r.conversation_id}`) + C.d(` ${type}, max ${r.limits.max_turns} turns; capabilities I can use on them: ${capsTxt(r.effective_capabilities.me_on_peer)}`));
+      const r = await bot(c).startConversation(peer.bot_id, { type, summary: str(f.summary) ?? "", params });
+      say(C.g(`✓ Conversation ${r.conversation_id}`) + C.d(` ${type}; capabilities I can use on them: ${capsTxt(r.effective_capabilities.me_on_peer)}`));
       done(r);
     }
     case "send": {
@@ -347,7 +347,7 @@ try {
     case "conversations": {
       const [c] = nameAnd(0);
       const r = await bot(c).req("GET", "/v1/conversations");
-      for (const x of r.conversations) { const peer = x.initiator.bot_id === c.bot_id ? x.peer : x.initiator; say(`  • ${x.conversation_id} ${peer.handle} [${x.intent.type}] ${x.status}${x.outcome ? "/" + x.outcome : ""} ${x.turn.count}/${x.turn.max} ${C.d(x.intent.summary)}`); }
+      for (const x of r.conversations) { const peer = x.initiator.bot_id === c.bot_id ? x.peer : x.initiator; say(`  • ${x.conversation_id} ${peer.handle} [${x.intent.type}] ${x.status}${x.outcome ? "/" + x.outcome : ""} turn ${x.turn.count} ${C.d(x.intent.summary)}`); }
       if (!r.conversations.length) say(C.d("  No conversations"));
       done(r);
     }

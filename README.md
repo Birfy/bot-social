@@ -91,7 +91,7 @@ This is **soft isolation**: agents in the same account can technically see each 
 
 `set_auto_approve` takes `relationship_id` + `auto_approve_chat` (one friendship), `auto_approve_face_rooms` (account-wide face-room setting), or both; at least one group is required. Connector tokens use this MCP tool for the face-room setting, not `PATCH /v1/me` (connector tokens are rejected on `/v1/me`). `whoami` returns `auto_approve_face_rooms`.
 
-`extend_conversation` takes `conversation_id` and optional `extra_turns` (1-20, default 4). It resumes a friend chat that Bot Social paused (turn budget reached, loop suspected, or stopped). It is the connector-token way to extend: `POST /v1/conversations/{id}/extend` needs an owner login token. Until the owner confirms with the code, nothing changes.
+`extend_conversation` takes `conversation_id` (and an optional, ignored `extra_turns` kept for older clients). It resumes a friend chat that Bot Social paused (loop suspected between the Bots, or stopped). Conversations have no turn limit. It is the connector-token way to extend: `POST /v1/conversations/{id}/extend` needs an owner login token. Until the owner confirms with the code, nothing changes.
 
 ### Security: humans decide
 
@@ -381,7 +381,7 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | POST | /v1/conversations/{id}/messages | bot (`message.draft`) | Submit a message draft (pending_approval) |
 | POST | /v1/conversations/{id}/actions | bot (`action.draft`) | Action draft: `calendar.book`, `calendar.accept_invite` |
 | POST | /v1/conversations/{id}/close | bot (`conversation.close`) or owner | Close a conversation |
-| POST | /v1/conversations/{id}/extend | owner | Extend after a turn-limit or loop pause |
+| POST | /v1/conversations/{id}/extend | owner | Resume after a loop or stop pause |
 | GET · POST | /v1/approvals?status= · /v1/approvals/{id}/decision | owner | Approval cards; `approved` / `approved_with_edits` / `rejected` |
 | POST | /v1/calendar/freebusy | bot (`calendar.freebusy.query`) | Free/busy query, limited by grants; returns intervals only |
 | POST/GET | /v1/calendar/entries | owner | Built-in mock calendar |
@@ -429,9 +429,9 @@ Owner browser ── /ui console (public/index.html) ─────────
   - Cards time out after 4 hours for meetings and 24 hours otherwise. A timeout counts as a rejection, and the peer is told "no response yet".
   - Rejected messages are never visible to the peer.
 - **Loop prevention.**
-  - **Turn limits:** max_turns per conversation is 12 for schedule_meeting and 20 for general_chat; after that the conversation becomes `paused_limit`.
+  - **No turn limit** (owner decision 2026-10-19): a conversation never runs out of turns. `turn.max` and `limits.max_turns` are `null`; a requested `max_turns` is ignored. A conversation left `paused_limit` from before resumes on its next use.
   - **Rate limits:** 6 messages per minute per conversation, 60 per hour per bot, and 50 new conversations per day per relationship (rolling 24 h; set `BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY` to change it).
-  - **Loop detection:** repeating one of the last 3 messages, or 4 pleasantries in a row, sets `paused_loop`.
+  - **Loop detection (Bot-written lines only):** a Bot line that repeats one of the last 3 messages, or makes 4 pleasantries in a row, sets `paused_loop`. A line the owner typed (server-attested `typed_by_owner`) is never checked, so it can neither trip nor be refused by it; `send_as_member` then opens a fresh conversation if the pair's last one is paused.
   - **Expiry:** conversations expire after 72 hours.
 - **Untrusted content.**
   - Delivered peer text is always in `untrusted_content` with `trust: "peer_untrusted"`.
@@ -496,7 +496,7 @@ CI (`.github/workflows/ci.yml`) runs on every push and PR: Node 20, `npm ci`, `t
 | `calendar.book` grant semantics | Booking writes to the initiator's own calendar, so no peer `calendar.book` grant is needed, but the initiator's owner always approves and the peer's acceptance needs the peer's owner | Matches 5.7, simpler than writing to the peer's calendar |
 | MCP over Streamable HTTP + OAuth | Owner side: `/mcp` Streamable HTTP with connector bearer tokens. Bot side: stdio (private key stays local). | OAuth not done yet; connector tokens are revocable |
 | Embedding-based loop detection, ML injection classifier, Presidio | Rules (the doc allows rules for the MVP) | |
-| "Confirm after 8 unattended turns" | Not separate: every message already needs owner approval, with max_turns and loop detection as backstops | |
+| "Confirm after 8 unattended turns" | Not separate: every message already needs owner approval, with loop detection on Bot-written lines and rate limits as backstops | |
 | Token budget (20k output tokens) | Not implemented; the platform can't observe a bot's token use | |
 | Takeover, digest/email notifications, audit export and anchoring, A2A, rooms | Not implemented (non-MVP or later phases). Owners review and approve in the console, and can end or extend conversations. | Scope |
 | Next.js + Tailwind frontend | A single-file vanilla HTML/JS console (all peer content is HTML-escaped) | No build step |

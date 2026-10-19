@@ -24,7 +24,7 @@ const avatar = (name, size = 40) => { const n = String(name || "?").replace(/^@/
 const CAP_LABEL = { "chat.public": "Chat", "profile.read": "Profile", "calendar.freebusy.read": "Free/busy", "calendar.book": "Book meetings" };
 const capPill = (c, extra = "") => `<span class="pill" title="${esc(c)}">${esc(CAP_LABEL[c] || c)}${extra}</span>`;
 const REL_ST = { active: ["Friends", "ok"], pending_target: ["Waiting for their owner", "warn"], pending_requester_owner: ["Waiting for your approval", "warn"], blocked: ["Blocked", "bad"], revoked: ["Removed", "gray"], declined: ["Rejected", "gray"], expired: ["Expired", "gray"], cancelled: ["Cancelled", "gray"] };
-const CONV_ST = { open: ["Active", "ok"], awaiting_approval: ["Pending approval", "warn"], paused_limit: ["Turn limit reached", "bad"], paused_loop: ["Loop suspected", "bad"], paused_stop: ["Emergency-stopped", "bad"], closed: ["Closed", "gray"] };
+const CONV_ST = { open: ["Active", "ok"], awaiting_approval: ["Pending approval", "warn"], paused_limit: ["Paused (old turn limit)", "warn"], paused_loop: ["Loop suspected", "bad"], paused_stop: ["Emergency-stopped", "bad"], closed: ["Closed", "gray"] };
 const OUTCOME = { agreed: "Agreed", declined: "Rejected", abandoned: "Abandoned", expired: "Expired", revoked: "Unfriended" };
 const KIND = { outbound_message: "Outbound message", action: "Sensitive action", relationship_request: "Friend request", grant_request: "Capability request", invite: "Invite link" };
 const MSG_ST = { pending_approval: "Awaiting your approval", delivered: "Delivered", rejected: "Rejected", cancelled: "Voided", expired: "Expired" };
@@ -268,7 +268,7 @@ function secretsPanel({ title, lead, model }) {
 // ------------------------------------------------------------------ shared widgets
 function approvalCard(a) {
   let body = "";
-  if (a.message) body = `<div class="mut small" style="margin:6px 0 4px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}${a.conversation ? ` · ${esc(a.conversation.intent.summary || a.conversation.intent.type)} · turn ${a.conversation.turn.count + 1}/${a.conversation.turn.max}` : ""}</div>
+  if (a.message) body = `<div class="mut small" style="margin:6px 0 4px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}${a.conversation ? ` · ${esc(a.conversation.intent.summary || a.conversation.intent.type)} · turn ${a.conversation.turn.count + 1}` : ""}</div>
     <textarea data-edit="${a.approval_id}">${esc(a.message.payload.text)}</textarea>${a.message.payload.structured ? `<div class="struct">${esc(JSON.stringify(a.message.payload.structured, null, 1))}</div>` : ""}`;
   else if (a.action) body = `<div class="struct">${esc(a.action.action_type)}\n${esc(JSON.stringify(a.action.params, null, 1))}</div>${a.action.justification ? `<div class="mut small">Bot's reason: ${esc(a.action.justification)}</div>` : ""}`;
   else if (a.relationship) body = `<div class="small" style="margin-top:6px">Target: <b>${esc(a.relationship.target.display_name)}</b> ${esc(a.relationship.target.handle)}(owner ${esc(a.relationship.target.owner_display_name)})<br>You will grant: ${a.relationship.offered_capabilities.map((c) => capPill(c)).join(" ")}</div>`;
@@ -330,7 +330,7 @@ function convList(list) {
   return `<div class="list">${list.map((x) => {
     const mine = me.bots.some((b) => b.id === x.initiator.bot_id); const peer = mine ? x.peer : x.initiator; const self = mine ? x.initiator : x.peer;
     return `<a class="it" href="#/chat/${x.conversation_id}">${avatar(peer.display_name)}<div class="grow"><div><b>${esc(peer.display_name)}</b> <span class="mut">${esc(peer.handle)}</span></div>
-      <div class="mut">${esc(x.intent.summary || x.intent.type)} · ${esc(self.handle)} · ${x.turn.count}/${x.turn.max} turns</div></div>
+      <div class="mut">${esc(x.intent.summary || x.intent.type)} · ${esc(self.handle)} · ${x.turn.count} turns</div></div>
       <div style="text-align:right">${st(CONV_ST, x.status)}${x.outcome ? `<div class="mut">${esc(OUTCOME[x.outcome] || x.outcome)}</div>` : ""}<div class="mut">${ago(x.updated_at)}</div></div></a>`;
   }).join("")}</div>`;
 }
@@ -395,7 +395,7 @@ PAGES.chat = async (v) => {
   const acts = c.actions.map((a) => `<div class="sys">⚙ ${esc(a.action_type === "calendar.book" ? "Book meetings" : a.action_type === "calendar.accept_invite" ? "Accept meeting invite" : a.action_type)} · ${esc(a.status)}${a.result?.start ? ` · ${fmt(a.result.start)}` : ""}</div>`).join("");
   v.innerHTML = `<div class="row" style="margin-bottom:12px"><a href="#/chats" class="btn s">← Chats</a></div>
     <div class="chat"><div class="chathead">${avatar(peer.display_name)}<div class="grow"><b>${esc(peer.display_name)}</b> <span class="mut">${esc(peer.handle)} · owner ${esc(peer.owner_display_name)}</span>
-      <div class="mut">${esc(c.intent.summary || c.intent.type)} · ${esc(c.intent.type)} · me ${esc(self.handle)} · ${c.turn.count}/${c.turn.max} turns</div></div>
+      <div class="mut">${esc(c.intent.summary || c.intent.type)} · ${esc(c.intent.type)} · me ${esc(self.handle)} · ${c.turn.count} turns</div></div>
       ${st(CONV_ST, c.status)}${c.outcome ? `<span class="pill gray">${esc(OUTCOME[c.outcome] || c.outcome)}</span>` : ""}
       ${c.status.startsWith("paused") || c.status === "open" || c.status === "awaiting_approval" ? `<button class="btn s" id="ext">Extend 4 turns</button>` : ""}${c.status !== "closed" ? `<button class="btn s d" id="cls">Close</button>` : ""}</div>
       <div class="msgs"><div class="sys">Conversation started · ${fmt(c.messages[0]?.created_at || c.messages[0]?.delivered_at)}</div>${bubbles || '<div class="sys">No messages yet</div>'}${acts}${c.status === "closed" ? `<div class="sys">Chat closed${c.summary ? ": " + esc(c.summary) : ""}</div>` : ""}</div></div>

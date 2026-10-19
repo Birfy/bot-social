@@ -142,20 +142,33 @@ describe("conversations & approvals", () => {
     await expectApiError(A.bot.startConversation(B.bot.id, { type: "intro_request", summary: "x" }), 403, "intent_scope_violation");
   });
 
-  test("acceptance 6: max_turns reached → paused_limit; owner can extend", async () => {
+  test("acceptance 6 (revised 2026-10-19): no turn limit; a requested max_turns is ignored", async () => {
     const { A, B } = await friends(S.base);
     const conv = await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "short", max_turns: 2 });
+    assert.equal(conv.limits.max_turns, null);
     const cid = conv.conversation_id;
     await A.bot.draftMessage(cid, { text: "message one about the plan" });
     await approveAll(A.owner);
     await B.bot.draftMessage(cid, { text: "reply two with details" });
     await approveAll(B.owner);
-    assert.equal((await A.bot.getConversation(cid)).status, "paused_limit");
-    await expectApiError(A.bot.draftMessage(cid, { text: "three" }), 409, "conversation_paused");
-    const ext = await B.owner.req("POST", `/v1/conversations/${cid}/extend`, { extra_turns: 2 });
-    assert.equal(ext.status, "open");
-    const d = await A.bot.draftMessage(cid, { text: "three, after extension" });
+    const view = await A.bot.getConversation(cid);
+    assert.equal(view.status, "open");
+    assert.deepEqual(view.turn, { count: 2, max: null });
+    // Far past the old 20-turn general_chat budget: still open, still sendable.
+    S.platform.db.prepare("UPDATE conversations SET turn_count = 500 WHERE id = ?").run(cid);
+    const d = await A.bot.draftMessage(cid, { text: "three, long after the old budget" });
     assert.equal(d.status, "pending_approval");
+    await approveAll(A.owner);
+    assert.equal((await A.bot.getConversation(cid)).status, "open");
+  });
+
+  test("a chat left paused_limit by the old turn limit resumes on its next use", async () => {
+    const { A, B } = await friends(S.base);
+    const cid = (await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "x" })).conversation_id;
+    S.platform.db.prepare("UPDATE conversations SET status = 'paused_limit', max_turns = 20, turn_count = 20 WHERE id = ?").run(cid);
+    const d = await A.bot.draftMessage(cid, { text: "picking this up again" });
+    assert.equal(d.status, "pending_approval");
+    assert.equal((await A.bot.getConversation(cid)).status, "awaiting_approval");
   });
 
   test("loop detection pauses pleasantry ping-pong", async () => {

@@ -19,10 +19,11 @@ export const CAPABILITIES: Record<string, CapabilityDef> = {
 export const DEFAULT_CAPABILITIES = Object.values(CAPABILITIES).filter((c) => c.default).map((c) => c.id);
 export const MVP_GRANTABLE = ["chat.public", "profile.read", "calendar.freebusy.read", "calendar.book"];
 
-export interface IntentDef { type: string; allowed: string[]; maxTurns: number }
+/** Conversations have no turn limit (owner decision 2026-10-19 18:05): only rate limits, loop detection for Bot-written lines, and expiry bound them. */
+export interface IntentDef { type: string; allowed: string[] }
 export const INTENTS: Record<string, IntentDef> = {
-  schedule_meeting: { type: "schedule_meeting", allowed: ["chat.public", "profile.read", "calendar.freebusy.read", "calendar.book", "commitment.make"], maxTurns: 12 },
-  general_chat: { type: "general_chat", allowed: ["chat.public", "profile.read"], maxTurns: 20 },
+  schedule_meeting: { type: "schedule_meeting", allowed: ["chat.public", "profile.read", "calendar.freebusy.read", "calendar.book", "commitment.make"] },
+  general_chat: { type: "general_chat", allowed: ["chat.public", "profile.read"] },
 };
 
 /** Action types bots may draft, with the capability they exercise. */
@@ -120,7 +121,8 @@ const PLEASANTRY = /^(谢谢|多谢|不客气|好的|收到|祝好|再见|没问
 export const normalize = (t: string) => t.toLowerCase().replace(/[\s\p{P}]+/gu, "");
 
 /**
- * Rule-based loop detection (MVP replacement for embedding similarity):
+ * Rule-based loop detection (MVP replacement for embedding similarity). It guards Bot-to-Bot
+ * exchanges only: the platform skips it for a line the owner typed (server-attested typed_by_owner).
  * - the new text duplicates one of the last 3 messages, or
  * - the new message plus the previous 3 are all content-free pleasantries.
  */

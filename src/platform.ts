@@ -1488,7 +1488,7 @@ export class Platform {
           granted_to_me: grants.filter((g) => g.grantee_bot === selected.id).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at })),
         },
         conversation_count: convs.length,
-        last_conversation: last ? { conversation_id: last.id, status: last.status, outcome: last.outcome, intent: J(last.intent).type, summary: J(last.intent).summary, turn: { count: last.turn_count, max: last.max_turns }, updated_at: last.updated_at } : null,
+        last_conversation: last ? { conversation_id: last.id, status: last.status, outcome: last.outcome, intent: J(last.intent).type, summary: J(last.intent).summary, turn: { count: last.turn_count, max: null }, updated_at: last.updated_at } : null,
         last_activity_at: times[times.length - 1] ?? null,
       };
     });
@@ -1589,7 +1589,7 @@ export class Platform {
     }
     if (a.conversation_id) {
       const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
-      if (c) card.conversation = { conversation_id: c.id, intent: J(c.intent), status: c.status, turn: { count: c.turn_count, max: c.max_turns } };
+      if (c) card.conversation = { conversation_id: c.id, intent: J(c.intent), status: c.status, turn: { count: c.turn_count, max: null } };
     }
     return card;
   }
@@ -1658,7 +1658,9 @@ export class Platform {
       throw new ApiError(409, "conversation_closed", "conversation expired");
     }
     assert(c.status !== "closed", 409, "conversation_closed", `conversation is closed (${c.outcome})`);
-    assert(["open", "awaiting_approval"].includes(c.status), 409, "conversation_paused", `conversation is ${c.status}`);
+    // paused_limit is from before the turn limit was removed: such a chat simply resumes on its next use.
+    if (c.status === "paused_limit") this.resumeConversation(c, "platform", { reason: "turn_limit_removed" });
+    else assert(["open", "awaiting_approval"].includes(c.status), 409, "conversation_paused", `conversation is ${c.status}`);
   }
 
   private policyDecision(actor: string, convId: string | null, owners: string[], action: string, decision: string, reasons: string[], extra: Record<string, unknown> = {}) {
@@ -1687,19 +1689,19 @@ export class Platform {
     const since = new Date(Date.now() - 86400e3).toISOString();
     const today = this.get("SELECT COUNT(*) n FROM conversations WHERE relationship_id = ? AND created_at > ?", rel.id, since).n;
     if (today >= LIMITS.newConversationsPerPairPerDay) throw new ApiError(429, "rate_limited", "too many new conversations for this relationship today", { retry_after: 3600 });
-    const maxTurns = Math.min(Number(pl.intent.max_turns) || intentDef.maxTurns, intentDef.maxTurns);
     const allowed = (pl.intent.allowed_capabilities ?? intentDef.allowed).filter((c: string) => intentDef.allowed.includes(c));
-    const intent = { type: intentDef.type, summary: String(pl.intent.summary ?? ""), params: pl.intent.params ?? {}, allowed_capabilities: allowed, success_criteria: pl.intent.success_criteria ?? null, max_turns: maxTurns };
+    const intent = { type: intentDef.type, summary: String(pl.intent.summary ?? ""), params: pl.intent.params ?? {}, allowed_capabilities: allowed, success_criteria: pl.intent.success_criteria ?? null, max_turns: null };
     const id = newId("cnv");
     const expires = pl.intent.expires_at ? new Date(ms(pl.intent.expires_at)).toISOString() : new Date(Date.now() + 72 * 3600e3).toISOString();
     this.run("INSERT INTO conversations (id, type, relationship_id, initiator_bot, peer_bot, intent, status, max_turns, created_at, updated_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-      id, "direct", rel.id, botId, peer.id, JSON.stringify(intent), "open", maxTurns, nowIso(), nowIso(), expires);
-    this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", ["relationship.active", "intent.allowed", "turn_budget.ok"]);
+      // max_turns stays in the schema (NOT NULL) but nothing reads it: conversations have no turn limit (owner decision 2026-10-19).
+      id, "direct", rel.id, botId, peer.id, JSON.stringify(intent), "open", 0, nowIso(), nowIso(), expires);
+    this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", ["relationship.active", "intent.allowed"]);
     this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
     this.emit(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
     return {
       conversation_id: id, status: "open", intent,
-      limits: { max_turns: maxTurns, rate_per_min: LIMITS.ratePerConversationPerMin, expires_at: expires },
+      limits: { max_turns: null, rate_per_min: LIMITS.ratePerConversationPerMin, expires_at: expires },
       effective_capabilities: this.effectiveCaps(botId, peer.id, allowed),
     };
   }
@@ -1743,16 +1745,13 @@ export class Platform {
       throw new ApiError(429, "rate_limited", "per-conversation rate limit (6/min)", { retry_after: 60 });
     if (this.get("SELECT COUNT(*) n FROM messages WHERE sender_bot = ? AND created_ms > ?", botId, hourAgo).n >= LIMITS.ratePerBotPerHour)
       throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
-    // turn budget (delivered + pending)
-    const pendingCount = this.get("SELECT COUNT(*) n FROM messages WHERE conversation_id = ? AND status = 'pending_approval'", convId).n;
-    if (c.turn_count + pendingCount >= c.max_turns) {
-      this.pauseConversation(c, "paused_limit", "max_turns reached");
-      throw new ApiError(409, "conversation_paused", "turn budget exhausted; owners can extend the conversation");
-    }
-    // loop detection
+    // No turn budget (owner decision 2026-10-19 18:05): a conversation never runs out of turns.
+    // Loop detection guards Bot-to-Bot exchanges only. A line the owner typed (typed_by_owner, attested
+    // by sendAsMember for a trusted host token, never read from the text) is never paused by it: a person
+    // saying "Hi" twice is not a loop, and pausing them left the owner unable to send at all.
     const recent = this.all("SELECT payload FROM messages WHERE conversation_id = ? AND status IN ('delivered','pending_approval') ORDER BY created_ms DESC LIMIT 3", convId)
       .reverse().map((m) => { const x = J(m.payload); return { text: x.text ?? "", structured: !!x.structured }; });
-    if (detectLoop(recent, { text: pl.text, structured: !!pl.structured })) {
+    if (!typedByOwner && detectLoop(recent, { text: pl.text, structured: !!pl.structured })) {
       this.pauseConversation(c, "paused_loop", "loop_detected");
       throw new ApiError(409, "conversation_paused", "loop detected (repetitive or content-free exchange); conversation paused");
     }
@@ -1797,7 +1796,7 @@ export class Platform {
   private pauseConversation(c: any, status: string, reason: string) {
     this.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), c.id);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
-    this.audit.append("platform", "conversation.paused", c.id, owners, { status, reason, turn_count: c.turn_count, max_turns: c.max_turns });
+    this.audit.append("platform", "conversation.paused", c.id, owners, { status, reason, turn_count: c.turn_count });
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.paused", { conversation_id: c.id, status, reason, trust: "platform" });
   }
 
@@ -1829,7 +1828,7 @@ export class Platform {
       expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
       ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
       ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}),
-      security: { injection_suspected: inj.suspected }, turn: { count: turn, max: c.max_turns },
+      security: { injection_suspected: inj.suspected }, turn: { count: turn, max: null },
       sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
       platform_kid: this.platformKid, delivered_at: nowIso(),
     };
@@ -1839,7 +1838,6 @@ export class Platform {
     this.emit(recipient.id, "message.received", delivered);
     this.emit(sender.id, "approval.decided", { approval_id: a.id, kind: "outbound_message", message_id: m.id, decision: body.decision, note_to_bot: body.note_to_bot ?? null, delivered_payload: payload });
     this.audit.append("platform", "message.delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: c.id, turn, edited: !!edited, injection_suspected: inj.suspected, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig });
-    if (turn >= c.max_turns) this.pauseConversation({ ...c, turn_count: turn }, "paused_limit", "max_turns reached");
     return { message_id: m.id, status: "delivered" };
   }
 
@@ -1851,18 +1849,31 @@ export class Platform {
     return { message_id: m.id, status: "rejected" };
   }
 
+  /**
+   * Resume a paused conversation (loop suspected, emergency-stopped, or a pre-removal paused_limit).
+   * The name and `extra_turns` stay for older clients; conversations have no turn limit, so nothing is added.
+   */
   extendConversation(p: Principal, convId: string, body: { extra_turns?: number }) {
     const ownerId = this.requireOwner(p);
     const c = this.conv(convId);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
     assert(owners.includes(ownerId), 403, "forbidden");
     assert(["paused_limit", "paused_loop", "paused_stop", "open", "awaiting_approval"].includes(c.status), 409, "invalid_state", `conversation is ${c.status}`);
-    const extra = Math.max(1, Math.min(Number(body?.extra_turns) || 4, 20));
-    this.run("UPDATE conversations SET max_turns = max_turns + ?, status = 'open', updated_at = ? WHERE id = ?", extra, nowIso(), convId);
-    this.refreshConversationStatus(convId);
-    this.audit.append(`owner:${ownerId}`, "conversation.extended", convId, owners, { extra_turns: extra });
-    for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.resumed", { conversation_id: convId, max_turns: c.max_turns + extra, trust: "platform" });
-    return { conversation_id: convId, status: this.conv(convId).status, max_turns: c.max_turns + extra };
+    void body;
+    this.resumeConversation(c, `owner:${ownerId}`, { resumed_from: c.status });
+    return { conversation_id: convId, status: this.conv(convId).status, max_turns: null };
+  }
+
+  private resumeConversation(c: any, actor: string, data: Record<string, unknown>) {
+    const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
+    if (!["open", "awaiting_approval"].includes(c.status)) {
+      this.run("UPDATE conversations SET status = 'open', updated_at = ? WHERE id = ?", nowIso(), c.id);
+      c.status = "open";
+    }
+    this.refreshConversationStatus(c.id);
+    c.status = this.conv(c.id).status;
+    this.audit.append(actor, "conversation.extended", c.id, owners, data);
+    for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.resumed", { conversation_id: c.id, max_turns: null, trust: "platform" });
   }
 
   closeConversation(p: Principal, convId: string, body: any) {
@@ -1894,7 +1905,7 @@ export class Platform {
     const rows = p.kind === "owner"
       ? this.all("SELECT c.* FROM conversations c WHERE c.initiator_bot IN (SELECT id FROM bots WHERE owner_id = ?) OR c.peer_bot IN (SELECT id FROM bots WHERE owner_id = ?) ORDER BY c.created_at DESC", p.ownerId, p.ownerId)
       : this.all("SELECT * FROM conversations WHERE initiator_bot = ? OR peer_bot = ? ORDER BY created_at DESC", p.botId, p.botId);
-    return rows.map((c) => ({ conversation_id: c.id, status: c.status, outcome: c.outcome, intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: c.max_turns }, created_at: c.created_at, updated_at: c.updated_at }));
+    return rows.map((c) => ({ conversation_id: c.id, status: c.status, outcome: c.outcome, intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: null }, created_at: c.created_at, updated_at: c.updated_at }));
   }
 
   /** Conversation view. Peer messages appear only once delivered, always wrapped as untrusted. */
@@ -1919,7 +1930,7 @@ export class Platform {
       .filter((x) => x.actor_bot === viewerBot || ["executed", "failed"].includes(x.status))
       .map((x) => ({ action_id: x.id, actor_bot: x.actor_bot, action_type: x.action_type, params: J(x.params), status: x.status, result: J(x.result) }));
     return {
-      conversation_id: c.id, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: c.max_turns },
+      conversation_id: c.id, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
       initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), messages: msgs, actions,
       effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities),
     };
