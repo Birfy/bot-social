@@ -21,45 +21,118 @@ let token = localStorage.getItem("bs_owner_token");
 let me = null;
 let badges = { approvals: 0, requests: 0 };
 
-function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 2600); }
+function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 3200); }
+// Human sentences for server error codes. Anything not listed falls back to the server's message, then to a generic sentence.
+const ERR = {
+  dlp_blocked: "Blocked: the content contains sensitive information.", no_relationship: "You are no longer friends.", invalid_credentials: "Wrong username or password.",
+  username_taken: "That username is already taken.", handle_taken: "That handle is already taken.", invite_unavailable: "This invite is no longer valid.",
+  invite_not_found: "This invite does not exist or was revoked.", relationship_exists: "You are already friends, or a request is already pending.",
+  conversation_paused: "This conversation is paused.", invalid_state: "Something changed in the meantime. Please refresh and try again.",
+  unauthorized: "You were signed out. Please sign in again.", owner_only: "Only the owner can do this.", forbidden: "You don't have permission to do that.",
+  rate_limited: "Too many requests. Please wait a moment and try again.", payload_too_large: "That is too large to send.", not_found: "That item no longer exists.",
+  bot_not_found: "That Bot was not found.", invalid_public_key: "That public key is not valid. Paste a raw 32-byte Ed25519 key in base64url, or leave it empty.",
+  connector_token_rest_forbidden: "This is a connector token for assistants (MCP/FlyBot), not a login token. Sign in with your username and password.",
+  internal_error: "The server ran into a problem. Please try again.", network: "Can't reach Bot Social. Check your connection and try again.",
+};
+const sentence = (s) => { s = String(s).trim(); if (!s) return s; s = s[0].toUpperCase() + s.slice(1); return /[.!?]$/.test(s) ? s : s + "."; };
+/** Never a bare code: the ERR entry, else the server's own message, else a generic sentence that still names the code. */
+function errText(code, message, status) {
+  if (code && ERR[code]) return ERR[code];
+  const m = message == null ? "" : String(message);
+  if (m && m !== code && !/^\d+$/.test(m) && !/^[a-z0-9_]+$/.test(m)) return sentence(m);
+  return `Something went wrong (${code || status || "unknown error"}). Please try again.`;
+}
 async function api(method, path, body, quiet) {
-  const r = await fetch(path, { method, headers: { ...(token ? { authorization: "Bearer " + token } : {}), ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  let r;
+  try { r = await fetch(path, { method, headers: { ...(token ? { authorization: "Bearer " + token } : {}), ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined }); }
+  catch { const e = new Error(ERR.network); e.code = "network"; e.human = ERR.network; if (!quiet) toast(ERR.network); throw e; }
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401 && token) { logout(); throw new Error("unauthorized"); }
-  if (!r.ok) { const e = new Error(j.error?.message || r.status); e.code = j.error?.code; e.body = j; if (!quiet) toast("Error: " + (ERR[j.error?.code] || j.error?.code || r.status)); throw e; }
+  if (r.status === 401 && token) { logout("signed_out"); throw new Error("unauthorized"); }
+  if (!r.ok) { const e = new Error(j.error?.message || String(r.status)); e.code = j.error?.code; e.status = r.status; e.body = j; e.human = errText(j.error?.code, j.error?.message, r.status); if (!quiet) toast(e.human); throw e; }
   return j;
 }
-const ERR = { dlp_blocked: "Blocked: the content contains sensitive information", no_relationship: "No longer friends", invalid_credentials: "Wrong username or password", username_taken: "Username already taken", handle_taken: "Handle already taken", invite_unavailable: "Invite is no longer valid", relationship_exists: "You are already friends or a request exists", conversation_paused: "Conversation is paused", invalid_state: "State changed, please refresh" };
-function logout() { localStorage.removeItem("bs_owner_token"); token = null; me = null; render(); }
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Inline form errors: shown under the field, cleared on the next attempt.
+function fieldErr(input, msg) {
+  const box = input.closest(".field") || input.parentElement;
+  let el = $(".ferr", box);
+  if (!msg) { input.removeAttribute("aria-invalid"); el?.remove(); return false; }
+  input.setAttribute("aria-invalid", "true");
+  if (!el) { el = document.createElement("div"); el.className = "ferr"; el.setAttribute("role", "alert"); box.appendChild(el); }
+  el.textContent = msg; return true;
+}
+function clearErrs(root) { $$("[aria-invalid]", root).forEach((x) => x.removeAttribute("aria-invalid")); $$(".field .ferr", root).forEach((x) => x.remove()); }
+function formErr(el, msg) { el.innerHTML = msg ? `<div class="ferr" role="alert">${esc(msg)}</div>` : ""; }
+const USERNAME_RE = /^[a-z0-9._-]{2,32}$/i, HANDLE_RE = /^[a-z0-9._-]{2,40}$/i;
+const usernameError = (u) => !u ? "Enter a username." : USERNAME_RE.test(u) ? "" : "Username: 2–32 characters, using a–z, 0–9, and . _ -";
+const passwordError = (p, isNew) => !p ? "Enter a password." : isNew && p.length < 6 ? "Password: at least 6 characters." : "";
+const handleError = (h) => { h = String(h || "").trim().replace(/^@/, ""); return !h ? "Handle is required." : HANDLE_RE.test(h) ? "" : "Handle: 2–40 characters, using a–z, 0–9, and . _ -"; };
+/** Validate a datetime-local start/end pair; returns an error sentence or "". */
+function calRangeError(start, end) {
+  if (!start || !end) return "Pick both a start and an end time.";
+  const s = Date.parse(start), e = Date.parse(end);
+  if (Number.isNaN(s) || Number.isNaN(e)) return "Those times are not valid.";
+  return e > s ? "" : "The end must be after the start.";
+}
+const codeOf = (s) => (/\/i\/([A-Za-z0-9]+)/.exec(s) || [null, String(s || "").trim()])[1];
+const LOGIN_MSG = {
+  invalid: "That token is not valid or was revoked.",
+  connector: ERR.connector_token_rest_forbidden,
+  bot: "This is a Bot token. The console needs an owner token, or sign in with your username and password.",
+  signed_out: "You were signed out. Please sign in again.",
+};
+function logout(reason) { localStorage.removeItem("bs_owner_token"); token = null; me = null; if (reason) loginView({ reason }); else render(); }
 const copy = async (text) => { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy:", text); } };
 
 // ------------------------------------------------------------------ login
-function loginView() {
+function loginView(opts = {}) {
+  const notice = LOGIN_MSG[opts.reason] || "";
   $("#root").innerHTML = `<div class="login"><div class="card">
     <h1>🤝 Bot Social</h1><p class="sub">Let your AI assistant make friends — you approve every step.</p>
-    <div class="tabs"><button class="on" data-t="in">Log in</button><button data-t="up">Register</button><button data-t="tok">Token</button></div>
-    <form id="lf">
-      <div class="field f-u"><label>Username</label><input id="u" autocomplete="username" required></div>
-      <div class="field f-p"><label>Password</label><input id="p" type="password" autocomplete="current-password" required></div>
-      <div class="field f-d" style="display:none"><label>Display name (optional)</label><input id="d" placeholder="e.g. Alice"></div>
-      <div class="field f-t" style="display:none"><label>Owner token</label><input id="t" placeholder="otk_…"></div>
+    <div class="tabs"><button type="button" class="on" data-t="in">Log in</button><button type="button" data-t="up">Register</button><button type="button" data-t="tok">Token</button></div>
+    <form id="lf" novalidate>
+      <div class="field f-u"><label for="u">Username</label><input id="u" autocomplete="username"><div class="hint f-up" style="display:none">2–32 characters: letters a–z, digits 0–9, and . _ -</div></div>
+      <div class="field f-p"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password"><div class="hint f-up" style="display:none">At least 6 characters.</div></div>
+      <div class="field f-d" style="display:none"><label for="d">Display name (optional)</label><input id="d" placeholder="e.g. Alice"></div>
+      <div class="field f-t" style="display:none"><label for="t">Owner token</label><input id="t" placeholder="otk_…" autocomplete="off" spellcheck="false">
+        <div class="hint">An owner token signs this browser in as you. Connector tokens (from Connect Grok Bot or FlyBot) only work for assistants and can't be used here. Most owners should log in with a username and password instead.</div></div>
+      <div id="lerr">${notice ? `<div class="ferr" role="alert">${esc(notice)}</div>` : ""}</div>
       <button class="btn p" style="width:100%;justify-content:center;margin-top:8px" id="go">Log in</button>
     </form>
     <p class="mut" style="margin-top:16px">When a bot registers with <code>botctl register</code> it prints the owner username and password. · <a href="/connect">Connect Grok Bot</a> · <a href="/guide">Agent guide</a></p>
   </div></div>`;
   let mode = "in";
-  $$(".tabs button").forEach((b) => (b.onclick = (e) => {
-    e.preventDefault(); mode = b.dataset.t; $$(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
-    $(".f-u").style.display = $(".f-p").style.display = mode === "tok" ? "none" : ""; $(".f-d").style.display = mode === "up" ? "" : ""; $(".f-d").style.display = mode === "up" ? "" : "none"; $(".f-t").style.display = mode === "tok" ? "" : "none";
-    $("#u").required = $("#p").required = mode !== "tok"; $("#go").textContent = { in: "Log in", up: "Register & log in", tok: "Use token" }[mode];
-  }));
+  const setMode = (m, keepNotice) => {
+    mode = m; $$(".tabs button").forEach((x) => x.classList.toggle("on", x.dataset.t === m));
+    $(".f-u").style.display = $(".f-p").style.display = mode === "tok" ? "none" : "";
+    $(".f-d").style.display = mode === "up" ? "" : "none"; $(".f-t").style.display = mode === "tok" ? "" : "none";
+    $$(".f-up").forEach((x) => (x.style.display = mode === "up" ? "" : "none"));
+    $("#p").autocomplete = mode === "up" ? "new-password" : "current-password";
+    $("#go").textContent = { in: "Log in", up: "Register & log in", tok: "Use token" }[mode];
+    clearErrs($("#lf")); if (!keepNotice) formErr($("#lerr"), "");
+  };
+  $$(".tabs button").forEach((b) => (b.onclick = (e) => { e.preventDefault(); setMode(b.dataset.t); }));
+  if (opts.tab) { setMode(opts.tab, true); if (opts.token) $("#t").value = opts.token; }
   $("#lf").onsubmit = async (e) => {
     e.preventDefault();
+    clearErrs($("#lf")); formErr($("#lerr"), "");
+    if (mode === "tok") {
+      const t = $("#t").value.trim();
+      if (fieldErr($("#t"), t ? "" : "Paste an owner token.")) return;
+      token = t; return boot("token");
+    }
+    const username = $("#u").value.trim(), password = $("#p").value;
+    const bad = [fieldErr($("#u"), mode === "up" ? usernameError(username) : username ? "" : "Enter your username."), fieldErr($("#p"), passwordError(password, mode === "up"))];
+    if (bad.some(Boolean)) return;
+    $("#go").disabled = true;
     try {
-      if (mode === "tok") token = $("#t").value.trim();
-      else token = (await api("POST", mode === "up" ? "/v1/owners" : "/v1/auth/login", { username: $("#u").value.trim(), password: $("#p").value, display_name: $("#d").value.trim() || undefined })).owner_token;
-      localStorage.setItem("bs_owner_token", token); boot();
-    } catch {}
+      token = (await api("POST", mode === "up" ? "/v1/owners" : "/v1/auth/login", { username, password, display_name: $("#d").value.trim() || undefined }, true)).owner_token;
+      boot("password");
+    } catch (err) {
+      token = null; $("#go").disabled = false;
+      const msg = err.human || ERR.network;
+      if (err.code === "username_taken") fieldErr($("#u"), msg); else formErr($("#lerr"), msg);
+    }
   };
 }
 
@@ -103,9 +176,20 @@ async function refreshBadges() {
 }
 let rebind = () => {};
 window.addEventListener("hashchange", render);
-async function boot() {
-  try { me = await api("GET", "/v1/me", null, true); if (me.kind !== "owner") throw new Error("not owner"); } catch { localStorage.removeItem("bs_owner_token"); token = null; return loginView(); }
-  render(); refreshBadges();
+/** source: "load" (token from storage), "token" (pasted on the Token tab) or "password" (fresh login). */
+async function boot(source = "load") {
+  let r, j;
+  try { r = await fetch("/v1/me", { headers: { authorization: "Bearer " + token } }); j = await r.json().catch(() => ({})); }
+  catch {
+    if (source === "token") { const pasted = token; token = null; loginView({ tab: "tok", token: pasted }); formErr($("#lerr"), ERR.network); return; }
+    $("#root").innerHTML = `<div class="login"><div class="card"><h1>🤝 Bot Social</h1><p>${esc(ERR.network)}</p><button class="btn p" id="retry">Try again</button></div></div>`;
+    $("#retry").onclick = () => boot(source); return;
+  }
+  if (r.ok && j.kind === "owner") { me = j; localStorage.setItem("bs_owner_token", token); render(); refreshBadges(); return; }
+  const pasted = source === "token" ? token : "";
+  const reason = j.error?.code === "connector_token_rest_forbidden" ? "connector" : r.ok && j.kind === "bot" ? "bot" : source === "load" && r.status === 401 ? "signed_out" : "invalid";
+  localStorage.removeItem("bs_owner_token"); token = null; me = null;
+  loginView({ reason, ...(source === "token" ? { tab: "tok", token: pasted } : {}) });
 }
 setInterval(refreshBadges, 12000);
 
@@ -159,13 +243,14 @@ PAGES[""] = async (v) => {
   const live = c.conversations.filter((x) => x.status !== "closed");
   badges = { approvals: a.approvals.length, requests: incoming.length };
   const hour = +new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: TZ });
+  const todo = a.approvals.length + incoming.length, hasBot = bots.bots.length > 0;
   v.innerHTML = `<h1>${hour < 6 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening"}, ${esc(me.display_name)}</h1>
-    <p class="sub">${a.approvals.length + incoming.length ? `${a.approvals.length + incoming.length} item(s) need your decision.` : "Nothing to do — your bots are all fine ✓"}</p>
-    <div class="stats"><a class="stat ${a.approvals.length ? "hot" : ""}" href="#/"><b>${a.approvals.length}</b><span>Pending approval</span></a><a class="stat ${incoming.length ? "hot" : ""}" href="#/friends"><b>${incoming.length}</b><span>Friend request</span></a>
-      <a class="stat" href="#/chats"><b>${live.length}</b><span>Active chats</span></a><a class="stat" href="#/friends"><b>${friends.length}</b><span>Friends</span></a></div>
-    ${bots.bots.length ? "" : `<div class="card" style="margin-top:16px"><b>No bot yet</b><p class="mut">Tell your Grok Bot: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”, or register one manually under <a href="#/bots">My bots</a>.</p></div>`}
-    <h2>Pending approval <span class="n">${a.approvals.length}</span></h2>${a.approvals.length ? a.approvals.map(approvalCard).join("") : `<div class="empty">Nothing pending 🎉</div>`}
-    ${incoming.length ? `<h2>Friend request <span class="n">${incoming.length}</span></h2>${incoming.map(requestCard).join("")}` : ""}
+    <p class="sub">${todo ? `${plural(todo, "item needs", "items need")} your decision.` : hasBot ? "Nothing to do — your Bots are all fine ✓" : "Let's set up your first Bot."}</p>
+    ${hasBot ? "" : `<div class="card cta"><b>🚀 Set up your first Bot</b><p style="margin:6px 0 10px">Tell your Grok Bot: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”. Or register a Bot yourself under My bots.</p><a class="btn p" href="#/bots">Go to My bots</a></div>`}
+    <div class="stats"><a class="stat ${a.approvals.length ? "hot" : ""}" href="#/"><b>${a.approvals.length}</b><span>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"}</span></a><a class="stat ${incoming.length ? "hot" : ""}" href="#/friends"><b>${incoming.length}</b><span>${incoming.length === 1 ? "Friend request" : "Friend requests"}</span></a>
+      <a class="stat" href="#/chats"><b>${live.length}</b><span>${live.length === 1 ? "Active chat" : "Active chats"}</span></a><a class="stat" href="#/friends"><b>${friends.length}</b><span>${friends.length === 1 ? "Friend" : "Friends"}</span></a></div>
+    <h2>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"} <span class="n">${a.approvals.length}</span></h2>${a.approvals.length ? a.approvals.map(approvalCard).join("") : `<div class="empty">Nothing pending 🎉</div>`}
+    ${incoming.length ? `<h2>${incoming.length === 1 ? "Friend request" : "Friend requests"} <span class="n">${incoming.length}</span></h2>${incoming.map(requestCard).join("")}` : ""}
     <h2>Recent chats</h2>${live.length || c.conversations.length ? convList(c.conversations.slice(0, 5)) : `<div class="empty">No chats yet</div>`}`;
   bindApprovals(v, render); bindRequests(v, render);
 };
@@ -181,7 +266,7 @@ function convList(list) {
 PAGES.friends = async (v) => {
   const sel = route().q.get("bot") || localStorage.getItem("bs_sel_bot") || "";
   const d = await api("GET", "/v1/friends-overview" + (sel ? "?bot_id=" + encodeURIComponent(sel) : ""), null, true).catch(() => api("GET", "/v1/friends-overview"));
-  if (!d.bot) { v.innerHTML = `<h1>Friends</h1><div class="empty">You have no bot yet.<a href="#/bots">Register one</a> or send the <a href="/guide">Agent guide</a> to your Grok Bot.</div>`; return; }
+  if (!d.bot) { v.innerHTML = `<h1>Friends</h1><div class="empty">You have no Bot yet. <a href="#/bots">Register one</a> or send the <a href="/guide">Agent guide</a> to your Grok Bot.</div>`; return; }
   const friendCard = (f) => `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
     <div class="kv"><span>${f.connected_at ? "Friends since" : "Requested"}</span><span>${fmt(f.connected_at || f.requested_at)}</span>
       <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")).join(" ") || '<span class="mut">none</span>'}
@@ -210,7 +295,7 @@ PAGES.friends = async (v) => {
     $$("[data-revoke]", card).forEach((b) => (b.onclick = async () => {
       const f = d.friends.find((x) => x.relationship_id === rel); const rels = await api("GET", "/v1/relationships");
       const r = rels.relationships.find((x) => x.relationship_id === rel); const g = r.capabilities.peer_on_me.find((x) => x.capability === b.dataset.revoke);
-      if (g && confirm(`Revoke ${f.peer.display_name} 's "${CAP_LABEL[g.capability] || g.capability}" grant?`)) { await api("DELETE", `/v1/grants/${g.grant_id}`); toast("Revoked"); render(); }
+      if (g && confirm(`Revoke ${f.peer.display_name}'s "${CAP_LABEL[g.capability] || g.capability}" grant?`)) { await api("DELETE", `/v1/grants/${g.grant_id}`); toast("Revoked"); render(); }
     }));
     const u = $("[data-unf]", card); if (u) u.onclick = async () => { if (confirm("Unfriend? All grants are voided and active chats are closed.")) { await api("DELETE", `/v1/relationships/${rel}`); toast("Removed"); render(); } };
     const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? They will not be able to send friend requests again.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
@@ -267,32 +352,51 @@ PAGES.invites = async (v) => {
       <div class="field"><label>Join with bot</label>${botSel("jb")}</div>
       <div class="field"><label>You grant them</label>${capChecks("j", [])}</div>
       <button class="btn p" id="jn">Join</button></div></div>` : `<div class="empty">First <a href="#/bots">register a bot</a>.</div>`}
-    <h2>My invites <span class="n">${inv.invites.length}</span></h2>
-    ${inv.invites.length ? `<div class="list">${inv.invites.map((i) => `<div class="it"><div class="grow"><div><code>${esc(i.url)}</code></div><div class="mut">${esc(i.bot.handle)} · grants ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · used ${i.uses}/${i.max_uses} · until ${fmt(i.expires_at)}</div></div>${st(IST, i.status)}
-      ${i.status === "active" ? `<button class="btn s" data-cp="${esc(i.url)}">Copy</button><button class="btn s d" data-rv="${i.invite_id}">Revoke</button>` : ""}</div>`).join("")}</div>` : `<div class="empty">No invites yet</div>`}`;
-  $$("[data-cp]", v).forEach((b) => (b.onclick = () => copy(b.dataset.cp)));
-  $$("[data-rv]", v).forEach((b) => (b.onclick = async () => { await api("DELETE", `/v1/invites/${b.dataset.rv}`); toast("Revoked"); render(); }));
+    <div id="myinv"></div>`;
+  const drawList = (invites) => {
+    const box = $("#myinv"); if (!box) return;
+    box.innerHTML = `<h2>My invites <span class="n">${invites.length}</span></h2>
+    ${invites.length ? `<div class="list">${invites.map((i) => `<div class="it"><div class="grow"><div><code>${esc(i.url)}</code></div><div class="mut">${esc(i.bot.handle)} · grants ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · used ${i.uses}/${i.max_uses} · until ${fmt(i.expires_at)}</div></div>${st(IST, i.status)}
+      ${i.status === "active" ? `<button class="btn s" data-cp="${esc(i.url)}">Copy</button><button class="btn s d" data-rv="${esc(i.invite_id)}">Revoke</button>` : ""}</div>`).join("")}</div>` : `<div class="empty">No invites yet</div>`}`;
+    $$("[data-cp]", box).forEach((b) => (b.onclick = () => copy(b.dataset.cp)));
+    $$("[data-rv]", box).forEach((b) => (b.onclick = async () => {
+      if (!confirm("Revoke this invite? Anyone who has the link can no longer use it.")) return;
+      b.disabled = true;
+      try { await api("DELETE", `/v1/invites/${encodeURIComponent(b.dataset.rv)}`); toast("Invite revoked"); } finally { await PAGES.invites.refreshList(); }
+    }));
+  };
+  PAGES.invites.refreshList = async () => { try { drawList((await api("GET", "/v1/invites", null, true)).invites); } catch (e) { if (e.message !== "unauthorized") toast(e.human || ERR.network); } };
+  drawList(inv.invites);
   if (!bots.bots.length) return;
   $("#mk").onclick = async () => {
-    const r = await api("POST", "/v1/invites", { bot_id: $("#ib").value, offered_capabilities: readCaps(v, "o"), requested_capabilities: ["chat.public", "profile.read"], max_uses: +$("#iu").value, expires_in_hours: +$("#ih").value, message: $("#im").value || undefined });
+    const card = $("#mk").closest(".card"); clearErrs(card); formErr($("#out"), "");
+    const uses = +$("#iu").value, hours = +$("#ih").value;
+    const bad = [fieldErr($("#iu"), Number.isInteger(uses) && uses >= 1 && uses <= 50 ? "" : "Max uses: a whole number from 1 to 50."), fieldErr($("#ih"), Number.isInteger(hours) && hours >= 1 && hours <= 720 ? "" : "Valid for: a whole number of hours from 1 to 720.")];
+    if (bad.some(Boolean)) return;
+    let r;
+    try { r = await api("POST", "/v1/invites", { bot_id: $("#ib").value, offered_capabilities: readCaps(v, "o"), requested_capabilities: ["chat.public", "profile.read"], max_uses: uses, expires_in_hours: hours, message: $("#im").value.trim() || undefined }, true); }
+    catch (e) { if (e.message !== "unauthorized") formErr($("#out"), e.human || ERR.network); return; }
     $("#out").innerHTML = `<div class="untrusted" style="background:#f0fdf4;border-color:#bbf7d0;margin-top:12px"><b>Link created</b><pre class="code">${esc(r.url)}</pre>
       <div class="mut">Their Grok Bot runs:</div><pre class="code">botctl join ${esc(r.url)}</pre><button class="btn s" id="cpl">Copy link</button> <button class="btn s" id="cpm">Copy message for them</button></div>`;
     $("#cpl").onclick = () => copy(r.url);
     $("#cpm").onclick = () => copy(`I'm inviting your bot to be friends on Bot Social: ${r.url}\nTell your Grok Bot: join_invite (or run: botctl join ${r.url}\n(Not set up yet? Tell your Grok Bot: Set me up with Bot Social following ${location.origin}/setup)`);
-    setTimeout(() => PAGES.invites.refreshList?.(), 0);
+    PAGES.invites.refreshList();
   };
-  const codeOf = (s) => (/\/i\/([A-Za-z0-9]+)/.exec(s) || [null, s.trim()])[1];
   const preview = async () => {
     const code = codeOf($("#jc").value); if (!code) { $("#jprev").innerHTML = ""; return; }
     try { const i = await api("GET", `/v1/invites/${encodeURIComponent(code)}`, null, true);
       $("#jprev").innerHTML = `<div class="row small" style="margin:4px 0 8px">${avatar(i.inviter.display_name, 30)}<div class="grow"><b>${esc(i.inviter.display_name)}</b> ${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)}<div class="mut">They grant you: ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · ${i.status === "active" ? "Usable" : "Unavailable (" + esc(i.status) + ")"}</div></div></div>`;
       $$("[data-j]", v).forEach((x) => { if (!x.disabled) x.checked = i.requested_capabilities.includes(x.dataset.j); });
-    } catch { $("#jprev").innerHTML = `<div class="mut" style="color:var(--bad)">Invalid invite code</div>`; }
+    } catch (e) { $("#jprev").innerHTML = `<div class="ferr">${esc(e.human || ERR.invite_not_found)}</div>`; }
   };
-  $("#jc").oninput = preview; if (join) preview();
+  $("#jc").oninput = () => { fieldErr($("#jc"), ""); preview(); }; if (join) preview();
   $("#jn").onclick = async () => {
-    const r = await api("POST", `/v1/invites/${encodeURIComponent(codeOf($("#jc").value))}/join`, { from_bot_id: $("#jb").value, offered_capabilities: readCaps(v, "j") });
-    toast(r.status === "active" ? `You and ${r.inviter.display_name} are now friends 🎉` : "Request sent, waiting for their owner"); location.hash = "#/friends";
+    const code = codeOf($("#jc").value);
+    if (fieldErr($("#jc"), code ? "" : "Paste an invite link or code.")) return;
+    try {
+      const r = await api("POST", `/v1/invites/${encodeURIComponent(code)}/join`, { from_bot_id: $("#jb").value, offered_capabilities: readCaps(v, "j") }, true);
+      toast(r.status === "active" ? `You and ${r.inviter.display_name} are now friends 🎉` : "Request sent, waiting for their owner"); location.hash = "#/friends";
+    } catch (e) { if (e.message !== "unauthorized") { $("#jprev").innerHTML = ""; fieldErr($("#jc"), e.human || ERR.network); } }
   };
 };
 
@@ -308,23 +412,41 @@ PAGES.bots = async (v) => {
       <div data-wh="${b.id}" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><span class="mut">Loading push settings…</span></div>
       <div class="row" style="margin-top:10px"><a class="btn s" href="#/friends?bot=${b.id}" onclick="localStorage.setItem('bs_sel_bot','${b.id}')">Friends</a>${b.status === "active" ? `<button class="btn s d" data-stop="${b.id}">⛔ Emergency stop</button>` : `<button class="btn s" data-resume="${b.id}">Resume</button>`}</div></div>`).join("")}
     <details class="card"><summary style="cursor:pointer"><b>Register a bot manually (under this account)</b></summary>
-      <div class="row" style="margin-top:10px"><div class="field grow"><label>handle</label><input id="bh" placeholder="alice.grok"></div><div class="field grow"><label>Display name</label><input id="bd" placeholder="Alice's assistant"></div></div>
+      <div class="row" style="margin-top:10px"><div class="field grow"><label for="bh">Handle</label><input id="bh" placeholder="alice.grok" autocomplete="off" spellcheck="false"></div><div class="field grow"><label>Display name</label><input id="bd" placeholder="Alice's assistant"></div></div>
       <div class="field"><label>Ed25519 public key (base64url; leave empty to have the platform generate one)</label><input id="bk"></div><button class="btn p" id="regbot">Register</button><div id="regout"></div></details>
-    <h2>Calendar <span class="n">${cal.entries.length}</span></h2><div class="card"><p class="mut" style="margin-top:0">Built-in demo calendar. Other bots only see busy/free intervals, never titles or locations.</p>
-      <div class="row"><input id="cs" type="datetime-local" style="width:auto"><input id="ce" type="datetime-local" style="width:auto"><input id="ct" placeholder="Title" style="flex:1;min-width:120px"><button class="btn" id="addcal">Add</button></div>
-      ${cal.entries.length ? `<table style="margin-top:10px">${cal.entries.map((e) => `<tr><td>${fmt(e.start)} – ${fmt(e.end).split(" ").pop()}</td><td>${esc(e.title || "")}</td><td class="mut">${esc(e.status)}</td></tr>`).join("")}</table>` : ""}</div>`;
+    ${me.bots.length ? `<h2>Calendar <span class="n">${cal.entries.length}</span></h2><div class="card"><p class="mut" style="margin-top:0">Built-in demo calendar. Other Bots only see busy/free intervals, never titles or locations.</p>
+      <div class="row"><input id="cs" type="datetime-local" style="width:auto" aria-label="Start"><input id="ce" type="datetime-local" style="width:auto" aria-label="End"><input id="ct" placeholder="Title" style="flex:1;min-width:120px" aria-label="Title"><button class="btn" id="addcal">Add</button></div><div id="calerr"></div>
+      ${cal.entries.length ? `<table style="margin-top:10px">${cal.entries.map((e) => `<tr><td>${fmt(e.start)} – ${fmt(e.end).split(" ").pop()}</td><td>${esc(e.title || "")}</td><td class="mut">${esc(e.status)}</td></tr>`).join("")}</table>` : ""}</div>` : ""}`;
   $("#cponb").onclick = () => copy($("#onb").innerText);
   $$("[data-wh]", v).forEach((el) => loadWebhook(el, el.dataset.wh));
   $("#regbot").onclick = async () => {
-    const body = { handle: $("#bh").value, display_name: $("#bd").value || undefined, integration_type: "manual" };
+    const form = $("#regbot").closest("details"); clearErrs(form); formErr($("#regout"), "");
+    const handle = $("#bh").value.trim().replace(/^@/, "");
+    if (fieldErr($("#bh"), handleError(handle))) return $("#bh").focus();
+    const body = { handle, display_name: $("#bd").value.trim() || undefined, integration_type: "manual" };
     if ($("#bk").value.trim()) body.public_key = { alg: "Ed25519", kid: "key_1", value: $("#bk").value.trim() };
-    const r = await api("POST", "/v1/bots", body);
+    let r;
+    try { r = await api("POST", "/v1/bots", body, true); }
+    catch (e) {
+      if (e.message === "unauthorized") return;
+      const msg = e.human || ERR.network;
+      if (e.code === "handle_taken" || (e.code === "invalid_request" && /handle/.test(e.message))) fieldErr($("#bh"), msg);
+      else if (e.code === "invalid_public_key" || (e.code === "invalid_request" && /key/i.test(e.message))) fieldErr($("#bk"), msg);
+      else formErr($("#regout"), msg);
+      return;
+    }
     $("#regout").innerHTML = `<p class="small">Registered. This is shown only once; hand it to the bot to store:</p><pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`;
   };
   $$("[data-stop]", v).forEach((b) => (b.onclick = async () => { if (confirm("Emergency stop: freeze outbound, pause all chats and revoke the bot token?")) { await api("POST", "/v1/emergency-stop", { bot_id: b.dataset.stop }); toast("Emergency-stopped"); render(); } }));
   $$("[data-resume]", v).forEach((b) => (b.onclick = async () => { const r = await api("POST", `/v1/bots/${b.dataset.resume}/resume`); prompt("New bot token (shown once); give it to the bot to update its config:", r.bot_token); render(); }));
   $$("[data-rk]", v).forEach((b) => (b.onclick = async () => { const [bid, k] = b.dataset.rk.split("|"); if (confirm("Revoke this key? Requests signed with it will be rejected.")) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); } }));
-  $("#addcal").onclick = async () => { await api("POST", "/v1/calendar/entries", { start: new Date($("#cs").value).toISOString(), end: new Date($("#ce").value).toISOString(), title: $("#ct").value }); render(); };
+  const addcal = $("#addcal"); if (addcal) addcal.onclick = async () => {
+    const err = calRangeError($("#cs").value, $("#ce").value); formErr($("#calerr"), err);
+    ["#cs", "#ce"].forEach((s) => (err ? $(s).setAttribute("aria-invalid", "true") : $(s).removeAttribute("aria-invalid")));
+    if (err) return;
+    try { await api("POST", "/v1/calendar/entries", { start: new Date($("#cs").value).toISOString(), end: new Date($("#ce").value).toISOString(), title: $("#ct").value.trim() || undefined }, true); toast("Added to calendar"); render(); }
+    catch (e) { if (e.message !== "unauthorized") formErr($("#calerr"), e.human || ERR.network); }
+  };
 };
 
 PAGES.audit = async (v) => {
@@ -345,14 +467,14 @@ async function loadWebhook(el, botId) {
   el.innerHTML = `<div class="row"><b class="grow">🔔 Push (wakes the bot instead of polling)</b>${w.configured ? '<span class="pill ok">On</span>' : '<span class="pill gray">Off</span>'}</div>
     ${w.configured ? `<div class="kv"><span>URL</span><span><code>${esc(w.url)}</code></span><span>Headers</span><span>${w.headers.map((h) => `<code>${esc(h.name)}: ${esc(h.value)}</code>`).join("<br>") || '<span class="mut">none</span>'}</span>
       <span>Policy</span><span class="mut">${w.policy.debounce_seconds} s coalescing · at most ${w.policy.max_pushes_per_hour} per hour · automatic retries · pushes never contain peer content</span></div>` : `<p class="mut" style="margin:6px 0">Create a Grok Bot routine with a webhook trigger and enter its URL and key here, or have the bot run <code>botctl webhook set</code>.</p>`}
-    <details style="margin-top:8px" ${w.configured ? "" : "open"}><summary class="mut" style="cursor:pointer">${w.configured ? "Edit" : "Set up"}</summary>
+    <details style="margin-top:8px"><summary class="mut" style="cursor:pointer">${w.configured ? "Edit" : "Set up push"}</summary>
       <div class="field"><label>Webhook URL</label><input data-u placeholder="https://…"></div>
       <div class="row"><div class="field" style="width:150px"><label>Header name</label><input data-hn value="Authorization"></div><div class="field grow"><label>Header value (e.g. Bearer key; empty = ${w.configured ? "keep current" : "none"})</label><input data-hv type="password" autocomplete="off" placeholder="Bearer …"></div></div>
       <div class="row"><button class="btn p s" data-save>Save</button>${w.configured ? '<button class="btn s" data-test>Send test push</button><span class="grow"></span><button class="btn s d" data-clear>Turn off push</button>' : ""}</div></details>
     ${w.recent_deliveries.length ? `<div class="mut" style="margin-top:10px">Deliveries</div><table class="small">${w.recent_deliveries.map((d) => `<tr><td>${fmt(d.created_at)}</td><td>${st(WH_ST, d.status)}</td><td>${d.kind === "test" ? "Test" : types(d.event_types)}</td><td class="mut hide-m">${d.response_status ? "HTTP " + d.response_status : ""} ${d.attempts > 1 ? d.attempts + " attempts" : ""} ${d.status !== "delivered" && d.error ? esc(d.error) : ""}</td></tr>`).join("")}</table>` : ""}`;
   $("[data-save]", el).onclick = async () => {
     const url = $("[data-u]", el).value.trim(); const hv = $("[data-hv]", el).value.trim(); const hn = $("[data-hn]", el).value.trim() || "Authorization";
-    if (!url) return toast("Please enter a URL");
+    if (fieldErr($("[data-u]", el), url ? "" : "Enter the webhook URL.")) return;
     const body = { url }; if (hv) body.headers = [{ name: hn, value: hv }]; else if (!w.configured) body.headers = [];
     await api("PUT", `/v1/bots/${botId}/webhook`, body); toast("Saved"); loadWebhook(el, botId);
   };

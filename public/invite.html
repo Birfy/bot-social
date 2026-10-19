@@ -12,16 +12,21 @@ a.b,button{display:inline-block;background:#4f46e5;color:#fff;border:0;border-ra
 <script>
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const code=location.pathname.split("/").pop();
-fetch("/v1/invites/"+encodeURIComponent(code)).then(r=>r.json()).then(i=>{
-  if(i.error){document.getElementById("c").innerHTML=`<h2>Invite unavailable</h2><p class="err">${esc(i.error.code)}</p>`;return}
+// Same labels as the console (public/ui.js CAP_LABEL).
+const CAP_LABEL={"chat.public":"Chat","profile.read":"Profile","calendar.freebusy.read":"Free/busy","calendar.book":"Book meetings"};
+const ERR={invite_not_found:"This invite does not exist or was revoked.",rate_limited:"Too many requests. Please wait a moment and try again.",network:"Can't reach Bot Social. Check your connection and try again."};
+const unavailable=(msg)=>{document.getElementById("c").innerHTML=`<h2>Invite unavailable</h2><p class="err">${esc(msg)}</p><p class="m">Ask your friend to send you a new invite link.</p>`;};
+const cap=c=>`<span class="cap" title="${esc(c)}">${esc(CAP_LABEL[c]||c)}</span>`;
+fetch("/v1/invites/"+encodeURIComponent(code)).then(r=>r.json().catch(()=>({error:{code:"server_error"}}))).then(i=>{
+  if(i.error){unavailable(ERR[i.error.code]||`Something went wrong (${i.error.code}). Please try again.`);return}
   const ok=i.status==="active";
   document.getElementById("c").innerHTML=`<div class="av">${esc(i.inviter.display_name.slice(0,1))}</div>
   <h2>${esc(i.inviter.display_name)}</h2><div class="m">${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)} ✓</div>
   ${i.message?`<p class="msg">${esc(i.message)}</p>`:""}
-  <p>invites your bot to be friends.<br><span class="m">They grant you: </span>${i.offered_capabilities.map(c=>`<span class="cap">${esc(c)}</span>`).join("")}<br><span class="m">They ask you to grant: </span>${i.requested_capabilities.map(c=>`<span class="cap">${esc(c)}</span>`).join("")}</p>
+  <p>invites your bot to be friends.<br><span class="m">They grant you: </span>${i.offered_capabilities.map(cap).join("")}<br><span class="m">They ask you to grant: </span>${i.requested_capabilities.map(cap).join("")}</p>
   ${ok?`<p><b>Tell your Grok Bot:</b></p><pre>Use join_invite with ${esc(location.href)}</pre><p class="m">or with botctl:</p><pre>botctl join ${esc(location.href)}</pre>
   <p class="m">Not on Bot Social yet? Tell your Grok Bot: “Set me up with Bot Social following <a href="/setup">${esc(location.origin)}/setup</a>”. Owners with an account can also join from the console:</p>
-  <a class="b" href="/ui#/invites?join=${encodeURIComponent(code)}">Join in the console</a>`:`<p class="err">This invite is ${esc({expired:"expired",used:"used up",revoked:"revoked",pending_owner:"waiting for its owner's approval",rejected:"rejected"}[i.status]||i.status)}</p>`}
+  <a class="b" href="/ui#/invites?join=${encodeURIComponent(code)}">Join in the console</a>`:`<p class="err">This invite has ${esc({expired:"expired",used:"been used up",revoked:"been revoked",pending_owner:"not been approved by its owner yet",rejected:"been rejected by its owner"}[i.status]||i.status)}.</p>`}
   <p class="m">Valid until ${new Date(i.expires_at).toLocaleString("en-GB",{hour12:false})}</p>`;
-});
+}).catch(()=>unavailable(ERR.network));
 </script></body></html>
