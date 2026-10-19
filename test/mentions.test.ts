@@ -17,6 +17,9 @@ async function pair(t: any) {
   const coder = await B("add_home_member", { home: b.home.bot_id, name: "coder", display_name: "Coder" });
   const inv = await A("create_invite", { bot_id: chief.bot_id, ...CAPS });
   await B("join_invite", { code: inv.code ?? inv.invite?.code, from_bot_id: coder.bot_id });
+  // Joining only lets Chief answer Coder (#23); Bob shares Coder with Chief too, so either side may start.
+  const back = await B("create_invite", { bot_id: coder.bot_id, ...CAPS });
+  await A("join_invite", { code: back.code, from_bot_id: chief.bot_id });
   const approve = (ownerId: string, aprId: string, extra: any = {}) => s.platform.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved", ...extra });
   return { s, a, b, A, B, chief, coder, approve };
 }

@@ -16,7 +16,8 @@ import type { Platform, Principal } from "./platform.js";
 import { wrapUntrusted } from "./untrusted.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(wrapUntrusted(data), null, 2) }] });
-const fail = (e: unknown) => ({ isError: true, content: [{ type: "text" as const, text: e instanceof ApiError ? JSON.stringify({ code: e.code, message: e.message }) : String(e) }] });
+// The same error body as REST (code, message, then any extra fields such as suggestion or bot_id).
+const fail = (e: unknown) => ({ isError: true, content: [{ type: "text" as const, text: e instanceof ApiError ? JSON.stringify({ code: e.code, message: e.message, ...e.extra }) : String(e) }] });
 const wrap = <A>(fn: (a: A) => unknown) => async (a: A) => { try { return ok(await fn(a)); } catch (e) { return fail(e); } };
 
 const READ = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };

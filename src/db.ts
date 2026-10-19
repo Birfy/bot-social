@@ -61,9 +61,36 @@ export function openDb(path: string): Database.Database {
   db.exec("CREATE INDEX IF NOT EXISTS grant_rooms_room ON grant_rooms (room_id, ended_at)");
   const gcols = (db.prepare("PRAGMA table_info(grants)").all() as { name: string }[]).map((c) => c.name);
   if (!gcols.includes("room_id")) db.exec("ALTER TABLE grants ADD COLUMN room_id TEXT");
+  // Reply-only grants (#23): the grant a joiner's owner gives the inviter's Bot when joining an invite lets that
+  // Bot answer in a conversation the joiner's Bot started, never start one. Added once; see markJoinGrantsReplyOnly.
+  if (!gcols.includes("reply_only")) {
+    db.exec("ALTER TABLE grants ADD COLUMN reply_only INTEGER NOT NULL DEFAULT 0");
+    markJoinGrantsReplyOnly(db);
+  }
   const fm = (db.prepare("PRAGMA table_info(face_room_members)").all() as { name: string }[]).map((c) => c.name);
   if (!fm.includes("added_by_owner_id")) db.exec("ALTER TABLE face_room_members ADD COLUMN added_by_owner_id TEXT");
   return db;
+}
+
+/** One-time backfill for existing databases (#23). Marks as reply-only the active grants a joiner's owner gave the
+ *  inviter's Bot when an invite-born friendship was activated. Invite-born means the relationship was created by
+ *  joining an invite for its target Bot (the link names that Bot and the invite predates the relationship; a later
+ *  re-share link on a plain friend request does not count). On such a relationship the joiner is the requester, and
+ *  activation writes the grants of both directions in one transaction, so a joiner-side grant created within two
+ *  seconds of the relationship's first grant is a join-time grant. Grants from an approved grant.request and grants
+ *  added later (an owner adding a capability, a re-share) keep full access. Only ever narrows access. */
+export function markJoinGrantsReplyOnly(db: Database.Database): number {
+  return db.prepare(`UPDATE grants SET reply_only = 1
+    WHERE status = 'active' AND room_id IS NULL AND reply_only = 0 AND id IN (
+      SELECT g.id FROM grants g
+      JOIN relationships r ON r.id = g.relationship_id
+      JOIN relationship_invites ri ON ri.relationship_id = r.id
+      JOIN invites i ON i.id = ri.invite_id
+      WHERE i.bot_id = r.target_bot AND i.created_at <= r.created_at
+        AND g.grantor_owner = r.requester_owner AND g.grantee_bot = r.target_bot AND g.room_id IS NULL
+        AND julianday(g.created_at) <= julianday((SELECT MIN(created_at) FROM grants WHERE relationship_id = r.id)) + 2.0 / 86400
+        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.kind = 'grant_request' AND a.status = 'approved' AND a.subject_id = r.id
+          AND json_extract(a.note, '$.capability') = g.capability AND json_extract(a.note, '$.grantee_bot') = g.grantee_bot))`).run().changes;
 }
 
 /** Pins the scope of invite-born friendships to the invite's target. Idempotent; only fills NULLs.
