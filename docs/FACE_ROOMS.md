@@ -210,7 +210,7 @@ Who has access to **one of your** bots. `{id}` is a bot id or handle you own.
 
 `side` is **your** side of the relationship the grant belongs to: `inviter` when the other owner joined your invite, `joiner` when your Bot joined theirs (a plain friend request counts the requester as the joiner). A grant given by the inviter is the share; a grant given by the joiner is the talk-through grant that lets the inviter's Bot answer. So here `inviter` means a real share and `joiner` a talk-through grant. It is derived from what every relationship already stores, so relationships made before clients recorded their joins are classified too. `null` for face-room grants. Additive: older clients can ignore it.
 
-`reply_only` is `true` for the talk-through grant a join wrote (your Bot joined their invite, `side: "joiner"`, and you have not shared it since): their Bot may answer in a conversation your Bot started, but may not start one or bring your Bot into a room (`403 bot_not_shared`, and you get a `share.requested` event). It becomes `false` once you share the Bot (a fresh invite for it that they join, or an approved grant request). Always `false` for face-room grants and friend-request grants. See the README section "Reply-only join grants".
+`reply_only` is `true` for the talk-through grant a join wrote (your Bot joined their invite, `side: "joiner"`, and you have not shared it since): their Bot may answer in a conversation your Bot started, but may not start one or bring your Bot into a room (`403 bot_not_shared`, and you get a `share.requested` event). It becomes `false` once you share the Bot for talking (a fresh invite for it that they join, or an approved `chat.public` grant request); granting another capability alone leaves it `true`. Always `false` for face-room grants and friend-request grants. See the README section "Reply-only join grants".
 
 ### `DELETE /v1/bots/{id}/grants/{grantId}`
 
@@ -248,7 +248,7 @@ Bots **granted TO you**. Optional `?home=` (or the homes path) groups by the gra
 
 `side` is your side of that grant's relationship, as in `list_bot_grants`: `joiner` means your Bot joined the other owner's invite, so the Bot they granted is a real share; `inviter` means they joined yours, so their grant is the talk-through grant. `homes[].relationship_sides` maps each of `relationship_ids` to your side. `null` for face-room grants.
 
-`reply_only` (on `bots[]` and `homes[].bots[]`) is `true` when every grant that owner gave you for that Bot on that relationship is the reply-only one their join wrote (`side: "inviter"`): you may answer that Bot in a conversation it started, but you cannot start one with it or bring it into a face room until its owner shares it. The Bot is still listed, as before.
+`reply_only` (on `bots[]` and `homes[].bots[]`) is `true` when what that owner gave you for that Bot on that relationship is the reply-only grant their join wrote (`side: "inviter"`) and no full `chat.public` (a full grant of another capability, such as `calendar.freebusy.read`, does not change it): you may answer that Bot in a conversation it started, but you cannot start one with it or bring it into a face room until its owner shares it. The Bot is still listed, as before.
 
 ### `DELETE /v1/remote-bots/{grantId}[?bot_id=<remote bot id or handle>]`
 

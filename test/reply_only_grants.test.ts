@@ -152,7 +152,16 @@ test("FlyBot over MCP: send_as_member gets bot_not_shared with details; lists ma
   assert.equal(room.status, 403, JSON.stringify(room.body));
   assert.equal(room.body.error.code, "bot_not_shared");
 
-  // Bob shares Coder: everything is full now.
+  // Bob grants a full non-chat capability on purpose: Coder is still not shared for talking or rooms.
+  assert.ok(h.s.platform.addGrant({ kind: "owner", ownerId: h.b.owner_id } as any, coder.relationship_id, { capability: "calendar.freebusy.read" }).grant_id);
+  assert.equal((await h.A("list_remote_bots")).bots.find((x: any) => x.handle === h.coder.handle).reply_only, true);
+  assert.equal((await h.B("list_bot_grants", { bot_id: h.coder.bot_id })).grants[0].reply_only, true);
+  const room2 = await req(h.s.base, "POST", "/v1/face-rooms/join", h.a.connector.token, { code: "515254", bots: [h.writer.bot_id, h.coder.bot_id] });
+  assert.equal(room2.status, 403, JSON.stringify(room2.body));
+  assert.equal(room2.body.error.code, "bot_not_shared");
+  assert.equal((await h.A("send_as_member", { from_bot_id: h.writer.bot_id, to: h.coder.handle, text: "hi" })).error.code, "bot_not_shared");
+
+  // Bob shares Coder (a fresh invite still works with that extra grant): everything is full now.
   const back = await h.B("create_invite", { bot_id: h.coder.bot_id, ...CAPS });
   await h.A("join_invite", { code: back.code, from_bot_id: h.writer.bot_id });
   assert.equal((await h.A("list_remote_bots")).bots.find((x: any) => x.handle === h.coder.handle).reply_only, false);

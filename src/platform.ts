@@ -1044,9 +1044,8 @@ export class Platform {
         room: g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null,
         rooms: [] as any[], capabilities: [] as string[], created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
-        reply_only: !!g.reply_only,
+        reply_only: !g.room_id && this.replyOnlyAccess(g.relationship_id, ownerId, g.grantee_bot),
       };
-      if (!g.reply_only) cur.reply_only = false;
       for (const room of moreRooms) if (!cur.rooms.some((x: any) => x.room_id === room.room_id)) cur.rooms.push(room);
       if (moreRooms.length && cur.scope === "person") cur.scope = "group";
       if (!cur.room) cur.room = g.room_id ? this.grantRoomPublic(g.room_id) : moreRooms[0] ?? null;
@@ -1092,7 +1091,7 @@ export class Platform {
         grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
         via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
-        reply_only: this.replyOnlyAccess(g),
+        reply_only: !g.room_id && this.replyOnlyAccess(g.relationship_id, g.grantor_owner, g.grantee_bot),
       };
       bots.push(item);
       const peerHome = this.bot(this.homeOf(granted.id));
@@ -1111,11 +1110,13 @@ export class Platform {
     return { bots, homes: [...byHome.values()] };
   }
 
-  /** True when every active relationship-level grant this grantor gave this grantee on this relationship is
-   *  reply-only (#23): the grantee may answer the granted Bot but not start a conversation with it. */
-  private replyOnlyAccess(g: { relationship_id: string; grantor_owner: string; grantee_bot: string; room_id?: string | null; reply_only?: number }): boolean {
-    if (g.room_id || !g.reply_only) return false;
-    return !this.get("SELECT 1 FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND reply_only = 0", g.relationship_id, g.grantor_owner, g.grantee_bot);
+  /** #23: is this grantee's access to the grantor's Bot on this relationship reply-only? True when it holds a reply-only
+   *  grant from the join and no full `chat.public`: it may answer that Bot, not start a conversation with it or bring it
+   *  into a room. A full grant of another capability (say calendar.freebusy.read) does not share the Bot for talking. */
+  private replyOnlyAccess(relId: string, grantorOwner: string, granteeBot: string): boolean {
+    const rows = this.all("SELECT capability, reply_only, expires_at FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL", relId, grantorOwner, granteeBot)
+      .filter((g: any) => !g.expires_at || Date.parse(g.expires_at) >= Date.now());
+    return rows.some((g: any) => g.reply_only) && !rows.some((g: any) => g.capability === "chat.public" && !g.reply_only);
   }
 
   /**
@@ -1205,10 +1206,11 @@ export class Platform {
     const marks = myBotIds.map(() => "?").join(",");
     const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
       FROM grants g JOIN relationships r ON r.id = g.relationship_id
-      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL
-      ORDER BY g.reply_only`,
-      ...myBotIds, ownerId);
-    return rows.find((g: any) => this.grantedBotOf(g, g) === targetBotId) ?? null;
+      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL`,
+      ...myBotIds, ownerId).filter((g: any) => this.grantedBotOf(g, g) === targetBotId);
+    // #23: a grant whose access is reply-only comes last; the caller refuses it (bot_not_shared).
+    const full = rows.find((g: any) => !this.replyOnlyAccess(g.relationship_id, g.grantor_owner, g.grantee_bot));
+    return full ? { ...full, reply_only_access: false } : rows[0] ? { ...rows[0], reply_only_access: true } : null;
   }
 
   requestGrant(p: Principal, env: Envelope) {
@@ -1412,11 +1414,12 @@ export class Platform {
     return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: r.status === "active" ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent" };
   }
 
-  /** Does `grantorOwner` still hold an unexpired, active, full (not reply-only) relationship-level grant to `granteeBot`
-   *  on this relationship? A reply-only join grant (#23) is not a share: a fresh invite for that Bot shares it. */
+  /** Does `grantorOwner` still share its Bot with `granteeBot` on this relationship (an unexpired, active relationship-level
+   *  grant, and not reply-only access)? A reply-only join grant (#23) is not a share: a fresh invite for that Bot shares it. */
   private hasLiveGrant(grantorOwner: string, granteeBot: string, relId: string): boolean {
-    return this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND reply_only = 0", relId, grantorOwner, granteeBot)
+    const live = this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL", relId, grantorOwner, granteeBot)
       .some((g: any) => !g.expires_at || Date.parse(g.expires_at) >= Date.now());
+    return live && !this.replyOnlyAccess(relId, grantorOwner, granteeBot);
   }
 
   private regrantViaInvite(i: any, rel: any, inviter: any, joiner: any, payload: any) {
@@ -2230,7 +2233,7 @@ export class Platform {
       const grant = this.accessGrantTo(p.ownerId, mine, other.id);
       assert(grant, 404, "bot_not_found", `no bot matching ${ref} on this account`);
       // #23: a reply-only grant (from joining an invite) never lets you bring the other owner's Bot into a room.
-      if (grant.reply_only) this.refuseUnshared(grant.grantee_bot, other, grant.relationship_id, "face_room.join");
+      if (grant.reply_only_access) this.refuseUnshared(grant.grantee_bot, other, grant.relationship_id, "face_room.join");
       if (!out.some((x) => x.bot.id === other.id)) out.push(wrap(other, grant));
     }
     return out;
