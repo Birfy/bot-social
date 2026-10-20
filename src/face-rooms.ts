@@ -3,6 +3,8 @@ import { ApiError } from "./errors.js";
 import { limitFromEnv } from "./policy.js";
 
 export const FACE_ROOM_NAME_MAX = 60;
+/** A member Bot's role label in a room roster (FlyBot #476): plain text, untrusted. */
+export const FACE_ROOM_ROLE_MAX = 80;
 
 export interface FaceRoomLimits {
   ttlMs: number;
@@ -97,6 +99,11 @@ export function leaveSystemText(ownerName: string, displayName: string): string 
   return `${ownerName}'s ${displayName} left`;
 }
 
+export function leadSystemText(lead: { display_name: string; owner_name: string } | null, reason: "set" | "cleared" | "lead_left"): string {
+  if (lead) return `Room lead: ${lead.owner_name}'s ${lead.display_name}`;
+  return reason === "lead_left" ? "The room lead left. The default lead takes over." : "The room lead is back to the default.";
+}
+
 export const FACE_ROOM_SCHEMA = `
 CREATE TABLE IF NOT EXISTS face_rooms (
   id TEXT PRIMARY KEY,
@@ -105,7 +112,9 @@ CREATE TABLE IF NOT EXISTS face_rooms (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   started_at TEXT,
-  closed_at TEXT
+  closed_at TEXT,
+  created_by_owner_id TEXT,
+  lead_bot_id TEXT
 );
 CREATE TABLE IF NOT EXISTS face_room_codes (
   code TEXT PRIMARY KEY,
@@ -124,6 +133,7 @@ CREATE TABLE IF NOT EXISTS face_room_members (
   joined_at TEXT NOT NULL,
   join_seq INTEGER NOT NULL DEFAULT 0,
   left_at TEXT,
+  role TEXT,
   PRIMARY KEY (room_id, bot_id)
 );
 CREATE INDEX IF NOT EXISTS face_room_members_room ON face_room_members (room_id, left_at);
