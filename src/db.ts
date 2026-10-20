@@ -71,6 +71,11 @@ export function openDb(path: string): Database.Database {
   }
   const fm = (db.prepare("PRAGMA table_info(face_room_members)").all() as { name: string }[]).map((c) => c.name);
   if (!fm.includes("added_by_owner_id")) db.exec("ALTER TABLE face_room_members ADD COLUMN added_by_owner_id TEXT");
+  // FlyBot #476: a member Bot's role label, and the room's creator and chosen lead (null = default lead).
+  if (!fm.includes("role")) db.exec("ALTER TABLE face_room_members ADD COLUMN role TEXT");
+  const fr = (db.prepare("PRAGMA table_info(face_rooms)").all() as { name: string }[]).map((c) => c.name);
+  if (!fr.includes("created_by_owner_id")) db.exec("ALTER TABLE face_rooms ADD COLUMN created_by_owner_id TEXT");
+  if (!fr.includes("lead_bot_id")) db.exec("ALTER TABLE face_rooms ADD COLUMN lead_bot_id TEXT");
   return db;
 }
 

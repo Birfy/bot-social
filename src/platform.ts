@@ -13,7 +13,7 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FaceRoomLimits, isFaceCode, joinSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
+  FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
 } from "./face-rooms.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
@@ -2204,6 +2204,7 @@ export class Platform {
     return {
       handle: m.handle, display_name, owner_name,
       label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
+      ...(look ? { role: m.role ? sanitizePeerName(m.role, "", FACE_ROOM_ROLE_MAX) || null : null } : {}),
       ...(look ? lookOf(this.get("SELECT avatar, color, avatar_updated_at FROM bots WHERE id = ?", m.bot_id) ?? {}) : {}),
     };
   }
@@ -2381,6 +2382,8 @@ export class Platform {
     const ev = this.faceInsertEvent(roomId, "member.left", m.bot_id, { text, member, trust: "platform" });
     this.emit(m.bot_id, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform", self: true });
     this.faceEmitMembers(roomId, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform" });
+    // The chosen lead left: back to the default lead (FlyBot #476).
+    if (this.get("SELECT 1 FROM face_rooms WHERE id = ? AND lead_bot_id = ?", roomId, m.bot_id)) this.faceSetLead(roomId, null, "lead_left", m.bot_id);
     this.faceCloseIfEmpty(roomId);
   }
   private endRoomGrantsForBots(roomId: string, botIds: string[]) {
@@ -2447,14 +2450,48 @@ export class Platform {
     if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
     return { ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
   }
-  private faceRoomView(roomId: string, viewer: { joinSeq?: number }, opts: { after?: number } = {}) {
+  /** Who made the room: stored at creation; for a room from before that, the owner whose Bot joined first. */
+  private faceCreatorOf(room: any): string | null {
+    if (room.created_by_owner_id) return room.created_by_owner_id;
+    return this.get("SELECT owner_id FROM face_room_members WHERE room_id = ? ORDER BY join_seq ASC LIMIT 1", room.id)?.owner_id ?? null;
+  }
+  /**
+   * The room lead (FlyBot #476): `set` is the Bot the creator picked (null until picked), `effective` the one
+   * every home follows: the set lead, else the first Bot of the creator's home that joined (still in the room),
+   * else the first Bot that joined.
+   */
+  private faceLeadOf(room: any): { set: any | null; effective: any | null } {
+    const active = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY join_seq ASC", room.id);
+    const set = room.lead_bot_id ? active.find((m: any) => m.bot_id === room.lead_bot_id) ?? null : null;
+    const creator = this.faceCreatorOf(room);
+    return { set, effective: set ?? active.find((m: any) => m.owner_id === creator) ?? active[0] ?? null };
+  }
+  private faceLeadFields(roomId: string) {
+    const lead = this.faceLeadOf(this.get("SELECT * FROM face_rooms WHERE id = ?", roomId));
+    return { lead_bot_handle: lead.set?.handle ?? null, effective_lead_bot_handle: lead.effective?.handle ?? null };
+  }
+  /** Store the lead (null = default), and tell every member with a platform event. */
+  private faceSetLead(roomId: string, botId: string | null, reason: "set" | "cleared" | "lead_left", actorBot: string | null) {
+    this.run("UPDATE face_rooms SET lead_bot_id = ? WHERE id = ?", botId, roomId);
+    const m = botId ? this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ?", roomId, botId) : null;
+    const lead = m ? this.faceMemberPublic(m) : null;
+    const data = { text: leadSystemText(lead, reason), reason, lead, ...this.faceLeadFields(roomId), trust: "platform" };
+    const ev = this.faceInsertEvent(roomId, "room.lead_changed", actorBot, data);
+    this.faceEmitMembers(roomId, "face_room.lead_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
+  }
+  private faceRoomView(roomId: string, viewer: { joinSeq?: number; ownerId?: string }, opts: { after?: number } = {}) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    const creator = this.faceCreatorOf(room);
+    const creatorOwner = creator ? this.get("SELECT display_name, username FROM owners WHERE id = ?", creator) : null;
     const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m, true));
     const floor = (viewer.joinSeq ?? 1) - 1;
     const after = opts.after !== undefined ? opts.after : floor;
     const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
     return {
       room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at, closed_at: room.closed_at,
+      created_by: creatorOwner ? { owner_name: sanitizePeerName(creatorOwner.display_name, sanitizePeerName(creatorOwner.username, "Owner")) } : null,
+      created_by_me: Boolean(creator && viewer.ownerId === creator),
+      ...this.faceLeadFields(roomId),
       members, event_cursor: events.length ? events[events.length - 1].event_cursor : after, events,
     };
   }
@@ -2497,7 +2534,7 @@ export class Platform {
         const id = newId("frm");
         const now = this.ts();
         const expires = new Date(this.nowMs() + this.faceRoomLimits.ttlMs).toISOString();
-        this.run("INSERT INTO face_rooms (id, code, status, created_at, expires_at) VALUES (?,?,?,?,?)", id, code, "candidate", now, expires);
+        this.run("INSERT INTO face_rooms (id, code, status, created_at, expires_at, created_by_owner_id) VALUES (?,?,?,?,?,?)", id, code, "candidate", now, expires, ownerId);
         this.run("INSERT INTO face_room_codes (code, room_id, expires_at) VALUES (?,?,?)", code, id, expires);
         this.faceAddMembers(id, bots, ownerId);
         this.syncFaceRoomAccess(id, bots, ownerId, bring);
@@ -2589,6 +2626,53 @@ export class Platform {
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
     if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
+  }
+
+  /**
+   * Pick the room lead (FlyBot #476). Only the room creator, with an owner token (a person's UI action, never a
+   * Bot token); `bot` must be a Bot in the room now; null / "" goes back to the default lead.
+   */
+  setFaceRoomLead(p: Principal, roomId: string, body: any = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId);
+    assert(p.kind === "owner", 403, "forbidden", "only the room creator picks the lead, from their own app; a Bot token cannot");
+    assert(this.faceCreatorOf(viewer.room) === viewer.ownerId, 403, "not_room_creator", "only the person who created this room picks its lead");
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    const raw = body?.bot ?? body?.bot_handle ?? body?.handle ?? body?.bot_id ?? null;
+    let botId: string | null = null;
+    if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
+      const ref = String(raw).trim();
+      const m = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (bot_id = ? OR handle = ?)", roomId, ref, "@" + ref.replace(/^@/, ""));
+      assert(m, 400, "bot_not_in_room", "that Bot is not in this room now");
+      botId = m.bot_id;
+    }
+    if ((room.lead_bot_id ?? null) !== botId) {
+      this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", viewer.botIds[0] ?? null)).immediate();
+      this.audit.append(`owner:${viewer.ownerId}`, "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
+    }
+    return this.faceRoomView(roomId, viewer);
+  }
+
+  /**
+   * Role labels of your own Bots in a room (FlyBot #476 roster): `{ roles: { "<handle or bot id>": "Writer" | null } }`.
+   * Plain text, sanitized like a name and capped at 80; shown to every member as untrusted data. No room event.
+   */
+  setFaceRoomRoles(p: Principal, roomId: string, body: any = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId);
+    const roles = body?.roles;
+    assert(roles && typeof roles === "object" && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.keys(roles).length <= this.faceRoomLimits.maxMembers,
+      400, "invalid_request", "roles must be an object of your Bots in this room: { \"@handle\": \"role\" | null }");
+    const changes: [string, string | null][] = [];
+    for (const [ref, value] of Object.entries(roles)) {
+      const m = viewer.members.find((x: any) => x.bot_id === ref || x.handle === "@" + String(ref).replace(/^@/, ""));
+      assert(m, 404, "bot_not_found", `${ref} is not one of your Bots in this room`);
+      assert(value === null || typeof value === "string", 400, "invalid_request", "a role is a string or null");
+      changes.push([m.bot_id, value === null ? null : sanitizePeerName(value, "", FACE_ROOM_ROLE_MAX) || null]);
+    }
+    this.db.transaction(() => { for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId); }).immediate();
+    return this.faceRoomView(roomId, viewer);
   }
 
   draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean; mentions?: string[] | null } = {}) {
@@ -2764,6 +2848,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered", "room_lead", "member_roles"] };
   }
 }

@@ -97,6 +97,7 @@ function summarize(type: string, d: any): string {
     case "face_room.joined": return `A bot joined a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.left": return `A bot left a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.started": return `A face-to-face room is now open${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "face_room.lead_changed": return `A face-to-face room has a new lead${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.message": return `New face-to-face room message${d?.room_id ? ` (${d.room_id})` : ""}`;
     default: return type;
   }
