@@ -1049,6 +1049,115 @@ export class Platform {
     return { grant_id: grantId, status: "declined", declined: ids, granted_bot: granted, grantee_bot: g.grantee_bot, rooms_removed: rooms };
   }
 
+  /**
+   * #34: owner grants an existing friend access to one of their Bots without an invite code.
+   * Creates the same per-Bot full share (and reciprocal reply-only if missing) that accepting an invite would.
+   * Idempotent when a live full grant of this Bot to the friend already exists. Friend is notified via grant.changed;
+   * they may decline_bot_grant; the owner may revoke_bot_grant.
+   */
+  grantBotToFriend(p: Principal, botId: string, friendOwnerId: string) {
+    const ownerId = this.requireOwner(p);
+    assert(typeof friendOwnerId === "string" && friendOwnerId.trim(), 400, "invalid_request", "friend_owner_id required");
+    friendOwnerId = friendOwnerId.trim();
+    assert(friendOwnerId !== ownerId, 400, "invalid_request", "cannot grant a Bot to yourself");
+    const bot = this.resolveOwnBot(ownerId, botId);
+    const friendOwner = this.get("SELECT * FROM owners WHERE id = ?", friendOwnerId);
+    assert(friendOwner, 404, "friend_not_found", "no such owner");
+
+    this.expireStale();
+    const friendships = this.all(
+      `SELECT * FROM relationships WHERE status = 'active'
+        AND ((requester_owner = ? AND target_owner = ?) OR (requester_owner = ? AND target_owner = ?))
+        ORDER BY updated_at DESC`,
+      ownerId, friendOwnerId, friendOwnerId, ownerId,
+    );
+    assert(friendships.length > 0, 404, "friend_not_found", "that owner is not an active friend");
+
+    // Idempotent: already a live full share of this Bot to any of the friend's bots.
+    for (const rel of friendships) {
+      const myBot = rel.requester_owner === ownerId ? rel.requester_bot : rel.target_bot;
+      const friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
+      if (myBot !== bot.id) continue;
+      if (this.hasLiveGrant(ownerId, friendBot, rel.id)) {
+        const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.relationship_id === rel.id && (g.grantee.bot_id === friendBot || g.grantee.handle === "@" + this.bot(friendBot).handle));
+        const summary = this.grantSummary(rel.id).find((g: any) => g.granted_bot.bot_id === bot.id && g.grantee_bot.bot_id === friendBot && !g.reply_only);
+        return {
+          grant_id: listed?.grant_id ?? summary?.grant_id ?? this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id,
+          bot_id: bot.id,
+          friend_owner_id: friendOwnerId,
+          grantee_bot: friendBot,
+          relationship_id: rel.id,
+          status: "active",
+          capabilities: listed?.capabilities ?? summary?.capabilities ?? ["chat.public", "profile.read"],
+          reply_only: false,
+          idempotent: true,
+        };
+      }
+    }
+
+    // Prefer an existing relationship whose endpoint on our side is this Bot; else open one with the friend's bot from the newest friendship.
+    let rel = friendships.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
+    let friendBot: string;
+    let createdRel = false;
+    if (rel) {
+      friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
+    } else {
+      const base = friendships[0];
+      friendBot = base.requester_owner === friendOwnerId ? base.requester_bot : base.target_bot;
+      const existingPair = this.findActiveRelationship(bot.id, friendBot);
+      if (existingPair) {
+        rel = existingPair;
+      } else {
+        // Mirror an invite join: friend bot is requester, our Bot is target (we are the "inviter").
+        const id = newId("rel");
+        const now = nowIso();
+        this.run(
+          `INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at, requester_scope, target_scope)
+            VALUES (?,?,?,?,?,'active',?,?,?,?,?,NULL,'bot','bot')`,
+          id, friendBot, bot.id, friendOwnerId, ownerId,
+          `Granted by owner (no invite)`, JSON.stringify(DEFAULT_CAPABILITIES), JSON.stringify(DEFAULT_CAPABILITIES), now, now,
+        );
+        rel = this.get("SELECT * FROM relationships WHERE id = ?", id);
+        createdRel = true;
+      }
+    }
+
+    const actor = `owner:${ownerId}`;
+    const fbScope = { window_days: 14, hours: "09:00-18:00" };
+    const caps = [...DEFAULT_CAPABILITIES];
+    this.db.transaction(() => {
+      for (const c of caps) this.insertGrant(rel.id, ownerId, friendBot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, actor);
+      // Reciprocal reply-only (#23), same as a join, only when missing.
+      for (const c of caps) {
+        if (!this.findGrant(friendOwnerId, bot.id, c, friendBot)) {
+          this.insertGrant(rel.id, friendOwnerId, bot.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${friendOwnerId}`, { replyOnly: true });
+        }
+      }
+    })();
+
+    this.audit.append(actor, "grant.created", rel.id, [ownerId, friendOwnerId], {
+      relationship_id: rel.id, granted_bot: bot.id, grantee_bot: friendBot, friend_owner_id: friendOwnerId, via: "grant_bot_to_friend", created_relationship: createdRel,
+    });
+    for (const b of [bot.id, friendBot]) {
+      this.emit(b, "grant.changed", { relationship_id: rel.id, status: "granted", granted_bot: bot.id, grantee_bot: friendBot });
+    }
+
+    const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.grantee.bot_id === friendBot || g.grantee.handle === "@" + this.bot(friendBot).handle);
+    const summary = this.grantSummary(rel.id).find((g: any) => g.granted_bot.bot_id === bot.id && g.grantee_bot.bot_id === friendBot && !g.reply_only);
+    return {
+      grant_id: listed?.grant_id ?? summary?.grant_id ?? this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id,
+      bot_id: bot.id,
+      friend_owner_id: friendOwnerId,
+      grantee_bot: friendBot,
+      relationship_id: rel.id,
+      status: "active",
+      capabilities: listed?.capabilities ?? summary?.capabilities ?? caps,
+      reply_only: false,
+      idempotent: false,
+      ...(createdRel ? { created_relationship: true } : {}),
+    };
+  }
+
   /** This owner's side of a relationship: "joiner" when their Bot joined the other's invite (or sent the friend
    *  request, the requester), "inviter" when the other side joined theirs. Derived from what every relationship
    *  already stores (requester_* / target_*), so old relationships are classified too. Null for room-only grants. */
