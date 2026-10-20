@@ -72,6 +72,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(ownerAny(req), P(req).id));
   app.get("/v1/remote-bots", async (req) => platform.listRemoteBots(ownerAny(req), Q(req).home || Q(req).home_id));
   app.get("/v1/bots/:id/grants", async (req) => platform.listBotGrants(ownerAny(req), P(req).id));
+  app.post("/v1/bots/:id/grants", async (req, reply) => reply.status(201).send(platform.grantBotToFriend(ownerAny(req), P(req).id, B(req).friend_owner_id)));
   app.delete("/v1/bots/:id/grants/:grantId", async (req) => platform.revokeBotGrant(ownerAny(req), P(req).grantId, P(req).id));
   // Recipient side: the grantee removes a grant given to one of their bots (the granting owner's list_bot_grants drops it).
   app.delete("/v1/remote-bots/:grantId", async (req) => platform.declineBotGrant(ownerAny(req), P(req).grantId, Q(req).bot_id || undefined));
