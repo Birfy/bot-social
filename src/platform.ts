@@ -1011,11 +1011,13 @@ export class Platform {
 
   /**
    * Recipient side of revoke_bot_grant: the GRANTEE's owner removes a grant that was given to one of their bots.
-   * The whole bundle (every capability of that grant to that bot) ends as 'declined'; it disappears from
-   * the granting owner's list_bot_grants and from the grantee's list_remote_bots. Only this direction ends:
-   * the friendship and any grants the other way stay. The Bot leaves rooms where the grant was used (same
-   * as a revoke). The granting owner may share the Bot again with a fresh invite (see joinInvite).
-   * Needs no confirm code: it only reduces the caller's own access, like leaving a room.
+   * The whole full-share bundle (every non-reply-only capability of that grant to that bot) ends as 'declined';
+   * it disappears from the granting owner's list_bot_grants and from the grantee's list_remote_bots. Only this
+   * direction ends: the friendship and any grants the other way stay. Reply-only rows (#23 / #35) are kept so
+   * the caller's Bot can still answer in conversations the friend's Bot started after "Remove this Bot".
+   * Declining a grant_id that is only reply-only is refused (nothing to remove as a share). The Bot leaves
+   * rooms where the declined grants were used (same as a revoke). The granting owner may share the Bot again
+   * with a fresh invite (see joinInvite). Needs no confirm code: it only reduces the caller's own access.
    */
   declineBotGrant(p: Principal, grantId: string, botId?: string) {
     const ownerId = this.requireOwner(p);
@@ -1030,8 +1032,10 @@ export class Platform {
       const ref = this.get("SELECT id FROM bots WHERE id = ? OR handle = ?", botId, String(botId).replace(/^@/, ""));
       assert(ref && ref.id === granted, 404, "grant_not_found", "that grant is not for this bot");
     }
-    const bundle = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ?",
+    // #35: never decline reply-only rows — those let this Bot answer the friend's Bot after a join.
+    const bundle = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ? AND IFNULL(reply_only, 0) = 0",
       g.relationship_id, g.grantor_owner, g.grantee_bot, g.room_id ?? "");
+    assert(bundle.length > 0, 404, "grant_not_found", "that grant is reply-only; decline removes a full share only");
     const ids = bundle.map((x: any) => x.id as string);
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);

@@ -159,3 +159,80 @@ test("backward compatible: revoke_bot_grant, list_remote_bots shapes and unfrien
   assert.deepEqual((await B("list_remote_bots")).bots, []);
   assert.equal((await B("decline_bot_grant", { grant_id: grantId })).error.code, "grant_not_found");
 });
+
+test("#35: declining a full share keeps coexisting reply-only rows; replies still work", async (t) => {
+  const h = await flybotHomes(t);
+  // Alice invites Writer; Bob joins with Coder → Alice full to Coder, Bob reply-only to Writer.
+  const inv = await h.A("create_invite", { bot_id: h.writer.bot_id, ...CAPS });
+  const joined = await h.B("join_invite", { code: inv.code, from_bot_id: h.coder.bot_id });
+  assert.equal(joined.status, "active");
+
+  // Bob adds a full non-chat capability on the same (grantor, grantee) as the reply-only join grants.
+  // Declining that full row must not wipe the reply-only rows (#35).
+  const replyRows = h.s.platform.db.prepare(
+    "SELECT id, capability, reply_only FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND reply_only = 1"
+  ).all(joined.relationship_id, h.b.owner_id, h.writer.bot_id) as any[];
+  assert.ok(replyRows.length >= 1, "join created reply-only rows from Bob to Writer");
+
+  const cal = h.s.platform.addGrant({ kind: "owner", ownerId: h.b.owner_id } as any, joined.relationship_id, { capability: "calendar.freebusy.read" });
+  assert.ok(cal.grant_id);
+  assert.equal((h.s.platform.db.prepare("SELECT reply_only FROM grants WHERE id = ?").get(cal.grant_id) as any).reply_only, 0);
+
+  const out = await h.A("decline_bot_grant", { grant_id: cal.grant_id, bot_id: h.coder.handle });
+  assert.equal(out.status, "declined");
+  assert.ok(out.declined.includes(cal.grant_id));
+  assert.ok(!out.declined.some((id: string) => replyRows.some((r) => r.id === id)), "reply-only ids must not be in declined");
+
+  for (const r of replyRows) {
+    const row = h.s.platform.db.prepare("SELECT status, reply_only FROM grants WHERE id = ?").get(r.id) as any;
+    assert.equal(row.status, "active", `reply-only ${r.capability} must stay active`);
+    assert.equal(row.reply_only, 1);
+  }
+  assert.equal((h.s.platform.db.prepare("SELECT status FROM grants WHERE id = ?").get(cal.grant_id) as any).status, "declined");
+
+  // Coder starts a chat; Writer can still reply (reply-only survived). Writer still cannot start a fresh chat with Coder.
+  const started = await h.B("send_as_member", { from_bot_id: h.coder.bot_id, to: h.writer.handle, text: "hi writer from coder" });
+  assert.match(started.conversation_id, /.+/);
+  h.s.platform.decideApproval({ kind: "owner", ownerId: h.b.owner_id } as any, started.message.approval_id, { decision: "approved" });
+  const msg = await h.A("send_message", { conversation_id: started.conversation_id, text: "sure, happy to talk" });
+  assert.equal(msg.error, undefined, JSON.stringify(msg));
+  assert.ok(msg.status === "pending_approval" || msg.approval_id || msg.message, JSON.stringify(msg));
+
+  const remote = await h.A("list_remote_bots");
+  const coder = remote.bots.find((x: any) => x.handle === h.coder.handle);
+  assert.ok(coder, "reply-only access to Coder remains visible");
+  assert.equal(coder.reply_only, true);
+});
+
+test("#35: declining a reply-only-only grant is refused; rows stay active", async (t) => {
+  const h = await flybotHomes(t);
+  const inv = await h.A("create_invite", { bot_id: h.writer.bot_id, ...CAPS });
+  await h.B("join_invite", { code: inv.code, from_bot_id: h.coder.bot_id });
+  // Alice sees Coder as reply_only (Bob's join grant).
+  const remote = await h.A("list_remote_bots");
+  const coder = remote.bots.find((x: any) => x.handle === h.coder.handle);
+  assert.equal(coder.reply_only, true);
+  const err = await h.A("decline_bot_grant", { grant_id: coder.grant_id });
+  assert.equal(err.error.code, "grant_not_found");
+  assert.match(err.error.message, /reply-only/i);
+  const still = await h.A("list_remote_bots");
+  assert.equal(still.bots.find((x: any) => x.handle === h.coder.handle).grant_id, coder.grant_id);
+  const active = h.s.platform.db.prepare(
+    "SELECT COUNT(*) n FROM grants WHERE id = ? AND status = 'active' AND reply_only = 1"
+  ).get(coder.grant_id) as any;
+  assert.equal(active.n, 1);
+});
+
+test("#35: Remove this Bot (decline full share) leaves the other direction's reply-only grants active", async (t) => {
+  const { s, b, B, writer, grantId, joined } = await shared(t);
+  const out = await B("decline_bot_grant", { grant_id: grantId });
+  assert.equal(out.status, "declined");
+  // Bob's reply-only grants to Writer (other direction) stay active — friendship reply path intact.
+  const reply = s.platform.db.prepare(
+    "SELECT id, status, reply_only FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active'"
+  ).all(joined.relationship_id, b.owner_id, writer.bot_id) as any[];
+  assert.ok(reply.length >= 1 && reply.every((r) => r.reply_only === 1), JSON.stringify(reply));
+  // Alice's full share to Coder is gone.
+  assert.deepEqual((await B("list_remote_bots")).bots, []);
+  assert.ok(!out.declined.some((id: string) => reply.some((r) => r.id === id)));
+});

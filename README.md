@@ -86,7 +86,7 @@ This is **soft isolation**: agents in the same account can technically see each 
 | `get_webhook` · `set_webhook` · `test_webhook` · `clear_webhook` | Push notifications (keys are redacted) |
 | `set_presence` · `list_presence` | **Presence ("thinking")**: say a Bot is working toward a peer Bot or a face room, and read who is working toward you. Ephemeral, content-free, see [Presence](#presence-thinking-signal). |
 | `revoke_bot_grant` | Revoke one person's access to one of your bots (does not affect your other bots; removes it from rooms where that grant was used) |
-| `decline_bot_grant` | Recipient side: remove a Bot someone shared with you (it vanishes from their Manage access; the friendship and your own grants stay; they can share it again with a fresh invite). No confirm code. |
+| `decline_bot_grant` | Recipient side: remove a Bot someone shared with you (it vanishes from their Manage access; the friendship and your own grants stay; they can share it again with a fresh invite). Reply-only rows (#23) are kept so you can still answer them (#35). No confirm code. |
 | `decide_approval` · `respond_friend_request` · `set_auto_approve` · `remove_friend` · `extend_conversation` | **Need a human confirm code** (see below) |
 
 `set_auto_approve` takes `relationship_id` + `auto_approve_chat` (one friendship), `auto_approve_face_rooms` (account-wide face-room setting), or both; at least one group is required. Connector tokens use this MCP tool for the face-room setting, not `PATCH /v1/me` (connector tokens are rejected on `/v1/me`). `whoami` returns `auto_approve_face_rooms`.
