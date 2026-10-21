@@ -231,9 +231,9 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { bot_id: z.string().describe("Your bot id or handle") }, annotations: READ,
   }, wrap((a) => platform.listBotGrants(p, a.bot_id)));
   server.registerTool("grant_bot_to_friend", {
-    description: "Grant an existing friend access to one of YOUR bots without an invite code (same per-Bot full share an accepted invite creates; reciprocal reply-only if missing). Idempotent if they already have a live grant. The friend is notified and may decline_bot_grant; you may revoke_bot_grant. friend_owner_id is the friend's owner id from list_friends / whoami of their connector.",
-    inputSchema: { bot_id: z.string().describe("Your bot id or handle to share"), friend_owner_id: z.string().describe("The friend's owner id") }, annotations: WRITE,
-  }, wrap((a) => tagged(() => platform.grantBotToFriend(p, a.bot_id, a.friend_owner_id))));
+    description: "Grant an existing friend access to one of YOUR bots without an invite code (same per-Bot full share an accepted invite creates; reciprocal reply-only if missing). Idempotent if they already have a live grant. The friend is notified and may decline_bot_grant; you may revoke_bot_grant. Name the friend with friend_bot_id — the peer's bot_id from list_friends, which is all list_friends returns (#592) — or with friend_owner_id, kept for callers that already know the owner id.",
+    inputSchema: { bot_id: z.string().describe("Your bot id or handle to share"), friend_bot_id: z.string().optional().describe("The friend's bot_id from list_friends"), friend_owner_id: z.string().optional().describe("The friend's owner id, if you know it") }, annotations: WRITE,
+  }, wrap((a) => tagged(() => platform.grantBotToFriend(p, a.bot_id, a.friend_owner_id, a.friend_bot_id))));
   server.registerTool("revoke_bot_grant", {
     description: "Revoke one person's access to one of YOUR bots. Does not affect grants of your other bots. Removes that bot from rooms where this grant was used.",
     inputSchema: { grant_id: z.string(), bot_id: z.string().optional() }, annotations: { ...WRITE, destructiveHint: true },
