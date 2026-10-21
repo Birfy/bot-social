@@ -103,3 +103,53 @@ test("#34: friend can decline; owner can revoke; re-grant works", async (t) => {
   assert.equal(rev.status, "revoked");
   assert.ok(!(await B("list_remote_bots")).bots.some((x: any) => x.handle === chief.handle));
 });
+
+test("#592: the friend is named by the peer Bot id — list_friends returns that and no owner id", async (t) => {
+  const { s, a, b, A, B, writer, chief, coder } = await friends(t);
+  // The whole reason for friend_bot_id: a peer carries its bot_id and never an owner id.
+  const overview: any = await A("list_friends", { bot_id: writer.bot_id });
+  const peer = overview.friends.find((f: any) => f.peer?.bot_id === coder.bot_id)?.peer;
+  assert.ok(peer, JSON.stringify(overview.friends));
+  assert.equal(peer.bot_id, coder.bot_id);
+  assert.equal(peer.owner_id, undefined);
+
+  const out: any = await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: peer.bot_id });
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.equal(out.status, "active");
+  assert.equal(out.grantee_bot, coder.bot_id, "the named friend Bot is the grantee");
+  assert.equal(out.friend_owner_id, b.owner_id, "the owner id is derived from the Bot");
+  assert.equal(out.reply_only, false);
+  assert.ok((await B("list_remote_bots")).bots.some((x: any) => x.handle === chief.handle));
+
+  // The same share through REST, with the same argument.
+  const rest = await req(s.base, "POST", `/v1/bots/${writer.bot_id}/grants`, a.connector.token, { friend_bot_id: coder.bot_id });
+  assert.equal(rest.status, 201, JSON.stringify(rest.body));
+  assert.equal(rest.body.status, "active");
+  assert.equal(rest.body.friend_owner_id, b.owner_id);
+
+  // Idempotent when that friend Bot already holds a live grant of the named Bot.
+  const again: any = await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: coder.bot_id });
+  assert.equal(again.idempotent, true);
+  assert.equal(again.grant_id, out.grant_id);
+});
+
+test("#592: a named friend Bot is still checked — stranger, self, mismatch and a missing argument", async (t) => {
+  const { s, a, b, c, A, writer, chief, coder } = await friends(t);
+  // A friend's Bot handle works too, and is resolved the same way.
+  const byHandle: any = await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: coder.handle });
+  assert.equal(byHandle.status, "active");
+  assert.equal(byHandle.grantee_bot, coder.bot_id);
+  assert.equal(byHandle.friend_owner_id, b.owner_id);
+  // A stranger's Bot: no active friendship between the owners.
+  assert.equal((await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: c.home.bot_id })).error.code, "friend_not_found");
+  // Our own Bot is not a friend to grant to.
+  assert.equal((await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: writer.bot_id })).error.code, "invalid_request");
+  // A Bot that does not exist.
+  assert.equal((await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_bot_id: "bot_nope" })).error.code, "friend_not_found");
+  // Owner id and Bot id must name the same owner.
+  assert.equal((await A("grant_bot_to_friend", { bot_id: chief.bot_id, friend_owner_id: c.owner_id, friend_bot_id: coder.bot_id })).error.code, "invalid_request");
+  // Neither argument.
+  assert.equal((await A("grant_bot_to_friend", { bot_id: chief.bot_id })).error.code, "invalid_request");
+  // REST keeps the old friend_owner_id path working.
+  assert.equal((await req(s.base, "POST", `/v1/bots/${chief.bot_id}/grants`, a.connector.token, { friend_owner_id: c.owner_id })).status, 404);
+});

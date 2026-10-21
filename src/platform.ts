@@ -1054,14 +1054,25 @@ export class Platform {
    * Creates the same per-Bot full share (and reciprocal reply-only if missing) that accepting an invite would.
    * Idempotent when a live full grant of this Bot to the friend already exists. Friend is notified via grant.changed;
    * they may decline_bot_grant; the owner may revoke_bot_grant.
+   * The friend is named by `friend_bot_id` (the peer Bot id `list_friends` returns, #592) or by the older
+   * `friend_owner_id`; with a Bot id the owner is derived from it, so a caller never needs an owner id.
    */
-  grantBotToFriend(p: Principal, botId: string, friendOwnerId: string) {
+  grantBotToFriend(p: Principal, botId: string, friendOwnerId?: string, friendBotId?: string) {
     const ownerId = this.requireOwner(p);
-    assert(typeof friendOwnerId === "string" && friendOwnerId.trim(), 400, "invalid_request", "friend_owner_id required");
-    friendOwnerId = friendOwnerId.trim();
-    assert(friendOwnerId !== ownerId, 400, "invalid_request", "cannot grant a Bot to yourself");
+    const namedOwner = typeof friendOwnerId === "string" ? friendOwnerId.trim() : "";
+    const namedBot = typeof friendBotId === "string" ? friendBotId.trim() : "";
+    assert(namedOwner || namedBot, 400, "invalid_request", "friend_owner_id or friend_bot_id required");
     const bot = this.resolveOwnBot(ownerId, botId);
-    const friendOwner = this.get("SELECT * FROM owners WHERE id = ?", friendOwnerId);
+    const peerBot = namedBot
+      ? this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", namedBot, namedBot.replace(/^@/, ""))
+      : undefined;
+    if (namedBot) assert(peerBot, 404, "friend_not_found", "no such Bot");
+    if (peerBot) assert(peerBot.owner_id !== ownerId, 400, "invalid_request", "cannot grant a Bot to yourself");
+    if (peerBot && namedOwner) assert(namedOwner === peerBot.owner_id, 400, "invalid_request", "friend_owner_id and friend_bot_id name different owners");
+    const friendOwnerKey: string = peerBot ? String(peerBot.owner_id) : namedOwner;
+    assert(friendOwnerKey !== ownerId, 400, "invalid_request", "cannot grant a Bot to yourself");
+    friendOwnerId = friendOwnerKey;
+    const friendOwner = this.get("SELECT * FROM owners WHERE id = ?", friendOwnerKey);
     assert(friendOwner, 404, "friend_not_found", "no such owner");
 
     this.expireStale();
@@ -1072,6 +1083,13 @@ export class Platform {
       ownerId, friendOwnerId, friendOwnerId, ownerId,
     );
     assert(friendships.length > 0, 404, "friend_not_found", "that owner is not an active friend");
+    if (peerBot) {
+      // Named by Bot: the share targets that friend Bot itself, not any other Bot of the same owner.
+      const named = friendships.filter((r: any) => r.requester_bot === peerBot.id || r.target_bot === peerBot.id);
+      assert(named.length > 0, 404, "friend_not_found", "that Bot is not an active friend");
+      friendships.length = 0;
+      friendships.push(...named);
+    }
 
     // Idempotent: already a live full share of this Bot to any of the friend's bots.
     for (const rel of friendships) {
@@ -1129,8 +1147,8 @@ export class Platform {
       for (const c of caps) this.insertGrant(rel.id, ownerId, friendBot, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, actor);
       // Reciprocal reply-only (#23), same as a join, only when missing.
       for (const c of caps) {
-        if (!this.findGrant(friendOwnerId, bot.id, c, friendBot)) {
-          this.insertGrant(rel.id, friendOwnerId, bot.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${friendOwnerId}`, { replyOnly: true });
+        if (!this.findGrant(friendOwnerKey, bot.id, c, friendBot)) {
+          this.insertGrant(rel.id, friendOwnerKey, bot.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${friendOwnerKey}`, { replyOnly: true });
         }
       }
     })();
