@@ -2762,7 +2762,11 @@ export class Platform {
     return { room_id: roomId, ticket, url: this.faceInviteUrl(ticket), expires_at: expiresAt };
   }
 
-  /** Revoke a ticket now. A join that already entered its transaction is refused, never half-applied. */
+  /**
+   * Revoke a ticket now. A join that starts after this commits re-reads the ticket inside its own transaction,
+   * sees `revoked` and is refused whole; a join already inside its transaction holds the write lock, so this
+   * revoke lands after it and only later uses are affected.
+   */
   revokeFaceRoomInvite(p: Principal, roomId: string, ticketRaw: unknown) {
     this.faceRequireMember(p, roomId);
     this.faceRequireLead(p, roomId, "revoke an invite");
@@ -3132,6 +3136,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered", "room_lead", "member_roles"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered", "room_lead", "member_roles", "face_room_invites"] };
   }
 }

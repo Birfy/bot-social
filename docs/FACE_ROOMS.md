@@ -93,6 +93,8 @@ Create a candidate room for `code` if none exists; otherwise join that room. Nev
 
 A room that already exists can be joined by **link**: the lead mints a ticket, hands over `url` (or a QR code that carries it), and the person who opens it joins *that* room instead of typing a number to form a new one. The link shape is always `https://<host>/r/<ticket>`; opening it in a browser shows the preview below, and the FlyBot client parses the same link.
 
+**Discovery:** `GET /v1/platform` lists `"face_room_invites"` in `features`. A client that does not see it must keep offering only the 6-digit number and must not call these endpoints, which answer `404` on a server without them.
+
 #### `POST /v1/face-rooms/{id}/invites`
 
 Only the **room lead** (see [Room lead](#room-lead-flybot-476)) may mint; another member gets `403 not_lead`, a non-member `404 face_room_not_found`, and a closed room `410 ended`. No body.

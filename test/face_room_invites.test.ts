@@ -179,3 +179,32 @@ test("previews are rate-limited per address, so a leaked ticket cannot be brute-
   assert.equal(blocked.status, 429);
   assert.equal(blocked.body.error.code, "rate_limited");
 });
+
+test("the ticket reaches neither the audit log nor the attempt rows, and clients can discover the feature", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const B = await ownerWithBot(s.base, "ben");
+  const room = await newRoom(s.base, A, "383838");
+  const ticket = (await mint(s.base, A, room.body.room_id)).body.ticket;
+  const ip = "198.51.100.23";
+  assert.equal((await preview(s.base, ticket, ip)).status, 200);
+  assert.equal((await joinInvite(s.base, B, ticket)).status, 200);
+  assert.equal((await req(s.base, "DELETE", `/v1/face-rooms/${room.body.room_id}/invites/${ticket}`, tok(A))).status, 200);
+
+  // The mint and the revoke are audited; the credential itself never is.
+  const audit = s.platform.auditEvents({ kind: "owner", ownerId: A.owner_id } as any, { limit: 500 });
+  const actions = audit.events.map((e: any) => e.action);
+  assert.ok(actions.includes("face_room.invite_minted"), actions.join(","));
+  assert.ok(actions.includes("face_room.invite_revoked"), actions.join(","));
+  assert.equal(JSON.stringify(audit.events).includes(ticket), false, "the audit log must not store the ticket");
+
+  // Attempt rows keep the outcome (`minted`, `preview`, `invited`), never the ticket.
+  const attempts = s.platform.db.prepare("SELECT code, outcome FROM face_room_attempts").all() as any[];
+  assert.ok(attempts.length > 0, "the mint, the preview and the join each left a row");
+  assert.equal(JSON.stringify(attempts).includes(ticket), false, "attempt rows must not store the ticket");
+  assert.deepEqual([...new Set(attempts.map((a: any) => a.outcome))].sort(), ["created", "invited", "minted", "preview"]);
+
+  const info = await req(s.base, "GET", "/v1/platform");
+  assert.ok(info.body.features.includes("face_room_invites"), "a client can tell the invite endpoints exist");
+});
