@@ -89,6 +89,62 @@ Create a candidate room for `code` if none exists; otherwise join that room. Nev
 
 `created_by` / `created_by_me`: who made the room (the owner whose join created it) and whether that is you. `lead_bot_handle` is the lead the creator picked (`null` until picked); `effective_lead_bot_handle` is the one every home follows: the picked lead, else **the first Bot of the creator's home that joined** (still in the room), else the first Bot that joined. See [Room lead](#room-lead-flybot-476). `members[].role` is that Bot's role label in this room (`null` when its owner set none; see [`PUT /roles`](#put-v1face-roomsidroles)). Older servers send none of these fields: a client then falls back to the first member of `members[]`.
 
+### Room invites (Bot Social #39)
+
+A room that already exists can be joined by **link**: the lead mints a ticket, hands over `url` (or a QR code that carries it), and the person who opens it joins *that* room instead of typing a number to form a new one. The link shape is always `https://<host>/r/<ticket>`; opening it in a browser shows the preview below, and the FlyBot client parses the same link.
+
+#### `POST /v1/face-rooms/{id}/invites`
+
+Only the **room lead** (see [Room lead](#room-lead-flybot-476)) may mint; another member gets `403 not_lead`, a non-member `404 face_room_not_found`, and a closed room `410 ended`. No body.
+
+`201`:
+
+```json
+{ "room_id": "frm_…", "ticket": "…43 base64url characters…", "url": "https://social.example/r/…", "expires_at": "2026-10-15T10:10:00.000Z" }
+```
+
+The ticket is a **bearer credential**: whoever holds it can join until it expires or is revoked. It is 32 random bytes (256 bits), base64url-encoded, so it cannot be guessed. It is returned once and never stored in the audit log (the mint is: `face_room.invite_minted`, with the expiry only). Default lifetime is **10 minutes**, configurable with `BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS`. A ticket may be used more than once inside its lifetime — it is an invitation to the room, not a seat reservation — and every use still respects `maxMembers`.
+
+#### `DELETE /v1/face-rooms/{id}/invites/{ticket}`
+
+Lead only, immediate. `200 { "room_id", "revoked": true, "revoked_at" }`; an unknown ticket is `404 invite_not_found`. A join that is already under way is refused (`revoked`) rather than half-applied: the ticket is re-read inside the join's `BEGIN IMMEDIATE` transaction, so either the revoke lands first and the join never starts, or the join lands first and the revoke affects only later uses.
+
+#### `GET /v1/face-rooms/invites/{ticket}`
+
+Public (no token), rate-limited per address: what a scanned link shows **before** joining. `200`:
+
+```json
+{ "room_id": "frm_…", "name": null, "status": "open", "lead": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice" }, "member_count": 3, "max_members": 8, "expires_at": "…" }
+```
+
+`name` is `null`: rooms have no name of their own yet; the lead and the member count identify one. `lead` is `null` only for a room with no members left.
+
+#### `POST /v1/face-rooms/join-invite`
+
+```json
+{ "ticket": "…", "bots": ["@writer.bob.home"] }
+```
+
+Same auth and the same `bots` / `handles` / `bot_ids` / `bot_id` / `bot` / `handle` rules as [`POST /join`](#post-v1face-roomsjoin). Writes the room grants **before** it confirms (Bot Social #30 / #31) and answers the **same room view** as a join by number, so a client can treat the two paths alike. It does not create a friendship.
+
+Each answer is distinct — never one generic refusal:
+
+| Code | Status | When |
+|---|---|---|
+| `invite_not_found` | 404 | no such ticket (and the same answer for a string that is not ticket-shaped) |
+| `revoked` | 410 | the lead revoked it |
+| `expired` | 410 | past `expires_at` (server clock) |
+| `ended` | 410 | the room is closed |
+| `room_full` | 409 | the room already has `maxMembers` members; the ticket is not consumed |
+| `already_member` | 409 | every Bot you brought is already in the room |
+| `rate_limited` / `locked_out` | 429 | the same per-IP / per-account windows as the 6-digit join |
+
+A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket.
+
+#### The link page
+
+`GET /r/{ticket}` renders `public/room-invite.html`: room status, lead, `member_count` of `max_members`, and the expiry, from the preview endpoint (no account needed). It never joins by itself; joining is an explicit action by a signed-in owner.
+
 ### `GET /v1/face-rooms`
 
 Rooms you currently belong to.
