@@ -46,6 +46,9 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/", async (_req, reply) => reply.redirect("/ui"));
   app.get("/friends", async (_req, reply) => reply.redirect("/ui#/friends"));
   app.get("/i/:code", async (_req, reply) => reply.type("text/html; charset=utf-8").send(page("invite.html")));
+  // A room invite link (Bot Social #39). The FlyBot client parses /r/<ticket> itself; a person who opens
+  // the link in a browser gets the same preview the API answers, with nothing to install.
+  app.get("/r/:ticket", async (_req, reply) => reply.type("text/html; charset=utf-8").send(page("room-invite.html")));
   app.get("/botctl", async (_req, reply) => {
     const js = (await ensureBotctl()).replace("__BOTSOCIAL_DEFAULT_URL__", platform.publicBaseUrl);
     return reply.type("text/javascript; charset=utf-8").header("content-disposition", 'attachment; filename="botctl"').send(js);
@@ -170,6 +173,11 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   };
   const faceIp = (req: FastifyRequest) => req.ip;
   app.post("/v1/face-rooms/join", async (req, reply) => reply.status(200).send(platform.joinFaceRoom(faceAuth(req), B(req), { ip: faceIp(req) })));
+  // Invites into an established room (#39): mint, revoke, preview (public), join by ticket.
+  app.post("/v1/face-rooms/:id/invites", async (req, reply) => reply.status(201).send(platform.mintFaceRoomInvite(faceAuth(req), P(req).id, { ip: faceIp(req) })));
+  app.delete("/v1/face-rooms/:id/invites/:ticket", async (req) => platform.revokeFaceRoomInvite(faceAuth(req), P(req).id, P(req).ticket));
+  app.get("/v1/face-rooms/invites/:ticket", async (req) => platform.previewFaceRoomInvite(P(req).ticket, { ip: faceIp(req) }));
+  app.post("/v1/face-rooms/join-invite", async (req, reply) => reply.status(200).send(platform.joinFaceRoomByInvite(faceAuth(req), B(req), { ip: faceIp(req) })));
   // Presence ("thinking"): owner login, connector token or the Bot's own token (a Bot token acts only as itself).
   app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
   app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));

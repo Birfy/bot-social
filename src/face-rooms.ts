@@ -1,4 +1,5 @@
 /** Face-to-face rooms: 6-digit matching, membership, windowed history. See docs/FACE_ROOMS.md. */
+import { randomBytes } from "node:crypto";
 import { ApiError } from "./errors.js";
 import { limitFromEnv } from "./policy.js";
 
@@ -17,6 +18,8 @@ export interface FaceRoomLimits {
   createWindowMs: number;
   failsBeforeLockout: number;
   lockoutMs: number;
+  /** How long an invite ticket for an established room stays valid (default 10 minutes). */
+  inviteTtlMs: number;
 }
 
 export const DEFAULT_FACE_ROOM_LIMITS: FaceRoomLimits = {
@@ -30,6 +33,7 @@ export const DEFAULT_FACE_ROOM_LIMITS: FaceRoomLimits = {
   createWindowMs: 60 * 60 * 1000,
   failsBeforeLockout: 8,
   lockoutMs: 15 * 60 * 1000,
+  inviteTtlMs: 10 * 60 * 1000,
 };
 
 /** Env vars (all optional, positive integers). Operator note: see README / docs/FACE_ROOMS.md. */
@@ -45,6 +49,7 @@ export function loadFaceRoomLimits(override: Partial<FaceRoomLimits> = {}): Face
     createWindowMs: envMs("BOTSOCIAL_FACE_ROOM_CREATE_WINDOW_SECONDS", DEFAULT_FACE_ROOM_LIMITS.createWindowMs / 1000),
     failsBeforeLockout: envN("BOTSOCIAL_FACE_ROOM_FAILS_BEFORE_LOCKOUT", DEFAULT_FACE_ROOM_LIMITS.failsBeforeLockout),
     lockoutMs: envMs("BOTSOCIAL_FACE_ROOM_LOCKOUT_SECONDS", DEFAULT_FACE_ROOM_LIMITS.lockoutMs / 1000),
+    inviteTtlMs: envMs("BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS", DEFAULT_FACE_ROOM_LIMITS.inviteTtlMs / 1000),
   };
   return { ...DEFAULT_FACE_ROOM_LIMITS, ...omitUndef(env), ...omitUndef(override) };
 }
@@ -85,6 +90,15 @@ export function parseFaceCode(raw: unknown): string {
 
 export function isFaceCode(raw: unknown): boolean {
   return /^\d{6}$/.test(String(raw ?? "").trim());
+}
+
+/** 32 random bytes, base64url (43 characters, 256 bits): a room invite ticket is a bearer credential. */
+export const INVITE_TICKET_BYTES = 32;
+export function newInviteTicket(): string {
+  return randomBytes(INVITE_TICKET_BYTES).toString("base64url");
+}
+export function isInviteTicket(raw: unknown): raw is string {
+  return typeof raw === "string" && /^[A-Za-z0-9_-]{43}$/.test(raw.trim());
 }
 
 export function memberLabel(displayName: string, ownerName: string): string {
@@ -168,6 +182,19 @@ CREATE TABLE IF NOT EXISTS face_room_attempts (
 );
 CREATE INDEX IF NOT EXISTS face_room_attempts_owner ON face_room_attempts (owner_id, created_at);
 CREATE INDEX IF NOT EXISTS face_room_attempts_ip ON face_room_attempts (ip, created_at);
+CREATE TABLE IF NOT EXISTS face_room_invites (
+  ticket TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL REFERENCES face_rooms(id),
+  created_by_owner_id TEXT NOT NULL,
+  created_by_bot TEXT,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  used_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  last_used_by_owner_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS face_room_invites_room ON face_room_invites (room_id, expires_at);
 CREATE TABLE IF NOT EXISTS face_room_lockouts (
   key TEXT PRIMARY KEY,
   until TEXT NOT NULL,

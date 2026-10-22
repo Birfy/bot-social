@@ -13,7 +13,7 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, sanitizePeerName,
+  FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
 } from "./face-rooms.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
@@ -2366,7 +2366,7 @@ export class Platform {
   private faceEventPublic(e: any) {
     return { event_id: e.id, event_cursor: e.seq, type: e.type, created_at: e.created_at, actor_bot: e.actor_bot, ...J(e.data, {}) };
   }
-  private faceRecordAttempt(ownerId: string, ip: string | null, code: string, outcome: string) {
+  private faceRecordAttempt(ownerId: string | null, ip: string | null, code: string, outcome: string) {
     this.run("INSERT INTO face_room_attempts (owner_id, ip, code, outcome, created_at) VALUES (?,?,?,?,?)", ownerId, ip, String(code).slice(0, 16), outcome, this.ts());
   }
   private faceSetLockout(key: string, fails: number) {
@@ -2697,6 +2697,159 @@ export class Platform {
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), ip });
+    const viewer = this.faceRequireMember(p, out.roomId);
+    return this.faceRoomView(out.roomId, viewer);
+  }
+
+  // ---- Room invites (Bot Social #39): a ticket for an established room, joined by link or QR.
+
+  /** The invite row for a ticket, or null when the string is not even ticket-shaped (same answer as unknown). */
+  private faceInviteOf(ticketRaw: unknown) {
+    const ticket = String(ticketRaw ?? "").trim();
+    if (!isInviteTicket(ticket)) return null;
+    return this.get("SELECT * FROM face_room_invites WHERE ticket = ?", ticket) ?? null;
+  }
+
+  /** One of the refusals that belong to the invite itself; `room_full` / `already_member` come later, at the join. */
+  private faceInviteRefusal(invite: any): { status: number; code: string; message: string } | null {
+    if (!invite) return { status: 404, code: "invite_not_found", message: "this invite link is not valid" };
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite.room_id);
+    if (!room) return { status: 404, code: "invite_not_found", message: "this invite link is not valid" };
+    if (room.status === "closed") return { status: 410, code: "ended", message: "this room has ended" };
+    if (invite.revoked_at) return { status: 410, code: "revoked", message: "this invite was revoked" };
+    if (Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
+    return null;
+  }
+
+  private faceInviteUrl(ticket: string) {
+    return `${this.publicBaseUrl.replace(/\/$/, "")}/r/${ticket}`;
+  }
+
+  /** Only the room lead acts here: the picked lead, else the creator's first Bot still in the room. */
+  private faceRequireLead(p: Principal, roomId: string, what: string) {
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
+    const lead = this.faceLeadOf(room).effective;
+    const isLead = Boolean(lead) && (p.kind === "bot" ? p.botId === lead.bot_id : p.ownerId === lead.owner_id);
+    if (!isLead) throw new ApiError(403, "not_lead", `only the room lead may ${what}`);
+    return room;
+  }
+
+  private faceIpRateLimit(ip: string | null, message: string, scope: string) {
+    const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ?", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+      return this.faceRateFail(message, scope, this.faceRoomLimits.attemptWindowMs);
+    return null;
+  }
+
+  /**
+   * Mint a ticket for an existing room. The ticket is a bearer credential: it is returned once, the mint is
+   * audited, and the ticket itself is never written to the audit log.
+   */
+  mintFaceRoomInvite(p: Principal, roomId: string, ctx: { ip?: string } = {}) {
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const viewer = this.faceRequireMember(p, roomId);
+    if (viewer.room.status === "closed") throw new ApiError(410, "ended", "this room has ended");
+    this.faceRequireLead(p, roomId, "mint an invite");
+    const block = this.faceAttemptRateLimit(p.ownerId, ip);
+    if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
+    this.faceRecordAttempt(p.ownerId, ip, "invite", "minted");
+    const ticket = newInviteTicket();
+    const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
+    this.run("INSERT INTO face_room_invites (ticket, room_id, created_by_owner_id, created_by_bot, expires_at, created_at) VALUES (?,?,?,?,?,?)",
+      ticket, roomId, p.ownerId, p.kind === "bot" ? p.botId : null, expiresAt, this.ts());
+    this.audit.append(`owner:${p.ownerId}`, "face_room.invite_minted", roomId, this.faceOwnerIds(roomId), { expires_at: expiresAt, ttl_seconds: Math.round(this.faceRoomLimits.inviteTtlMs / 1000) });
+    return { room_id: roomId, ticket, url: this.faceInviteUrl(ticket), expires_at: expiresAt };
+  }
+
+  /** Revoke a ticket now. A join that already entered its transaction is refused, never half-applied. */
+  revokeFaceRoomInvite(p: Principal, roomId: string, ticketRaw: unknown) {
+    this.faceRequireMember(p, roomId);
+    this.faceRequireLead(p, roomId, "revoke an invite");
+    const ticket = String(ticketRaw ?? "").trim();
+    const invite = this.get("SELECT * FROM face_room_invites WHERE ticket = ? AND room_id = ?", ticket, roomId);
+    if (!invite) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
+    const revokedAt = invite.revoked_at ?? this.ts();
+    if (!invite.revoked_at) {
+      this.run("UPDATE face_room_invites SET revoked_at = ? WHERE ticket = ?", revokedAt, ticket);
+      this.audit.append(`owner:${p.ownerId}`, "face_room.invite_revoked", roomId, this.faceOwnerIds(roomId), {});
+    }
+    return { room_id: roomId, revoked: true, revoked_at: revokedAt };
+  }
+
+  /** What a scanned link can show before joining: the room, its lead, how many are in it, when the ticket dies. */
+  previewFaceRoomInvite(ticketRaw: unknown, ctx: { ip?: string } = {}) {
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const block = this.faceIpRateLimit(ip, "too many invite previews from this address", "invite_preview");
+    if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
+    const invite = this.faceInviteOf(ticketRaw);
+    const refusal = this.faceInviteRefusal(invite);
+    // Every preview counts against the per-IP window, whether it names a real ticket or not.
+    this.faceRecordAttempt(null, ip, "invite", refusal ? refusal.code : "preview");
+    if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite!.room_id);
+    const lead = this.faceLeadOf(room).effective;
+    const memberCount = this.get("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL", room.id).n as number;
+    return {
+      room_id: room.id,
+      // Rooms have no name of their own yet; the lead and the count identify this one.
+      name: null,
+      status: room.status,
+      lead: lead ? { handle: lead.handle, display_name: lead.display_name, owner_name: lead.owner_name } : null,
+      member_count: memberCount,
+      max_members: this.faceRoomLimits.maxMembers,
+      expires_at: invite.expires_at,
+    };
+  }
+
+  /** Join an established room with a ticket: writes the room grants, then confirms (Bot Social #30/#31). */
+  joinFaceRoomByInvite(p: Principal, body: any, ctx: { ip?: string } = {}) {
+    const ownerId = p.ownerId;
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const bring = this.faceBotsToBring(p, body);
+    const bots = bring.map((x) => x.bot);
+    const ticket = String(body?.ticket ?? "").trim();
+    type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
+    type Ok = { ok: true; roomId: string };
+    const txn = this.db.transaction((): Ok | Fail => {
+      const locked = this.faceLockoutUntil(ownerId, ip);
+      if (locked) {
+        this.faceRecordAttempt(ownerId, ip, "invite", "locked_out");
+        return { ok: false, status: 429, code: "locked_out", message: "too many failed invite attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
+      }
+      const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
+      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "invite", "rate_limited"); return { ...attemptBlock } as Fail; }
+      // BEGIN IMMEDIATE: a revoke that commits first is seen here, so the join is refused whole.
+      const invite = this.faceInviteOf(ticket);
+      const refusal = this.faceInviteRefusal(invite);
+      if (refusal) {
+        this.faceRecordAttempt(ownerId, ip, "invite", refusal.code);
+        return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite!.room_id);
+      const active = this.all("SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL", room.id);
+      const activeSet = new Set(active.map((m: any) => m.bot_id));
+      const newcomers = bots.filter((b) => !activeSet.has(b.id));
+      if (!newcomers.length) {
+        this.faceRecordAttempt(ownerId, ip, "invite", "already_member");
+        return { ok: false, status: 409, code: "already_member", message: "every Bot you brought is already in this room" };
+      }
+      if (active.length + newcomers.length > this.faceRoomLimits.maxMembers) {
+        this.faceRecordAttempt(ownerId, ip, "invite", "room_full");
+        return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots)`, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      this.faceAddMembers(room.id, newcomers, ownerId);
+      this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
+      this.run("UPDATE face_room_invites SET used_count = used_count + 1, last_used_at = ?, last_used_by_owner_id = ? WHERE ticket = ?", this.ts(), ownerId, ticket);
+      this.faceRecordAttempt(ownerId, ip, "invite", "invited");
+      return { ok: true, roomId: room.id };
+    });
+    const out = txn.immediate();
+    if (!out.ok) {
+      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      throw new ApiError(out.status, out.code, out.message, out.extra);
+    }
+    this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), ip, invite: true });
     const viewer = this.faceRequireMember(p, out.roomId);
     return this.faceRoomView(out.roomId, viewer);
   }
