@@ -185,6 +185,16 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.delete("/v1/face-rooms/:id/invites/:ticket", async (req) => platform.revokeFaceRoomInvite(faceAuth(req), P(req).id, P(req).ticket));
   app.get("/v1/face-rooms/invites/:ticket", async (req) => platform.previewFaceRoomInvite(P(req).ticket, { ip: faceIp(req) }));
   app.post("/v1/face-rooms/join-invite", async (req, reply) => reply.status(200).send(platform.joinFaceRoomByInvite(faceAuth(req), B(req), { ip: faceIp(req) })));
+  // Local room invites (#60): a ticket for a room that lives in one FlyBot home. Same tokens as the face-room routes.
+  app.post("/v1/local-room-invites", async (req, reply) => reply.status(201).send(platform.mintLocalRoomInvite(faceAuth(req), B(req), { ip: faceIp(req) })));
+  app.get("/v1/local-room-invites/:ticket", async (req) => {
+    // Public; a token is optional and only adds the claimer for the two owners the ticket binds.
+    const h = req.headers.authorization;
+    const p = h?.startsWith("Bearer ") ? platform.authenticate(h.slice(7)) : null;
+    return platform.previewLocalRoomInvite(p, P(req).ticket, { ip: faceIp(req) });
+  });
+  app.post("/v1/local-room-invites/:ticket/claim", async (req) => platform.claimLocalRoomInvite(faceAuth(req), P(req).ticket, B(req), { ip: faceIp(req) }));
+  app.delete("/v1/local-room-invites/:ticket", async (req, reply) => { platform.revokeLocalRoomInvite(faceAuth(req), P(req).ticket); return reply.status(204).send(); });
   // Presence ("thinking"): owner login, connector token or the Bot's own token (a Bot token acts only as itself).
   app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
   app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));
