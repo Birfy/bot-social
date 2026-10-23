@@ -18,6 +18,12 @@ import {
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
+/**
+ * A row of `relationships`: the two endpoint Bots and the owners behind them. One pair can hold several rows —
+ * a friendship (`active`) and one `room` row per shared room — and code that picks a door must say which one.
+ */
+export type Relationship = { id: string; requester_bot: string; target_bot: string; requester_owner: string; target_owner: string; status: string; created_at: string; updated_at: string; [column: string]: any };
+
 export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
 
 /**
@@ -443,11 +449,17 @@ export class Platform {
       assert(/^[A-Za-z0-9._:-]{1,64}$/.test(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
       assert(this.findRoomGrant(to.owner_id, cb.botId, "chat.public", to.id, roomId), 403, "room_not_shared", "no active room-scoped grant for that room between these Bots", { suggestion: "join the room together again, or send without room_id" });
     }
-    this.activeRelationship(cb.botId, to.id);
+    // #43: a claimed room invite is reach by itself — the guest may answer the inviter in that room, without a
+    // friendship and without a fresh conversation elsewhere.
+    const roomRel = roomId === null ? null : this.roomReach(cb.botId, to.id, roomId);
+    if (roomId !== null) assert(roomRel, 403, "no_relationship", "no room reach to that Bot in this room", { suggestion: "join the room with the invite link first" });
+    const rel = roomRel ?? this.activeRelationship(cb.botId, to.id);
     // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
     // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
-    const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId);
-    const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
+    // The door is part of the lookup: a pair can share several rooms, and reusing the conversation opened in
+    // another room would judge this room by that room's relationship (and, once it is gone, fail mid-draft).
+    const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) AND relationship_id = ? ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId, rel.id);
+    const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId) as any).conversation_id;
     const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions, roomId);
     return { conversation_id: conversationId, message, typed_by_owner: typed, ...(roomId !== null ? { room_id: roomId } : {}) };
   }
@@ -1024,6 +1036,25 @@ export class Platform {
       return { ...g, scope: J(g.scope, {}) };
     }
     return null;
+  }
+
+  /**
+   * #43: reach without a friendship. A Bot that joined a room with a ticket may send to another Bot of that room
+   * while both are in it and the room-scoped grant is alive. Nothing here creates a friendship: the pair can only
+   * talk with this room id, and the reach dies with the room.
+   *
+   * The door is the one named by the grant that was actually checked, never "the newest room between the pair":
+   * a pair can share several rooms, and searching for a room relationship hands back whichever room was created
+   * last (pairRelationships is ORDER BY created_at DESC), so room 1 would ride on room 2's door.
+   */
+  private roomReach(a: string, b: string, roomId: string): Relationship | null {
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (!room || room.status === "closed") return null;
+    const inRoom = (botId: string) => !!this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", roomId, botId);
+    if (!inRoom(a) || !inRoom(b)) return null;
+    const grant = this.findRoomGrant(this.bot(b).owner_id, a, "chat.public", b, roomId);
+    if (!grant) return null;
+    return this.get("SELECT * FROM relationships WHERE id = ? AND status = 'room'", grant.relationship_id) ?? null;
   }
 
   /**
@@ -1942,20 +1973,22 @@ export class Platform {
     this.audit.append(`bot:${actor}`, "policy.decision", convId, owners, { action, decision, reasons, policy_version: POLICY_VERSION, ...extra });
   }
 
-  createConversation(p: Principal, env: Envelope) {
+  createConversation(p: Principal, env: Envelope, roomId: string | null = null) {
     this.verifyEnvelope(p, env, "conversation.create");
     const { botId, ownerId } = this.requireBot(p);
     const pl: any = env.payload ?? {};
     assert((pl.type ?? "direct") === "direct", 400, "invalid_request", "MVP supports only direct (1:1) conversations");
     assert(pl.peer_bot_id, 400, "invalid_request", "peer_bot_id required");
     const peer = this.bot(pl.peer_bot_id);
-    const rel = this.activeRelationship(botId, peer.id);
+    // #43: a conversation opened from a claimed room runs on that room's grants, not on a friendship.
+    const roomRel = roomId ? this.roomReach(botId, peer.id, roomId) : null;
+    const rel = roomRel ?? this.activeRelationship(botId, peer.id);
     const intentDef = INTENTS[pl.intent?.type];
     if (!intentDef) {
       this.policyDecision(botId, null, [ownerId], "conversation.create", "deny", ["intent.unsupported"]);
       throw new ApiError(403, "intent_scope_violation", "MVP intents: schedule_meeting, general_chat");
     }
-    const chat = this.findGrant(peer.owner_id, botId, "chat.public", peer.id);
+    const chat = roomRel ? this.findRoomGrant(peer.owner_id, botId, "chat.public", peer.id, roomId!) : this.findGrant(peer.owner_id, botId, "chat.public", peer.id);
     if (!chat) {
       this.policyDecision(botId, null, [ownerId, peer.owner_id], "conversation.create", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
@@ -1971,21 +2004,24 @@ export class Platform {
     this.run("INSERT INTO conversations (id, type, relationship_id, initiator_bot, peer_bot, intent, status, max_turns, created_at, updated_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
       // max_turns stays in the schema (NOT NULL) but nothing reads it: conversations have no turn limit (owner decision 2026-10-19).
       id, "direct", rel.id, botId, peer.id, JSON.stringify(intent), "open", 0, nowIso(), nowIso(), expires);
-    this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", ["relationship.active", "intent.allowed"]);
+    this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", [roomRel ? "room.context" : "relationship.active", "intent.allowed"]);
     this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
     this.emit(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
     return {
       conversation_id: id, status: "open", intent,
       limits: { max_turns: null, rate_per_min: LIMITS.ratePerConversationPerMin, expires_at: expires },
-      effective_capabilities: this.effectiveCaps(botId, peer.id, allowed),
+      effective_capabilities: this.effectiveCaps(botId, peer.id, allowed, roomId),
     };
   }
 
-  private effectiveCaps(me: string, peer: string, allowed: string[]) {
+  private effectiveCaps(me: string, peer: string, allowed: string[], roomId: string | null = null) {
     const meB = this.bot(me), peerB = this.bot(peer);
+    // #43: a room conversation runs on that room's grants; the friendship grants (room_id IS NULL) are not it.
+    const cap = (grantorOwner: string, granteeBot: string, c: string, grantedBot: string) =>
+      roomId ? this.findRoomGrant(grantorOwner, granteeBot, c, grantedBot, roomId) : this.findGrant(grantorOwner, granteeBot, c, grantedBot);
     return {
-      me_on_peer: allowed.filter((c) => this.findGrant(peerB.owner_id, me, c, peer)),
-      peer_on_me: allowed.filter((c) => this.findGrant(meB.owner_id, peer, c, me)),
+      me_on_peer: allowed.filter((c) => cap(peerB.owner_id, me, c, peer)),
+      peer_on_me: allowed.filter((c) => cap(meB.owner_id, peer, c, me)),
     };
   }
 
@@ -1997,7 +2033,8 @@ export class Platform {
     const { peer } = this.memberConv(botId, convId);
     const peerB = this.bot(peer);
     const owners = [ownerId, peerB.owner_id];
-    this.activeRelationship(botId, peer);
+    const roomRel = roomContext ? this.roomReach(botId, peer, roomContext) : null;
+    if (!roomRel) this.activeRelationship(botId, peer);
     this.expireStale();
     const c = this.conv(convId);
     this.assertConvActive(c);
@@ -2005,7 +2042,7 @@ export class Platform {
     assert(typeof pl.text === "string" && pl.text.length > 0 && pl.text.length <= 4000, 400, "invalid_request", "payload.text (1-4000 chars) required");
     // Refs live in the signed payload, so the sender's signature covers them.
     const refs = this.checkRefs(botId, pl.attachments);
-    const chat = this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id);
+    const chat = roomRel ? this.findRoomGrant(peerB.owner_id, botId, "chat.public", peerB.id, roomContext!) : this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id);
     if (!chat) {
       this.policyDecision(botId, convId, owners, "message.draft", "deny", ["capability_not_granted:chat.public"]);
       throw new ApiError(403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
@@ -2054,7 +2091,7 @@ export class Platform {
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
     this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
     this.refreshConversationStatus(convId);
-    const rel = this.activeRelationship(botId, peer);
+    const rel = roomRel ?? this.activeRelationship(botId, peer);
     const autoChat = this.settingsFor(rel.id, ownerId).auto_approve_chat;
     // #45: a line that names a room both Bots were put in by their owners is already consented (the click that
     // added them was the consent), so the blanket outbound rule alone does not stop it. Anything the platform found
@@ -2111,7 +2148,13 @@ export class Platform {
     const c = this.conv(m.conversation_id);
     const sender = this.bot(m.sender_bot);
     const recipient = this.bot(m.recipient_bot);
-    this.activeRelationship(sender.id, recipient.id);
+    // #43: a conversation opened from a claimed room delivers on that room's grant, and stops once it is gone.
+    const cRel = this.pairRelationships(sender.id, recipient.id).find((r) => r.id === c.relationship_id);
+    if (cRel && cRel.status === "room") {
+      const roomGrant = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NOT NULL LIMIT 1", cRel.id);
+      assert(roomGrant && roomGrant.room_id, 403, "no_relationship", "the room grant is gone");
+      assert(this.findRoomGrant(recipient.owner_id, sender.id, "chat.public", recipient.id, roomGrant.room_id), 403, "no_relationship", "the room grant is gone");
+    } else this.activeRelationship(sender.id, recipient.id);
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
