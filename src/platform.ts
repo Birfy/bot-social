@@ -3061,7 +3061,12 @@ export class Platform {
       claimed: claimed.length > 0,
       ...(invite.revoked_at ? { revoked: true } : {}),
       // Only the two owners the ticket binds see who claimed it; an anonymous caller sees claimed: true | false.
-      ...(mine ? { claimer: claimed.length ? { home: this.homeHandleOf(invite.claimed_by_owner_id), bots: claimed.map((id) => "@" + this.bot(id).handle) } : null } : {}),
+      ...(mine ? { claimer: claimed.length ? {
+        home: this.homeHandleOf(invite.claimed_by_owner_id),
+        bots: claimed.map((id) => "@" + this.bot(id).handle),
+        // The names the inviting home shows on each seat; the handles above are the authority.
+        members: claimed.map((id) => { const s = this.faceSnapshot(this.bot(id)); return { handle: s.handle, display_name: s.display_name, owner_name: s.owner_name }; }),
+      } : null } : {}),
     };
   }
 

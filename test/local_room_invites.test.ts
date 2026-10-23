@@ -129,6 +129,8 @@ test("#60: one claim binds a home and its Bots, once; every other claim has its 
   // The inviter re-reads the claimer; an anonymous caller only learns that it is claimed.
   const seen = await preview(s.base, ticket, tok(A));
   assert.deepEqual([...seen.body.claimer.bots].sort(), [B.handle, B2.handle].sort());
+  assert.deepEqual(seen.body.claimer.members.map((m: any) => m.handle).sort(), [B.handle, B2.handle].sort(), "each seat carries a name to show");
+  assert.ok(seen.body.claimer.members.every((m: any) => typeof m.display_name === "string" && m.display_name), "names are cleaned strings");
   const anon = await preview(s.base, ticket);
   assert.equal(anon.body.claimed, true);
   assert.equal("claimer" in anon.body, false);
