@@ -44,6 +44,10 @@ export function openDb(path: string): Database.Database {
   // FlyBot #442: set once when the recipient's home reports it could not hand the message to its Bot.
   if (!mcols.includes("not_delivered_reason")) db.exec("ALTER TABLE messages ADD COLUMN not_delivered_reason TEXT");
   if (!dcols.includes("mentions")) db.exec("ALTER TABLE face_room_drafts ADD COLUMN mentions TEXT");
+  // #49: why a held send waits, so a client does not have to read `reasons`. Rows held before the column
+  // exists stay null and are never guessed at.
+  const acols = (db.prepare("PRAGMA table_info(approvals)").all() as { name: string }[]).map((c) => c.name);
+  if (!acols.includes("hold_reason")) db.exec("ALTER TABLE approvals ADD COLUMN hold_reason TEXT");
   // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
   // (default deny); a legacy 'home' value is ignored and never covers members.
   const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);
@@ -175,6 +179,7 @@ CREATE TABLE IF NOT EXISTS actions (
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL, subject_id TEXT NOT NULL, bot_id TEXT,
   conversation_id TEXT, summary TEXT NOT NULL, reasons TEXT NOT NULL DEFAULT '[]', risk_flags TEXT NOT NULL DEFAULT '[]',
+  hold_reason TEXT,
   status TEXT NOT NULL DEFAULT 'pending', decision TEXT, note TEXT, created_at TEXT NOT NULL, expires_at TEXT, decided_at TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
