@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { startServer } from "./helpers.js";
+import vm from "node:vm";
+import { ownerWithBot, startServer } from "./helpers.js";
 
 // Bot Social #61: a local room's link is /r/@handle/<ticket> (two segments, FlyBot
 // core/src/shared/room-share.js). The landing route only had one segment, so a camera scan of the QR code
@@ -41,7 +42,7 @@ test("#61: the page tells the two link shapes apart and asks the matching endpoi
 
 test("#61: a local ticket has a sentence per refusal, and an uncheckable link is not a 404 in disguise", async () => {
   for (const code of ["invite_not_found", "expired", "revoked", "ended", "already_claimed", "rate_limited", "locked_out", "network", "unchecked", "server_error"]) {
-    assert.match(page, new RegExp(`${code}:"`), `every refusal has its own sentence: ${code}`);
+    assert.match(page, new RegExp(`${code}:["\`]`), `every refusal has its own sentence: ${code}`);
   }
   // "Nothing can check this yet" is a different fact from "this link is not valid", and it is the one a
   // server without the local endpoint answers (Fastify's 404 has no invite code).
@@ -60,7 +61,7 @@ test("#61: the handle in the path is display-only and escaped; the server never 
   // rendering, where the handle goes through esc() (asserted below).
   assert.equal(hostile.body, plain.body);
   assert.equal(hostile.body.includes("<script>alert(1)"), false);
-  assert.match(page, /const host=local\?\(handle\?esc\(handle\):esc\(lead\)\):esc\(lead\)/);
+  assert.match(page, /const host=esc\(lead\)/);
   assert.equal(/innerHTML=[^;]*\$\{handle\}/.test(page), false, "the raw handle is never interpolated");
 });
 
@@ -70,4 +71,72 @@ test("#61: a face ticket on the one-segment route still serves the page, unchang
   const r = await get(s.base, `/r/${FACE_TICKET}`);
   assert.equal(r.status, 200);
   assert.equal(r.body, (await get(s.base, `/r/@ann.bot/${LOCAL_TICKET}`)).body, "one template for both shapes");
+});
+
+// Run the page's own script against a real server: a stub element for #c, the path a QR code encodes, and
+// fetch pointed at the test server. What a person sees is the element's innerHTML once the preview answered.
+async function render(base: string, path: string) {
+  const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
+  const el = { innerHTML: "Loading…" };
+  let settled!: () => void;
+  const done = new Promise<void>((r) => (settled = r));
+  const ctx: any = {
+    document: { getElementById: () => el },
+    location: { pathname: path, href: base + path },
+    fetch: (u: string) => fetch(base + u).finally(() => setTimeout(settled, 20)),
+    Intl, Date, String, Object, URL, decodeURIComponent, encodeURIComponent, setTimeout,
+  };
+  vm.runInNewContext(script, ctx);
+  await done;
+  return el.innerHTML;
+}
+async function mintLocal(base: string, o: any, name = "Launch plan") {
+  const r = await fetch(base + "/v1/local-room-invites", {
+    method: "POST",
+    headers: { authorization: `Bearer ${o.owner.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ room_id: "session-61", name, bot_id: o.bot.id }),
+  });
+  assert.equal(r.status, 201);
+  return (await r.json()) as { ticket: string; url: string };
+}
+
+test("#61: a real local invite renders its name and the server's inviter, with no face-room count", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const m = await mintLocal(s.base, A, "Launch & plan");
+  const html = await render(s.base, new URL(m.url).pathname);
+  assert.match(html, /<h2>Launch &amp; plan<\/h2>/, "the room name, escaped");
+  assert.ok(html.includes(A.handle), "the inviter's handle from the server");
+  assert.match(html, /paste it back into your own FlyBot/);
+  // The local preview has no member_count / max_members: nothing may render as an empty or "undefined" count.
+  assert.equal(html.includes("undefined"), false, html);
+  assert.equal(/in the room<\/span>/.test(html), false, "no face-room member count on a local invite");
+  assert.equal(html.includes("Someone changed the link"), false, "the honest link is not flagged");
+});
+
+test("#61: a link edited to name another Bot still shows the real inviter and says so", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const m = await mintLocal(s.base, A);
+  const html = await render(s.base, `/r/@trusted.bank.bot/${m.ticket}`);
+  assert.ok(html.includes(A.handle), "the host is the server's inviter");
+  assert.match(html, /This link names @trusted\.bank\.bot, but the invite was made by/);
+  const hostile = await render(s.base, `/r/${encodeURIComponent("<img src=x onerror=alert(1)>")}/${m.ticket}`);
+  assert.equal(hostile.includes("<img"), false, "the edited handle is escaped where it is drawn");
+});
+
+test("#61: refusals from the real local endpoint each read as their own sentence", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const missing = await render(s.base, `/r/${A.handle}/abcdefghijklmnopqrstuv`);
+  assert.match(missing, /This invite link is not valid\./);
+  assert.match(missing, /Ask the room&#39;s owner for a new link\./);
+  const m = await mintLocal(s.base, A);
+  await fetch(s.base + `/v1/local-room-invites/${m.ticket}`, { method: "DELETE", headers: { authorization: `Bearer ${A.owner.token}` } });
+  assert.match(await render(s.base, new URL(m.url).pathname), /This invite was revoked by the room&#39;s owner\./);
+  // A face ticket keeps the face wording (negative control).
+  assert.match(await render(s.base, `/r/${FACE_TICKET}`), /Ask the room lead for a new link\./);
 });
