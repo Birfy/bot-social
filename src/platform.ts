@@ -1062,7 +1062,7 @@ export class Platform {
    * (syncFaceRoomAccess) or when a room ticket is claimed (#43). It is what lets a send name a room context.
    */
   private findRoomGrant(grantorOwner: string, granteeBot: string, cap: string, grantedBot: string, roomId: string): any {
-    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND g.room_id = ? AND r.status IN ('active', 'room')", grantorOwner, granteeBot, cap, roomId);
+    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND g.room_id = ? AND r.status = 'room'", grantorOwner, granteeBot, cap, roomId);
     for (const g of rows) {
       if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
       if (this.grantedBotOf(g, g) !== grantedBot) continue;
@@ -2096,10 +2096,13 @@ export class Platform {
     // #45: a line that names a room both Bots were put in by their owners is already consented (the click that
     // added them was the consent), so the blanket outbound rule alone does not stop it. Anything the platform found
     // on its own — a DLP flag, an attachment, suspected injection — is a finding and keeps the card.
-    const byRoom = !!roomContext && refs.length === 0;
+    // #57: the room consent is the room reach that was actually resolved, not the room id in the argument. A send
+    // that names a room the Bot is no longer in falls back to the friendship door above; it must not auto-deliver as
+    // room context, and its stated reason must name the friendship door it really used.
+    const byRoom = !!roomRel && refs.length === 0;
     if ((autoChat || byRoom) && flags.length === 0 && !injectionSuspected) {
-      this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, autoChat ? "policy:auto_approve" : "policy:room_context");
-      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(byRoom && !autoChat ? { room_id: roomContext } : {}), ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: [autoChat ? "owner.auto_approve_chat" : "room.context", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
+      this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, byRoom ? "policy:room_context" : "policy:auto_approve");
+      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(byRoom ? { room_id: roomContext! } : {}), ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: [byRoom ? "room.context" : "owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
     return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, hold_reason: holdReason, policy_version: POLICY_VERSION } };
   }
@@ -2257,6 +2260,14 @@ export class Platform {
     return rows.map((c) => ({ conversation_id: c.id, status: c.status, outcome: c.outcome, intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: null }, created_at: c.created_at, updated_at: c.updated_at }));
   }
 
+  /** #57: the room a conversation is bound to, when its door is a room relationship; null for a 1:1 conversation. */
+  private roomOfConversation(c: any): string | null {
+    const rel = this.get("SELECT status FROM relationships WHERE id = ?", c.relationship_id);
+    if (!rel || rel.status !== "room") return null;
+    const g = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", c.relationship_id);
+    return g?.room_id ?? null;
+  }
+
   /** Conversation view. Peer messages appear only once delivered, always wrapped as untrusted. */
   getConversation(p: Principal, convId: string) {
     const c = this.conv(convId);
@@ -2281,7 +2292,8 @@ export class Platform {
     return {
       conversation_id: c.id, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
       initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), messages: msgs, actions,
-      effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities),
+      // #57: a conversation bound to a room reports that room's capabilities, not the friendship's; 1:1 is unchanged.
+      effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities, this.roomOfConversation(c)),
     };
   }
 
