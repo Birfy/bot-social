@@ -2,7 +2,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { approveAll, friends, startServer } from "./helpers.js";
+import { approveAll, friends, ownerWithBot, startServer } from "./helpers.js";
 import { UNTRUSTED_BEGIN } from "../src/untrusted.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
@@ -211,4 +211,37 @@ test("connector token can set/get/clear webhook via REST (secret from shell env 
   assert.equal((await fetch(`${S.base}/v1/connector/webhook`, { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
   const md = await (await fetch(`${S.base}/setup`)).text();
   assert.ok(md.includes("BOTSOCIAL_ROUTINE_KEY") && md.includes("/v1/connector/webhook"));
+});
+
+test("whoami names the home and the owner in the spelling peers use (#44)", async () => {
+  const home = S.platform.onboardFlybot({ display_name: "Selftest A2" });
+  const c = await connect(home.connector.token);
+  const me = text(await c.callTool({ name: "whoami", arguments: {} }));
+  const flybotHome = me.bots.find((b: any) => b.integration_type === "flybot-home");
+  assert.ok(flybotHome, "the FlyBot home is listed in bots[]");
+  // `home` is the "@handle" spelling; `bots[].handle` keeps the bare one it always had
+  assert.equal(flybotHome.handle, "selftesta2.home");
+  assert.equal(me.home, "@selftesta2.home");
+  assert.equal(me.home, "@" + flybotHome.handle, "home is the normalized copy of the flybot-home entry");
+  assert.equal(me.home, me.connector_identity.bot_handles[0], "home is the handle this connector was told to own");
+  assert.equal(me.home_name, "Selftest A2");
+  // the owner-level name is display_name; owner_display_name is peer-facing only
+  assert.equal(me.display_name, "Selftest A2");
+  assert.equal("owner_display_name" in me, false);
+  // the same string an event carries as its sender
+  const other = await ownerWithBot(S.base, "dana");
+  S.platform.requestRelationship({ kind: "owner", ownerId: home.owner_id }, { from_bot_id: home.bot.bot_id, target_handle: other.handle, message: "hi" });
+  const { events } = await other.bot.events(0);
+  const from = (events.find((e: any) => e.event_type === "relationship.requested") as any).from;
+  assert.equal(from.handle, me.home, "event.from uses the same spelling as whoami home");
+  // an owner without a FlyBot home gets null instead of an error or a guess
+  const plain = S.platform.onboard({ display_name: "Grok User" });
+  const c2 = await connect(plain.connector.token);
+  const me2 = text(await c2.callTool({ name: "whoami", arguments: {} }));
+  assert.equal(me2.home, null);
+  assert.equal(me2.home_name, null);
+  assert.equal(me2.display_name, "Grok User");
+  assert.equal(me2.bots.some((b: any) => b.integration_type === "flybot-home"), false);
+  await c.close();
+  await c2.close();
 });

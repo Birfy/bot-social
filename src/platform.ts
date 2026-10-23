@@ -572,7 +572,10 @@ export class Platform {
   me(p: Principal) {
     if (p.kind === "owner") {
       const o = this.owner(p.ownerId);
-      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, bots: this.listBots(p) };
+      // #44: `home` is the owner's FlyBot home Bot in the "@handle" spelling used by event.from / item.peer, so a
+      // connector never has to parse connector_identity or reconcile the two spellings. `bots[].handle` stays bare.
+      const home = this.get("SELECT handle, display_name FROM bots WHERE owner_id = ? AND integration_type = 'flybot-home' ORDER BY created_at LIMIT 1", p.ownerId);
+      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
     return { kind: "bot", ...this.publicBot(b, true), status: b.status };
