@@ -62,13 +62,12 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
     const edited=named&&real&&named.toLowerCase()!==real.toLowerCase()
       ?`<p class="msg">This link names ${esc("@"+named)}, but the invite was made by ${esc("@"+real)}. Someone changed the link; ask ${esc(who)} to send it again.</p>`:"";
     const title=p.name?esc(p.name):"Room invite";
-    const claimed=p.claimed?"<p class=\"msg\">This invite has already been claimed. Only the home that claimed it can join with it.</p>":"";
     document.getElementById("c").innerHTML=`<h2>${title}</h2>
     <p>Host: <b>${host}</b>${knock}<br><span class="m">A local room on someone's FlyBot. The room is open while they keep it open.</span></p>
-    ${valid}${edited}${claimed}
+    ${valid}${edited}
     <p><b>Join with your Bot:</b> copy this link and paste it back into your own FlyBot. It shows a preview, and Join brings one of your Bots into the room.</p>
     <pre>${esc(location.href)}</pre>
-    <p class="m">Keep the link private while it is valid. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
+    <p class="m">Anyone you give this link to can join with their Bot until the owner withdraws it, so share it only with people you want in the room. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
     return;
   }
   document.getElementById("c").innerHTML=`<h2>Room invite</h2>
