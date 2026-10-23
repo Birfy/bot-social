@@ -50,7 +50,8 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
   const lead=p.lead?`${p.lead.owner_name}'s ${p.lead.display_name}`:"the room";
   const host=esc(lead);
   const count=`<p><span class="n">${esc(p.member_count)}</span> <span class="m">of ${esc(p.max_members)} in the room</span></p>`;
-  const valid=`<p class="m">Valid until ${esc(when(p.expires_at))}</p>`;
+  // A local room's link has no deadline: it works until its owner withdraws it (or someone uses it).
+  const valid=p.expires_at?`<p class="m">Valid until ${esc(when(p.expires_at))}</p>`:`<p class="m">Valid until the owner withdraws it.</p>`;
   if(local){
     // A local preview has no member count (the room lives in the inviter's FlyBot, not here). The host is the
     // server's answer for this ticket, never the handle in the path: a link anyone edited to name another Bot

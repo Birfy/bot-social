@@ -53,8 +53,7 @@ test("#60: mint answers the two-segment link, the preview is public, and the pla
   assert.match(m.body.ticket, /^[A-Za-z0-9_-]{16,64}$/);
   assert.equal(m.body.url, `${s.base}/r/${A.handle}/${m.body.ticket}`);
   assert.equal(m.body.room_id, ROOM);
-  const left = Date.parse(m.body.expires_at) - Date.now();
-  assert.ok(left > 9 * 60e3 && left <= 10 * 60e3, `ten minutes, got ${left}`);
+  assert.equal(m.body.expires_at, null, "a local room's link has no deadline");
   assert.equal(m.body.inviter.handle, A.handle);
 
   const p = await preview(s.base, m.body.ticket);
@@ -150,6 +149,8 @@ test("#60: an expired or withdrawn ticket refuses a claim and writes nothing", a
   const B = await ownerWithBot(s.base, "ben");
   const count = () => (s.platform.db.prepare("SELECT COUNT(*) n FROM grants").get() as any).n as number;
   const late = await mint(s.base, A);
+  // A ticket minted before links lost their deadline keeps the one it was given.
+  s.platform.db.prepare("UPDATE local_room_invites SET expires_at = ? WHERE ticket = ?").run(new Date(Date.now() + 10 * 60e3).toISOString(), late.body.ticket);
   const gone = await mint(s.base, A);
   assert.equal((await revoke(s.base, A, gone.body.ticket)).status, 204);
   const before = count();
@@ -164,6 +165,39 @@ test("#60: an expired or withdrawn ticket refuses a claim and writes nothing", a
   assert.equal(revoked.body.code, "revoked");
   assert.equal(count(), before, "no grant for a refused claim");
   assert.equal((await preview(s.base, gone.body.ticket)).body.code, "revoked");
+});
+
+test("a local room's link has no deadline: a week later it still previews and claims, until it is withdrawn", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const B = await ownerWithBot(s.base, "ben");
+  const kept = await mint(s.base, A);
+  const pulled = await mint(s.base, A);
+  assert.equal(kept.body.expires_at, null);
+  const row = s.platform.db.prepare("SELECT expires_at FROM local_room_invites WHERE ticket = ?").get(kept.body.ticket) as any;
+  assert.equal(row.expires_at, "", "stored with no deadline");
+  const real = s.platform.nowMs;
+  s.platform.nowMs = () => real() + 7 * 24 * 60 * 60e3;
+  try {
+    const p = await preview(s.base, kept.body.ticket);
+    assert.equal(p.status, 200, JSON.stringify(p.body));
+    assert.equal(p.body.expires_at, null);
+    assert.equal(p.body.claimed, false);
+    const c = await claim(s.base, B, kept.body.ticket, [B.bot.id]);
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+    assert.equal(c.body.claimed, true);
+    // Withdrawing still ends a link, however old.
+    assert.equal((await revoke(s.base, A, pulled.body.ticket)).status, 204);
+    const after = await claim(s.base, B, pulled.body.ticket, [B.bot.id]);
+    assert.equal(after.status, 410);
+    assert.equal(after.body.code, "revoked");
+    // And a spent link stays spent: one ticket seats one home (#878).
+    const C = await ownerWithBot(s.base, "cat");
+    assert.equal((await claim(s.base, C, kept.body.ticket, [C.bot.id])).body.code, "already_claimed");
+  } finally {
+    s.platform.nowMs = real;
+  }
 });
 
 test("#60: several live tickets for one room; revoking one leaves the other", async (t) => {

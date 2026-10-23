@@ -9,6 +9,8 @@ import { randomBytes } from "node:crypto";
 /** 16 random bytes in base64url: 22 characters, the shape FlyBot's local link carries (`[A-Za-z0-9_-]{16,64}`). */
 export const LOCAL_INVITE_TICKET_BYTES = 16;
 export const LOCAL_INVITE_MAX_BOTS = 8;
+/** A local room's link has no deadline (owner decision 2026-10-24): it lives until withdrawn or spent. */
+export const LOCAL_INVITE_NO_DEADLINE = "";
 export function newLocalInviteTicket(): string {
   return randomBytes(LOCAL_INVITE_TICKET_BYTES).toString("base64url");
 }
@@ -27,7 +29,7 @@ CREATE TABLE IF NOT EXISTS local_room_invites (
   name TEXT,
   created_by_owner_id TEXT NOT NULL,
   inviter_bot TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL, -- '' = no deadline (every ticket minted now); a date only on older tickets
   created_at TEXT NOT NULL,
   revoked_at TEXT,
   claimed_by_owner_id TEXT,

@@ -15,7 +15,7 @@ import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./tim
 import {
   FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
 } from "./face-rooms.js";
-import { LOCAL_INVITE_MAX_BOTS, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
+import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
@@ -3036,7 +3036,9 @@ export class Platform {
   private localInviteRefusal(invite: any): { status: number; code: string; message: string } | null {
     if (!invite) return { status: 404, code: "invite_not_found", message: "this invite link is not valid" };
     if (invite.revoked_at) return { status: 410, code: "revoked", message: "this invite was withdrawn" };
-    if (Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
+    // A link minted since the owner's decision has no deadline (`expires_at` is ''): it lives until it is withdrawn
+    // or spent. A ticket minted with a deadline before that keeps it.
+    if (invite.expires_at && Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
     return null;
   }
   private localInviteUrl(handle: string, ticket: string) {
@@ -3057,7 +3059,7 @@ export class Platform {
       name: invite.name || null,
       lead: { handle: lead.handle, display_name: lead.display_name, owner_name: lead.owner_name },
       inviter: { handle: lead.handle, home: this.homeHandleOf(inviter.owner_id) },
-      expires_at: invite.expires_at,
+      expires_at: invite.expires_at || null,
       claimed: claimed.length > 0,
       ...(invite.revoked_at ? { revoked: true } : {}),
       // Only the two owners the ticket binds see who claimed it; an anonymous caller sees claimed: true | false.
@@ -3093,14 +3095,15 @@ export class Platform {
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(ownerId, ip, "local", "minted");
     const ticket = newLocalInviteTicket();
-    const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
+    // No deadline: the owner withdraws the link, or a stranger spends it. The column is NOT NULL, so '' means none.
+    const expiresAt = LOCAL_INVITE_NO_DEADLINE;
     // Shown to a stranger before they join: one line, and none of the characters a card or a fence could misread.
     const name = sanitizePeerName(body?.name, "", FACE_ROOM_NAME_MAX).replace(/[[\]"<>`@]/g, "").replace(/\s+/g, " ").trim() || null;
     this.run("INSERT INTO local_room_invites (ticket, room_id, name, created_by_owner_id, inviter_bot, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
       ticket, roomId, name, ownerId, inviter.id, expiresAt, this.ts());
     // The ticket is a bearer credential: it is returned once and never written to the audit log.
-    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id, expires_at: expiresAt });
-    return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: expiresAt, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
+    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
+    return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: null, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
   }
 
   /** Public preview; the minting or claiming owner also sees the claimer. */
@@ -3111,7 +3114,7 @@ export class Platform {
     const invite = this.localInviteOf(ticketRaw);
     const viewer = p && p.kind === "owner" ? p.ownerId : p && p.kind === "bot" ? p.ownerId : null;
     const party = invite && viewer !== null && (viewer === invite.created_by_owner_id || viewer === invite.claimed_by_owner_id);
-    // The inviter re-reads a ticket after it expired to check a claim that landed in time: a claim outlives the window.
+    // The inviter re-reads a ticket that had a deadline after it passed, to check a claim that landed in time.
     const refusal = party && this.localInviteClaimed(invite).length && !invite.revoked_at ? null : this.localInviteRefusal(invite);
     this.faceRecordAttempt(null, ip, "local", refusal ? refusal.code : "preview");
     if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
@@ -3149,8 +3152,8 @@ export class Platform {
       if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "local", "rate_limited"); return { ...attemptBlock } as Fail; }
       const invite = this.localInviteOf(ticketRaw);
       const claimed = this.localInviteClaimed(invite);
-      // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even after the
-      // ten minutes, because the claim landed inside them.
+      // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even past an
+      // older ticket's deadline, because the claim landed before it.
       if (invite && !invite.revoked_at && claimed.length && invite.claimed_by_owner_id === ownerId && JSON.stringify([...claimed].sort()) === JSON.stringify(wanted)) {
         return { ok: true, invite, fresh: false };
       }
