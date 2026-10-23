@@ -1862,7 +1862,11 @@ export class Platform {
 
   decideApproval(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string; idempotency_key?: string }, actorOverride?: string) {
     const { idempotency_key: key, ...rest } = body as any;
-    return this.idempotent(p, "decide_approval", key, { approval_id: aprId, ...rest }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
+    // The one-time confirm code is stripped from the request the key is compared against, never from what is
+    // decided: a real retry carries a fresh code, so counting it would answer every retry with
+    // idempotency_conflict instead of the first outcome. The code itself still travels on `rest`.
+    const { confirm_code: _code, ...hashed } = rest;
+    return this.idempotent(p, "decide_approval", key, { approval_id: aprId, ...hashed }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
   }
 
   private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {

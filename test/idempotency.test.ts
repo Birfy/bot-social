@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { friends, startServer } from "./helpers.js";
 
 /** send_as_member signs with the Bot's custodial key. */
@@ -130,4 +132,45 @@ test("#47: a key that is too short is refused, and an absent key behaves as befo
   const plain = s.platform.sendAsMember(owner, { from_bot_id: A.bot.id, to: B.handle, text: "no key" });
   const plain2 = s.platform.sendAsMember(owner, { from_bot_id: A.bot.id, to: B.handle, text: "no key either" });
   assert.notEqual((plain.message as any).message_id, (plain2.message as any).message_id, "two calls without a key are two sends");
+});
+
+/** The owner connector, as a client sees it: the confirmation step lives here, not in platform.*. */
+const connect = async (base: string, token: string) => {
+  const c = new Client({ name: "t", version: "0" });
+  await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+  return c;
+};
+const text = (r: any) => JSON.parse(r.content[0].text);
+
+test("#47: an MCP decision retried with the same key replays instead of conflicting", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  const c = await connect(s.base, (A.owner as any).token);
+  t.after(() => c.close());
+  const conv = await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "retry a decision" });
+  await A.bot.draftMessage(conv.conversation_id, { text: "decide me twice" });
+  const { approvals } = text(await c.callTool({ name: "list_approvals", arguments: {} }));
+  const aprId = approvals.find((a: any) => a.kind === "outbound_message").approval_id;
+  const args = { approval_id: aprId, decision: "approved", idempotency_key: "mcp-decision-retry-1" };
+
+  const step1 = text(await c.callTool({ name: "decide_approval", arguments: args }));
+  assert.equal(step1.status, "confirmation_required", "the first step only offers a code");
+  const first = await c.callTool({ name: "decide_approval", arguments: { ...args, confirm_code: step1.confirm_code } });
+  assert.ok(!first.isError, JSON.stringify(first));
+  const answer = text(first);
+  assert.equal(answer.decision, "approved");
+
+  // The retry a real client makes after losing the answer: the same key, and a fresh confirm code because
+  // the first one was consumed. Counting the code in the request hash turned this into idempotency_conflict.
+  const step2 = text(await c.callTool({ name: "decide_approval", arguments: args }));
+  assert.equal(step2.status, "confirmation_required");
+  assert.notEqual(step2.confirm_code, step1.confirm_code, "a real retry always carries a new code");
+  const replay = await c.callTool({ name: "decide_approval", arguments: { ...args, confirm_code: step2.confirm_code } });
+  assert.ok(!replay.isError, `the retry must replay, not run: ${JSON.stringify(replay?.content)}`);
+  assert.deepEqual(text(replay), answer, "the first answer, not idempotency_conflict and not invalid_state");
+  // And the card is still decided once.
+  const after = text(await c.callTool({ name: "list_approvals", arguments: { status: "all" } })).approvals.filter((a: any) => a.approval_id === aprId);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].status, "approved");
 });
