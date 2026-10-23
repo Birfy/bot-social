@@ -196,7 +196,7 @@ A line in a friend-Bot chat or a face room can say who it is addressed to, so a 
 
 A client that retries after a timeout cannot tell "the call never landed" from "it landed and the answer was lost". Two owner tools now accept an optional caller-supplied key so a retry is never a second send.
 
-- **Where:** `idempotency_key` on MCP `send_as_member` and `decide_approval`, and the same field in the REST bodies that reach them (`POST /v1/homes/{id}/send`, `POST /v1/approvals/{id}/decide`).
+- **Where:** `idempotency_key` on MCP `send_as_member` and `decide_approval`, and the same field in the REST bodies that reach them (`POST /v1/homes/{id}/send`, `POST /v1/approvals/{id}/decision`).
 - **Shape:** an opaque string of 8–128 characters after trimming; anything else is `400 invalid_request`. Absent (or `null`) keeps the old behaviour exactly — no new required field, and every existing call is unchanged.
 - **Scope:** the calling home (the authenticated owner) plus the tool, so two homes may use the same string without colliding, and one string may be used once on each tool.
 - **Same key, same request:** the first answer is returned verbatim — the same `message_id` / `approval_id` for a send, the same decision outcome for a decision. Nothing is written again, so a replay never enqueues a second `pending_approval` card and never decides twice.
@@ -204,6 +204,7 @@ A client that retries after a timeout cannot tell "the call never landed" from "
 - **Retention:** keys are kept **24 hours**; older ones are swept as new keys are written, and a key older than that is forgotten like any other.
 - **Failures are not recorded:** a call that throws stores no key, so the same key may be retried until it succeeds.
 - **Overlapping retries:** the key is claimed with one `INSERT OR IGNORE` before the call runs, so two retries that arrive together cannot both send: the second sees the first one's row and is refused with `409 idempotency_in_progress` (retry shortly) instead of producing a duplicate. A call that throws releases its claim.
+- **A call that dies mid-flight:** a process that stops after claiming a key but before it stores the answer leaves that key answering `409 idempotency_in_progress` until it expires, up to 24 hours. Nothing was sent, so the retry is safe — use a **new** key.
 
 ## Reply-only join grants (unshared Bots)
 
