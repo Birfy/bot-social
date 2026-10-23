@@ -48,6 +48,12 @@ export function openDb(path: string): Database.Database {
   // exists stay null and are never guessed at.
   const acols = (db.prepare("PRAGMA table_info(approvals)").all() as { name: string }[]).map((c) => c.name);
   if (!acols.includes("hold_reason")) db.exec("ALTER TABLE approvals ADD COLUMN hold_reason TEXT");
+  // #54: between #51 (461e04e2) and #53 (31431c97) every face-room card was written as `blanket_outbound`. #53 split
+  // that value out (`face_room_auto_send_off`), but the rows written in that window can hang for up to 24 hours, and a
+  // client that reads the field literally may clear the card and bypass the room's Auto-send switch. Rewrite them on
+  // every open: after the first run nothing matches, so no one-shot flag is needed, and the statement is guarded by
+  // the column existing (added just above). A `risk` / `attachment` / `policy` finding is never touched.
+  db.exec("UPDATE approvals SET hold_reason = 'face_room_auto_send_off' WHERE kind = 'face_room_message' AND hold_reason = 'blanket_outbound'");
   // Friendship scope columns are kept for existing rows. Access is always the two endpoint bots
   // (default deny); a legacy 'home' value is ignored and never covers members.
   const rcols = (db.prepare("PRAGMA table_info(relationships)").all() as { name: string }[]).map((c) => c.name);
