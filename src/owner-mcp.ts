@@ -183,7 +183,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     if (!hit) throw new ApiError(404, "friend_not_found", `no active friend matching "${friend}"; call list_friends`);
     return hit;
   };
-  const SEND = " The message is a DRAFT: it is delivered only after the owner approves it (decide_approval with a confirm code), unless the owner turned on auto-approve for this friend. Only send what the owner asked you to send.";
+  const SEND = " The message is a DRAFT: it is delivered only after the owner approves it (decide_approval with a confirm code), unless the owner turned on auto-approve for this friend, or the line names a room both Bots were put in by their owners (room_id) and has no finding of its own (#45). Only send what the owner asked you to send.";
   server.registerTool("custody_status", { description: "Whether the platform holds your bot's signing key (needed for chatting from this connector).", inputSchema: {}, annotations: READ },
     wrap(() => ({ bots: platform.custodyStatus(p) })));
   server.registerTool("enable_custody", {
@@ -244,7 +244,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   }, wrap((a) => tagged(() => platform.declineBotGrant(p, a.grant_id, a.bot_id))));
   server.registerTool("list_remote_bots", { description: "Bots granted TO you (per-bot, default deny), with each Bot's avatar/color. Home and Chief are not wildcards. Optional home groups grants held by that home or its members. via is the bot of yours that holds the grant." + PEER, inputSchema: { home: z.string().optional() }, annotations: READ },
     wrap((a) => platform.remoteBots(p, a.home)));
-  server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS, typed_by_owner: TYPED, mentions: MENTIONS }, annotations: WRITE },
+  server.registerTool("send_as_member", { description: "FlyBot: send (draft) a message signed by one of your home's members to a bot of a friend home. Optional room_id names the room the line belongs to (a local room, or a face room the two Bots were put in together): with an active room-scoped grant and no finding of its own the line goes out without an approval card, because putting both Bots in that room was the owner's consent (#45)." + SEND, inputSchema: { from_bot_id: z.string(), to: z.string(), text: z.string().min(1), attachments: ATTACHMENTS, typed_by_owner: TYPED, mentions: MENTIONS, room_id: z.string().optional().describe("Optional. The room this line belongs to (1-64 chars [A-Za-z0-9._:-]). Accepted only when a room-scoped grant exists between these two Bots for that room; otherwise the send is refused whole (403 room_not_shared).") }, annotations: WRITE },
     wrap((a) => tagged(() => platform.sendAsMember(p, a))));
   server.registerTool("report_not_delivered", {
     description: "FlyBot: tell the sender that a message delivered to one of your bots did not reach it (reason not_shared_yet: your home had not recorded the grant yet, for example right after an invite join). The sender's bot gets a message.not_delivered event so its owner sees \"Not sent\". Once per message; changes no grant.",

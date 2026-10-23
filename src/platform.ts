@@ -367,7 +367,7 @@ export class Platform {
   }
 
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string }) {
     const ownerId = this.requireOwner(p);
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
@@ -375,13 +375,21 @@ export class Platform {
     const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
     void ownerId;
+    // #45: optional room context. The line names the room it belongs to; the server checks that a room-scoped grant
+    // exists (the owners put both Bots in that room, so that click was the consent) and only then lifts the blanket
+    // outbound hold. A room id with no such grant is refused whole: never an approval, never a message.
+    const roomId = body?.room_id === undefined || body?.room_id === null ? null : String(body.room_id).trim();
+    if (roomId !== null) {
+      assert(/^[A-Za-z0-9._:-]{1,64}$/.test(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
+      assert(this.findRoomGrant(to.owner_id, cb.botId, "chat.public", to.id, roomId), 403, "room_not_shared", "no active room-scoped grant for that room between these Bots", { suggestion: "join the room together again, or send without room_id" });
+    }
     this.activeRelationship(cb.botId, to.id);
     // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
     // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
     const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId);
     const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id })) as any).conversation_id;
-    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions);
-    return { conversation_id: conversationId, message, typed_by_owner: typed };
+    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions, roomId);
+    return { conversation_id: conversationId, message, typed_by_owner: typed, ...(roomId !== null ? { room_id: roomId } : {}) };
   }
 
   // ================================================================ attachments
@@ -953,6 +961,20 @@ export class Platform {
     for (const g of rows) {
       if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
       if (grantedBot && this.grantedBotOf(g, g) !== grantedBot) continue;
+      return { ...g, scope: J(g.scope, {}) };
+    }
+    return null;
+  }
+
+  /**
+   * #45: an active grant scoped to one room, written when the owners put these two Bots in that room together
+   * (syncFaceRoomAccess) or when a room ticket is claimed (#43). It is what lets a send name a room context.
+   */
+  private findRoomGrant(grantorOwner: string, granteeBot: string, cap: string, grantedBot: string, roomId: string): any {
+    const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND g.room_id = ? AND r.status IN ('active', 'room')", grantorOwner, granteeBot, cap, roomId);
+    for (const g of rows) {
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
+      if (this.grantedBotOf(g, g) !== grantedBot) continue;
       return { ...g, scope: J(g.scope, {}) };
     }
     return null;
@@ -1899,7 +1921,7 @@ export class Platform {
   }
 
   /** `typedByOwner` is internal: set only by sendAsMember after typedByOwner() authorised it, never from the envelope or text. */
-  draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false, mentions: string[] = []) {
+  draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false, mentions: string[] = [], roomContext: string | null = null) {
     this.verifyEnvelope(p, env, "message.draft");
     const { botId, ownerId } = this.requireBot(p);
     assert(!env.conversation_id || env.conversation_id === convId, 400, "invalid_envelope", "conversation_id mismatch");
@@ -1961,9 +1983,14 @@ export class Platform {
     this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
     this.refreshConversationStatus(convId);
     const rel = this.activeRelationship(botId, peer);
-    if (this.settingsFor(rel.id, ownerId).auto_approve_chat && flags.length === 0 && !detectInjection(pl.text).suspected) {
-      this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, "policy:auto_approve");
-      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
+    const autoChat = this.settingsFor(rel.id, ownerId).auto_approve_chat;
+    // #45: a line that names a room both Bots were put in by their owners is already consented (the click that
+    // added them was the consent), so the blanket outbound rule alone does not stop it. Anything the platform found
+    // on its own — a DLP flag, an attachment, suspected injection — is a finding and keeps the card.
+    const byRoom = !!roomContext && refs.length === 0;
+    if ((autoChat || byRoom) && flags.length === 0 && !detectInjection(pl.text).suspected) {
+      this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, autoChat ? "policy:auto_approve" : "policy:room_context");
+      return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(byRoom && !autoChat ? { room_id: roomContext } : {}), ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: [autoChat ? "owner.auto_approve_chat" : "room.context", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
     return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
   }
