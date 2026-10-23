@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { FACE_ROOM_SCHEMA } from "./face-rooms.js";
+import { LOCAL_ROOM_INVITE_SCHEMA } from "./local-room-invites.js";
 
 export function openDb(path: string): Database.Database {
   const db = new Database(path);
@@ -25,6 +26,7 @@ export function openDb(path: string): Database.Database {
   const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
   db.exec(FACE_ROOM_SCHEMA);
+  db.exec(LOCAL_ROOM_INVITE_SCHEMA);
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
   if (!tcols.includes("id")) db.exec("ALTER TABLE tokens ADD COLUMN id TEXT");
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");

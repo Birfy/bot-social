@@ -13,8 +13,9 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
+  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
 } from "./face-rooms.js";
+import { LOCAL_INVITE_MAX_BOTS, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
@@ -1049,9 +1050,15 @@ export class Platform {
    */
   private roomReach(a: string, b: string, roomId: string): Relationship | null {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
-    if (!room || room.status === "closed") return null;
+    // #60: a room that lives in one FlyBot home has no face_rooms row; its door is a live claimed ticket for that
+    // room that seats exactly this pair (the inviter's Bot and one Bot the claim brought).
+    if (!room) return this.localPairClaim(roomId, a, b) ? this.roomRelationshipOf(a, b, roomId) : null;
+    if (room.status === "closed") return null;
     const inRoom = (botId: string) => !!this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", roomId, botId);
     if (!inRoom(a) || !inRoom(b)) return null;
+    return this.roomRelationshipOf(a, b, roomId);
+  }
+  private roomRelationshipOf(a: string, b: string, roomId: string): Relationship | null {
     const grant = this.findRoomGrant(this.bot(b).owner_id, a, "chat.public", b, roomId);
     if (!grant) return null;
     return this.get("SELECT * FROM relationships WHERE id = ? AND status = 'room'", grant.relationship_id) ?? null;
@@ -3015,6 +3022,222 @@ export class Platform {
     return this.faceRoomView(out.roomId, viewer);
   }
 
+  // ---- Local room invites (Bot Social #60): a ticket for a room that lives in one FlyBot home.
+
+  private localInviteOf(ticketRaw: unknown) {
+    const ticket = String(ticketRaw ?? "").trim();
+    if (!isLocalInviteTicket(ticket)) return null;
+    return this.get("SELECT * FROM local_room_invites WHERE ticket = ?", ticket) ?? null;
+  }
+  private localInviteClaimed(invite: any): string[] {
+    return invite?.claimed_at && !invite.released_at ? J(invite.claimed_bots, []) as string[] : [];
+  }
+  /** The refusals that belong to the ticket itself, before anyone claims it. */
+  private localInviteRefusal(invite: any): { status: number; code: string; message: string } | null {
+    if (!invite) return { status: 404, code: "invite_not_found", message: "this invite link is not valid" };
+    if (invite.revoked_at) return { status: 410, code: "revoked", message: "this invite was withdrawn" };
+    if (Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
+    return null;
+  }
+  private localInviteUrl(handle: string, ticket: string) {
+    return `${this.publicBaseUrl.replace(/\/$/, "")}/r/@${String(handle).replace(/^@/, "")}/${ticket}`;
+  }
+  private homeHandleOf(ownerId: string): string | null {
+    const home = this.get("SELECT handle FROM bots WHERE owner_id = ? AND integration_type = 'flybot-home' ORDER BY created_at LIMIT 1", ownerId);
+    return home ? "@" + home.handle : null;
+  }
+  private localInviteView(invite: any, viewerOwnerId: string | null) {
+    const inviter = this.bot(invite.inviter_bot);
+    const lead = this.faceSnapshot(inviter);
+    const claimed = this.localInviteClaimed(invite);
+    const mine = viewerOwnerId !== null && (viewerOwnerId === invite.created_by_owner_id || viewerOwnerId === invite.claimed_by_owner_id);
+    return {
+      kind: "local_room",
+      room_id: invite.room_id,
+      name: invite.name || null,
+      lead: { handle: lead.handle, display_name: lead.display_name, owner_name: lead.owner_name },
+      inviter: { handle: lead.handle, home: this.homeHandleOf(inviter.owner_id) },
+      expires_at: invite.expires_at,
+      claimed: claimed.length > 0,
+      ...(invite.revoked_at ? { revoked: true } : {}),
+      // Only the two owners the ticket binds see who claimed it; an anonymous caller sees claimed: true | false.
+      ...(mine ? { claimer: claimed.length ? { home: this.homeHandleOf(invite.claimed_by_owner_id), bots: claimed.map((id) => "@" + this.bot(id).handle) } : null } : {}),
+    };
+  }
+
+  /** Mint a ticket for a room that lives in the caller's FlyBot home. Several may be live for one room at once. */
+  mintLocalRoomInvite(p: Principal, body: any, ctx: { ip?: string } = {}) {
+    const ownerId = p.ownerId;
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const roomId = String(body?.room_id ?? "").trim();
+    assert(isLocalRoomId(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
+    // A face room has its own invitation, and its grants must never be written by someone outside it.
+    assert(!this.get("SELECT 1 FROM face_rooms WHERE id = ?", roomId), 409, "face_room", "this room has its own invitation");
+    let inviter: any;
+    if (p.kind === "bot") inviter = this.bot(p.botId);
+    else {
+      const ref = String(body?.bot_id ?? body?.bot_handle ?? body?.handle ?? "").trim();
+      inviter = ref
+        ? this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, ref.replace(/^@/, ""), ownerId)
+        : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type = 'flybot-member' ORDER BY created_at LIMIT 1", ownerId)
+          ?? this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
+    }
+    assert(inviter && inviter.owner_id === ownerId, 404, "bot_not_found", "no such bot on this account");
+    assert(inviter.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+    const block = this.faceAttemptRateLimit(ownerId, ip);
+    if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
+    this.faceRecordAttempt(ownerId, ip, "local", "minted");
+    const ticket = newLocalInviteTicket();
+    const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
+    // Shown to a stranger before they join: one line, and none of the characters a card or a fence could misread.
+    const name = sanitizePeerName(body?.name, "", FACE_ROOM_NAME_MAX).replace(/[[\]"<>`@]/g, "").replace(/\s+/g, " ").trim() || null;
+    this.run("INSERT INTO local_room_invites (ticket, room_id, name, created_by_owner_id, inviter_bot, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
+      ticket, roomId, name, ownerId, inviter.id, expiresAt, this.ts());
+    // The ticket is a bearer credential: it is returned once and never written to the audit log.
+    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id, expires_at: expiresAt });
+    return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: expiresAt, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
+  }
+
+  /** Public preview; the minting or claiming owner also sees the claimer. */
+  previewLocalRoomInvite(p: Principal | null, ticketRaw: unknown, ctx: { ip?: string } = {}) {
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const block = this.faceIpRateLimit(ip, "too many invite previews from this address", "invite_preview");
+    if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
+    const invite = this.localInviteOf(ticketRaw);
+    const viewer = p && p.kind === "owner" ? p.ownerId : p && p.kind === "bot" ? p.ownerId : null;
+    const party = invite && viewer !== null && (viewer === invite.created_by_owner_id || viewer === invite.claimed_by_owner_id);
+    // The inviter re-reads a ticket after it expired to check a claim that landed in time: a claim outlives the window.
+    const refusal = party && this.localInviteClaimed(invite).length && !invite.revoked_at ? null : this.localInviteRefusal(invite);
+    this.faceRecordAttempt(null, ip, "local", refusal ? refusal.code : "preview");
+    if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
+    return this.localInviteView(invite, viewer);
+  }
+
+  /**
+   * Claim a ticket for the caller's home and the Bots it brings, once. The claim writes one room-scoped grant pair
+   * per brought Bot with the inviter's Bot (relationship status 'room'): reach for `send_as_member` naming that
+   * room id between exactly those two Bots, nothing else.
+   */
+  claimLocalRoomInvite(p: Principal, ticketRaw: unknown, body: any, ctx: { ip?: string } = {}) {
+    const ownerId = p.ownerId;
+    const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    const refs = p.kind === "bot" ? [p.botId] : this.normalizeBotRefs(body);
+    assert(refs.length >= 1, 400, "invalid_request", "bots: name at least one of your Bots to bring");
+    assert(refs.length <= LOCAL_INVITE_MAX_BOTS, 400, "invalid_request", `bots: at most ${LOCAL_INVITE_MAX_BOTS}`);
+    const bots: any[] = [];
+    for (const ref of refs) {
+      const b = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), ownerId);
+      // A home can only bring Bots it owns: a ticket is not authority over anyone else's identity.
+      assert(b, 404, "bot_not_found", `no bot matching ${ref} on this account`);
+      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+      if (!bots.some((x) => x.id === b.id)) bots.push(b);
+    }
+    const wanted = bots.map((b) => b.id).sort();
+    type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
+    const txn = this.db.transaction((): { ok: true; invite: any; fresh: boolean } | Fail => {
+      const locked = this.faceLockoutUntil(ownerId, ip);
+      if (locked) {
+        this.faceRecordAttempt(ownerId, ip, "local", "locked_out");
+        return { ok: false, status: 429, code: "locked_out", message: "too many failed invite attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
+      }
+      const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
+      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "local", "rate_limited"); return { ...attemptBlock } as Fail; }
+      const invite = this.localInviteOf(ticketRaw);
+      const claimed = this.localInviteClaimed(invite);
+      // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even after the
+      // ten minutes, because the claim landed inside them.
+      if (invite && !invite.revoked_at && claimed.length && invite.claimed_by_owner_id === ownerId && JSON.stringify([...claimed].sort()) === JSON.stringify(wanted)) {
+        return { ok: true, invite, fresh: false };
+      }
+      const refusal = this.localInviteRefusal(invite);
+      if (refusal) {
+        this.faceRecordAttempt(ownerId, ip, "local", refusal.code);
+        return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      if (claimed.length) {
+        this.faceRecordAttempt(ownerId, ip, "local", "already_claimed");
+        return { ok: false, status: 409, code: "already_claimed", message: invite.claimed_by_owner_id === ownerId ? "this invite was already used for other Bots of yours" : "this invite was already used by someone else" };
+      }
+      if (invite.created_by_owner_id === ownerId) return { ok: false, status: 409, code: "own_invite", message: "this is your own invite link" };
+      const now = this.ts();
+      this.run("UPDATE local_room_invites SET claimed_by_owner_id = ?, claimed_bots = ?, claimed_at = ?, released_at = NULL WHERE ticket = ?", ownerId, JSON.stringify(wanted), now, invite.ticket);
+      const inviter = this.bot(invite.inviter_bot);
+      for (const b of bots) this.ensureLocalPairGrant(invite.room_id, inviter, b, ownerId);
+      this.faceRecordAttempt(ownerId, ip, "local", "claimed");
+      return { ok: true, invite: this.localInviteOf(invite.ticket), fresh: true };
+    });
+    const out = txn.immediate();
+    if (!out.ok) {
+      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      throw new ApiError(out.status, out.code, out.message, out.extra);
+    }
+    const invite = out.invite;
+    if (out.fresh) this.audit.append(`owner:${ownerId}`, "local_room.invite_claimed", invite.room_id, [ownerId, invite.created_by_owner_id], { inviter_bot: invite.inviter_bot, bots: wanted });
+    const inviter = this.bot(invite.inviter_bot);
+    return {
+      ...this.localInviteView(invite, ownerId),
+      claimed: true,
+      inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(inviter.owner_id) },
+      bots: wanted.map((id) => "@" + this.bot(id).handle),
+    };
+  }
+
+  /** The minting owner withdraws the ticket; the claiming owner releases its own claim. Either ends the reach it wrote. */
+  revokeLocalRoomInvite(p: Principal, ticketRaw: unknown) {
+    const ownerId = p.ownerId;
+    const invite = this.localInviteOf(ticketRaw);
+    if (!invite || invite.revoked_at) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
+    const minter = invite.created_by_owner_id === ownerId;
+    const claimer = !minter && invite.claimed_by_owner_id === ownerId && !invite.released_at;
+    if (!minter && !claimer) throw new ApiError(403, "forbidden", "only the owner who made this link, or the one who used it, can end it");
+    const claimed = this.localInviteClaimed(invite);
+    const now = this.ts();
+    if (minter) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
+    else this.run("UPDATE local_room_invites SET released_at = ? WHERE ticket = ?", now, invite.ticket);
+    if (claimed.length) this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claimed);
+    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, invite.claimed_by_owner_id].filter(Boolean), {});
+  }
+
+  private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actorOwnerId: string) {
+    const hit = this.get(`SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.room_id = ? AND g.status = 'active' AND r.status = 'room'
+      AND ((r.requester_bot = ? AND r.target_bot = ?) OR (r.requester_bot = ? AND r.target_bot = ?))`, roomId, inviter.id, guest.id, guest.id, inviter.id);
+    if (hit) return;
+    const id = newId("rel");
+    const now = nowIso();
+    this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, requester_scope, target_scope)
+      VALUES (?,?,?,?,?,'room',?,?,?,?,?,'bot','bot')`, id, guest.id, inviter.id, guest.owner_id, inviter.owner_id, "local room", "[]", "[]", now, now);
+    const actor = `owner:${actorOwnerId}`;
+    for (const cap of DEFAULT_CAPABILITIES) {
+      this.insertGrant(id, inviter.owner_id, guest.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
+      this.insertGrant(id, guest.owner_id, inviter.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
+    }
+  }
+  private endLocalPairGrants(roomId: string, inviterBot: string, guests: string[]) {
+    const now = nowIso();
+    for (const guest of guests) {
+      const rels = this.all(`SELECT id FROM relationships WHERE status = 'room' AND ((requester_bot = ? AND target_bot = ?) OR (requester_bot = ? AND target_bot = ?))
+        AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)`, guest, inviterBot, inviterBot, guest, roomId);
+      for (const r of rels) {
+        // Another live claim on the same room may still seat this pair (a second link for the same Bot): keep it.
+        if (this.localPairClaim(roomId, inviterBot, guest, r.id)) continue;
+        for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND room_id = ? AND status = 'active'", r.id, roomId)) {
+          this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
+          this.audit.append("platform", "grant.revoked", g.id, [], { reason: "local_invite_ended", room_id: roomId });
+        }
+        this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE id = ?", now, r.id);
+      }
+    }
+  }
+  /** A live claim (not revoked, not released) that seats this pair in this local room. */
+  private localPairClaim(roomId: string, a: string, b: string, _relId?: string) {
+    const rows = this.all("SELECT * FROM local_room_invites WHERE room_id = ? AND claimed_at IS NOT NULL AND revoked_at IS NULL AND released_at IS NULL AND inviter_bot IN (?, ?)", roomId, a, b);
+    return rows.find((inv: any) => {
+      const guests = J(inv.claimed_bots, []) as string[];
+      return (inv.inviter_bot === a && guests.includes(b)) || (inv.inviter_bot === b && guests.includes(a));
+    }) ?? null;
+  }
+
   getFaceRoom(p: Principal, roomId: string, opts: { after?: number; as_bot?: string } = {}) {
     this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId, opts.as_bot);
@@ -3299,6 +3522,6 @@ export class Platform {
   }
 
   platformInfo() {
-    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered", "room_lead", "member_roles", "face_room_invites"] };
+    return { name: "Bot Social", version: "0.1.0", policy_version: POLICY_VERSION, platform_key: { alg: "Ed25519", kid: this.platformKid, public_key: this.platformKey.publicKey }, capabilities: CAPABILITIES, intents: INTENTS, features: ["typed_by_owner", "mentions", "presence", "reply_only_grants", "grants_before_join", "report_not_delivered", "room_lead", "member_roles", "face_room_invites", "local_room_invites"] };
   }
 }
