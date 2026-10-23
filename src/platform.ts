@@ -20,6 +20,19 @@ export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; t
 
 export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
 
+/**
+ * Why a held send waits (#49), so a client branches on one field instead of reading `policy.reasons`.
+ * The strongest finding wins: risk > attachment > policy > blanket_outbound. `blanket_outbound` is the
+ * owner's own default hold and the only one a connector may decide; everything else is the owner's.
+ */
+export type HoldReason = "blanket_outbound" | "risk" | "attachment" | "policy";
+export function holdReasonOf(found: { riskFlags?: readonly unknown[]; attachments?: readonly unknown[]; injectionSuspected?: boolean } = {}): HoldReason {
+  if ((found.riskFlags?.length ?? 0) > 0) return "risk";
+  if ((found.attachments?.length ?? 0) > 0) return "attachment";
+  if (found.injectionSuspected) return "policy";
+  return "blanket_outbound";
+}
+
 const nowIso = () => new Date().toISOString();
 /** Why a home could not hand a delivered message to its Bot (reportNotDelivered). A fixed list: the sender is shown a fixed line. */
 const NOT_DELIVERED_REASONS = ["not_shared_yet"];
@@ -1726,10 +1739,10 @@ export class Platform {
   }
 
   // ================================================================ approvals
-  private createApproval(ownerId: string, kind: string, subjectId: string, botId: string | null, convId: string | null, summary: string, reasons: string[], riskFlags: unknown[], ttlMs: number, extra?: unknown) {
+  private createApproval(ownerId: string, kind: string, subjectId: string, botId: string | null, convId: string | null, summary: string, reasons: string[], riskFlags: unknown[], ttlMs: number, extra?: unknown, holdReason: HoldReason | null = null) {
     const id = newId("apr");
-    this.run("INSERT INTO approvals (id, owner_id, kind, subject_id, bot_id, conversation_id, summary, reasons, risk_flags, created_at, expires_at, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-      id, ownerId, kind, subjectId, botId, convId, summary, JSON.stringify(reasons), JSON.stringify(riskFlags), nowIso(), new Date(Date.now() + ttlMs).toISOString(), extra ? JSON.stringify(extra) : null);
+    this.run("INSERT INTO approvals (id, owner_id, kind, subject_id, bot_id, conversation_id, summary, reasons, risk_flags, hold_reason, created_at, expires_at, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      id, ownerId, kind, subjectId, botId, convId, summary, JSON.stringify(reasons), JSON.stringify(riskFlags), holdReason, nowIso(), new Date(Date.now() + ttlMs).toISOString(), extra ? JSON.stringify(extra) : null);
     return id;
   }
 
@@ -1770,7 +1783,7 @@ export class Platform {
   }
 
   private approvalCard(a: any) {
-    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, expires_at: a.expires_at };
+    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, expires_at: a.expires_at };
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       const pl = J(m.payload);
@@ -1970,11 +1983,14 @@ export class Platform {
     }
     const id = newId("msg");
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
+    // #49: one field says why this line is held; a client never has to read `reasons`.
+    const injectionSuspected = detectInjection(pl.text).suspected;
+    const holdReason = holdReasonOf({ riskFlags: flags, attachments: refs, injectionSuspected });
     const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
     // Only the two ends of this conversation can be mentioned in it.
     const ends = ["@" + String(this.bot(botId).handle).replace(/^@/, "").toLowerCase(), "@" + String(peerB.handle).replace(/^@/, "").toLowerCase()];
     const kept = mentions.filter((h) => ends.includes(h));
-    const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs);
+    const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs, undefined, holdReason);
     this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
       "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
@@ -1988,11 +2004,11 @@ export class Platform {
     // added them was the consent), so the blanket outbound rule alone does not stop it. Anything the platform found
     // on its own — a DLP flag, an attachment, suspected injection — is a finding and keeps the card.
     const byRoom = !!roomContext && refs.length === 0;
-    if ((autoChat || byRoom) && flags.length === 0 && !detectInjection(pl.text).suspected) {
+    if ((autoChat || byRoom) && flags.length === 0 && !injectionSuspected) {
       this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, autoChat ? "policy:auto_approve" : "policy:room_context");
       return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(byRoom && !autoChat ? { room_id: roomContext } : {}), ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: [autoChat ? "owner.auto_approve_chat" : "room.context", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, policy_version: POLICY_VERSION } };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "require_approval", reasons, risk_flags: flags, hold_reason: holdReason, policy_version: POLICY_VERSION } };
   }
 
   private dlp(ownerId: string, pl: any) {
@@ -3016,18 +3032,21 @@ export class Platform {
     // Checked again when the line is delivered, since a member can leave while it waits for approval.
     const kept = this.roomMentions(roomId, mentions);
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
+    // #49: face-room drafts carry no attachments, so the field is risk, policy or the blanket hold.
+    const injectionSuspected = detectInjection(text).suspected;
+    const holdReason = holdReasonOf({ riskFlags: flags, injectionSuspected });
     const snap = this.faceSnapshot(sender);
-    const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId });
+    const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId }, holdReason);
     this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?)",
       id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs(), typed ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
     this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
     const o = this.owner(sender.owner_id);
-    if (o.auto_approve_face_rooms && flags.length === 0 && !detectInjection(text).suspected) {
+    if (o.auto_approve_face_rooms && flags.length === 0 && !injectionSuspected) {
       this.decideApproval({ kind: "owner", ownerId: sender.owner_id }, aprId, { decision: "approved" }, "policy:auto_approve");
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", id);
       return { message_id: id, status: "delivered", approval_id: aprId, event_cursor: d.event_seq, auto_approved: true, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
     }
-    return { message_id: id, status: "pending_approval", approval_id: aprId, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
+    return { message_id: id, status: "pending_approval", approval_id: aprId, hold_reason: holdReason, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
   }
 
   private deliverFaceRoomMessage(a: any, body: any) {
