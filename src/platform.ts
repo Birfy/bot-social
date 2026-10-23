@@ -3159,7 +3159,8 @@ export class Platform {
         this.faceRecordAttempt(ownerId, ip, "local", refusal.code);
         return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
       }
-      if (claimed.length) {
+      // One ticket seats one home once (#878): a claim given back does not reopen the link for anyone.
+      if (claimed.length || invite.released_at) {
         this.faceRecordAttempt(ownerId, ip, "local", "already_claimed");
         return { ok: false, status: 409, code: "already_claimed", message: invite.claimed_by_owner_id === ownerId ? "this invite was already used for other Bots of yours" : "this invite was already used by someone else" };
       }

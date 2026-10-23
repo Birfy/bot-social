@@ -237,6 +237,12 @@ test("#60: the guest's own release ends its reach, and the inviter's other guest
   assert.equal((await revoke(s.base, B, forB.body.ticket)).status, 204, "the claimer may release its own claim");
   assert.throws(() => s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "x", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
   assert.equal(s.platform.sendAsMember(owner(C), { from_bot_id: C.bot.id, to: A.handle, text: "still here", room_id: ROOM }).message.status, "delivered");
+  // A released ticket is spent: it reopens neither for the same home nor for another one.
+  const again = await claim(s.base, B, forB.body.ticket, [B.bot.id]);
+  assert.equal(again.status, 409);
+  assert.equal(again.body.code, "already_claimed");
+  const D = await ownerWithBot(s.base, "dan");
+  assert.equal((await claim(s.base, D, forB.body.ticket, [D.bot.id])).body.code, "already_claimed");
 });
 
 test("#60: the public preview has its own per-address limit", async (t) => {

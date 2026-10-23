@@ -157,7 +157,7 @@ Body `{ room_id, name?, bot_id? }`. `room_id` is the home's own id for the room 
 
 #### `GET /v1/local-room-invites/{ticket}`
 
-Public, per-address limited. `200 { kind: "local_room", room_id, name, lead: { handle, display_name, owner_name }, inviter: { handle, home }, expires_at, claimed }`. With the token of the minting or the claiming owner the answer also carries `claimer: { home, bots: ["@handle", …], members: [{ handle, display_name, owner_name }, …] } | null` (the handles are the authority; `members` only gives each seat a name to show); nobody else sees who claimed it. `404 invite_not_found`, `410 expired` / `revoked`. A claimed ticket stays readable for those two owners after its ten minutes.
+Public, per-address limited. `200 { kind: "local_room", room_id, name, lead: { handle, display_name, owner_name }, inviter: { handle, home }, expires_at, claimed }`. With the token of the minting or the claiming owner the answer also carries `claimer: { home, bots: ["@handle", …], members: [{ handle, display_name, owner_name }, …] } | null` (the handles are the authority; `members` only gives each seat a name to show); nobody else sees who claimed it. `404 invite_not_found`, `410 expired` / `revoked`. A claimed ticket stays readable for those two owners after its ten minutes. A released claim spends the ticket: it is never claimable again.
 
 #### `POST /v1/local-room-invites/{ticket}/claim`
 
