@@ -121,7 +121,10 @@ test("#61: a link edited to name another Bot still shows the real inviter and sa
   const A = await ownerWithBot(s.base, "ann");
   const m = await mintLocal(s.base, A);
   const html = await render(s.base, `/r/@trusted.bank.bot/${m.ticket}`);
-  assert.ok(html.includes(A.handle), "the host is the server's inviter");
+  const host = /Host: <b>([^<]*)<\/b>/.exec(html)?.[1] ?? "";
+  assert.ok(host.length > 0, html);
+  assert.equal(host.includes("trusted"), false, "the edited handle is never shown as the host");
+  assert.ok(html.includes(`(${A.handle})`), "the server's inviter handle sits beside the host");
   assert.match(html, /This link names @trusted\.bank\.bot, but the invite was made by/);
   const hostile = await render(s.base, `/r/${encodeURIComponent("<img src=x onerror=alert(1)>")}/${m.ticket}`);
   assert.equal(hostile.includes("<img"), false, "the edited handle is escaped where it is drawn");
