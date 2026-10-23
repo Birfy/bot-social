@@ -383,8 +383,51 @@ export class Platform {
     return mentions.filter((h) => inRoom.has(h));
   }
 
+  // ================================================================ idempotency (#47)
+  /** A caller-supplied key makes a retry safe: the same key and the same payload returns the first answer
+   * verbatim, the same key with a different payload is a conflict, and an absent key changes nothing.
+   * Keys are scoped to the calling owner (home) plus the tool, so two homes may use one string, and kept
+   * 24 hours. Only a successful call is recorded, so a failed one can be retried with the same key. */
+  private idempotent<T>(p: Principal, tool: string, key: unknown, payload: unknown, run: () => T): T {
+    if (key === undefined || key === null) return run();
+    assert(typeof key === "string", 400, "invalid_request", "idempotency_key must be a string");
+    const k = key.trim();
+    assert(k.length >= 8 && k.length <= 128, 400, "invalid_request", "idempotency_key: 8-128 characters");
+    const ownerId = this.requireOwner(p);
+    const hash = sha256Hex(Buffer.from(jcs(payload as any)));
+    const ttlMs = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    this.run("DELETE FROM idempotency_keys WHERE created_at <= ?", now - ttlMs);
+    // Claim the key first, in one statement, so two overlapping retries cannot both miss and both run:
+    // the loser sees the winner's row (and its hash) instead of sending or deciding a second time.
+    const claim = this.run("INSERT OR IGNORE INTO idempotency_keys (owner_id, tool, key, request_hash, response, created_at) VALUES (?,?,?,?,?,?)",
+      ownerId, tool, k, hash, "", now) as any;
+    if (!claim?.changes) {
+      const hit = this.get("SELECT request_hash, response, created_at FROM idempotency_keys WHERE owner_id = ? AND tool = ? AND key = ?", ownerId, tool, k);
+      assert(hit, 409, "idempotency_conflict", "this idempotency_key is being used by another call");
+      assert(String(hit.request_hash) === hash, 409, "idempotency_conflict", "this idempotency_key was used with a different request");
+      // An empty stored answer means that call is still running: never run it twice, and let the caller retry.
+      assert(String(hit.response) !== "" && hit.response !== null, 409, "idempotency_in_progress", "the same idempotency_key is still being processed; retry shortly");
+      return J(hit.response, {}) as T;
+    }
+    try {
+      const out = run();
+      this.run("UPDATE idempotency_keys SET response = ?, created_at = ? WHERE owner_id = ? AND tool = ? AND key = ?", JSON.stringify(out ?? null), now, ownerId, tool, k);
+      return out;
+    } catch (error) {
+      // A call that threw wrote nothing that counts, so the key is released for a retry.
+      this.run("DELETE FROM idempotency_keys WHERE owner_id = ? AND tool = ? AND key = ?", ownerId, tool, k);
+      throw error;
+    }
+  }
+
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string; idempotency_key?: string }) {
+    const { idempotency_key: key, ...rest } = body as any;
+    return this.idempotent(p, "send_as_member", key, rest, () => this.sendAsMemberOnce(p, rest));
+  }
+
+  private sendAsMemberOnce(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string }) {
     const ownerId = this.requireOwner(p);
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
@@ -1817,7 +1860,12 @@ export class Platform {
     return card;
   }
 
-  decideApproval(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
+  decideApproval(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string; idempotency_key?: string }, actorOverride?: string) {
+    const { idempotency_key: key, ...rest } = body as any;
+    return this.idempotent(p, "decide_approval", key, { approval_id: aprId, ...rest }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
+  }
+
+  private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
     const ownerId = this.requireOwner(p);
     this.expireStale();
     const a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);

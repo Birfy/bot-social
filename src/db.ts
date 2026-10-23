@@ -207,6 +207,14 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS attachments_expiry ON attachments (expires_at);
 CREATE TABLE IF NOT EXISTS relationship_invites (relationship_id TEXT PRIMARY KEY, invite_id TEXT NOT NULL);
+-- #47: a caller's idempotency key and the answer it first got. Scoped to the calling owner (home) and the
+-- tool, so two homes may use the same string; kept 24 hours and swept as new keys are written.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  owner_id TEXT NOT NULL, tool TEXT NOT NULL, key TEXT NOT NULL,
+  request_hash TEXT NOT NULL, response TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (owner_id, tool, key)
+);
+CREATE INDEX IF NOT EXISTS idempotency_age ON idempotency_keys (created_at);
 CREATE INDEX IF NOT EXISTS idx_events_bot ON events(bot_id, seq);
 CREATE INDEX IF NOT EXISTS idx_msgs_conv ON messages(conversation_id, created_ms);
 `;
