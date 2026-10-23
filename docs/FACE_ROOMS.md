@@ -147,6 +147,8 @@ A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on t
 
 `GET /r/{ticket}` renders `public/room-invite.html`: room status, lead, `member_count` of `max_members`, and the expiry, from the preview endpoint (no account needed). It never joins by itself; joining is an explicit action by a signed-in owner.
 
+A **local** room (one that lives in an inviter's own FlyBot, Bot Social #61) hands out the two-segment link `/r/@handle/{ticket}` instead: the handle is the Bot to knock on, and that extra segment is why a camera scan of the QR code used to 404. Both shapes serve the same file — `GET /r/:ticket` and `GET /r/:handle/:ticket` — and the page picks its preview endpoint by shape (`/v1/face-rooms/invites/{ticket}` for a face ticket, `/v1/local-room-invites/{ticket}` for a local one). For a local link the next step is "copy this link and paste it back into your own FlyBot", never a one-click join the page cannot perform; on a server without the local preview endpoint (#60) it says the link cannot be checked yet instead of showing a 404. The handle is display-only, escaped wherever it is drawn, and never reflected by the server.
+
 ### Local room invites (Bot Social #60)
 
 A room created inside one FlyBot home has no `face_rooms` row. Its link is `{origin}/r/@<inviter bot handle>/<ticket>`, and the server keeps the **ticket** and nothing of the room: who minted it, which of their Bots the link knocks on, the room id that home uses, and — once — which home claimed it with which Bots. Listed as `local_room_invites` in `GET /v1/platform` `features`. Same tokens as the face-room routes (owner login, connector token, or a Bot token acting as itself).
