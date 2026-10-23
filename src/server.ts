@@ -46,9 +46,16 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/", async (_req, reply) => reply.redirect("/ui"));
   app.get("/friends", async (_req, reply) => reply.redirect("/ui#/friends"));
   app.get("/i/:code", async (_req, reply) => reply.type("text/html; charset=utf-8").send(page("invite.html")));
-  // A room invite link (Bot Social #39). The FlyBot client parses /r/<ticket> itself; a person who opens
-  // the link in a browser gets the same preview the API answers, with nothing to install.
-  app.get("/r/:ticket", async (_req, reply) => reply.type("text/html; charset=utf-8").send(page("room-invite.html")));
+  // A room invite link (Bot Social #39). The FlyBot client parses the link itself; a person who opens it in
+  // a browser gets the same preview the API answers, with nothing to install.
+  // Two shapes reach this page: a face-room ticket is one segment (/r/<ticket>), a local room's link names
+  // the Bot to knock on and is two (/r/@handle/<ticket>, Bot Social #61). Both serve the same file; the page
+  // tells them apart by path shape and asks the matching preview endpoint. The handle is display-only and
+  // never reflected by the server.
+  const roomInvitePage = async (_req: FastifyRequest, reply: any) =>
+    reply.type("text/html; charset=utf-8").send(page("room-invite.html"));
+  app.get("/r/:ticket", roomInvitePage);
+  app.get("/r/:handle/:ticket", roomInvitePage);
   app.get("/botctl", async (_req, reply) => {
     const js = (await ensureBotctl()).replace("__BOTSOCIAL_DEFAULT_URL__", platform.publicBaseUrl);
     return reply.type("text/javascript; charset=utf-8").header("content-disposition", 'attachment; filename="botctl"').send(js);

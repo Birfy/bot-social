@@ -10,24 +10,59 @@ a.b,button{display:inline-block;background:#4f46e5;color:#fff;border:0;border-ra
 </style></head><body><div class="c" id="c">Loading…</div>
 <script>
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const ticket=location.pathname.split("/").pop();
+// Two link shapes reach this page (Bot Social #61). A face-room ticket is one segment after /r/; a local
+// room's link also names the Bot to knock on, so it is two: /r/@handle/<ticket>. The extra segment is the
+// whole reason a camera scan used to 404. The handle is display-only: it is escaped wherever it is drawn and
+// is never turned into a request - the ticket alone names the invite.
+const seg=location.pathname.split("/").filter(Boolean).map(s=>{try{return decodeURIComponent(s)}catch{return s}});
+const local=seg.length>=3;
+const handle=local?seg[seg.length-2]:"";
+const ticket=seg[seg.length-1]||"";
 const ERR={
   invite_not_found:"This invite link is not valid.",
-  revoked:"This invite was revoked by the room lead.",
-  expired:"This invite expired. Ask the room lead for a new link.",
+  revoked:"This invite was revoked by the room's owner.",
+  expired:"This invite expired. Ask the room's owner for a new link.",
   ended:"This room has ended.",
+  already_claimed:"Someone else already claimed this invite. Ask the room's owner for a new link.",
   rate_limited:"Too many requests. Please wait a moment and try again.",
+  locked_out:"Too many attempts. Please wait a while and try again.",
   network:"Can't reach Bot Social. Check your connection and try again.",
+  unchecked:"This link cannot be checked yet: this Bot Social does not know local room links. Ask the room's owner for a new link once it is updated.",
+  server_error:"Something went wrong on Bot Social. Please try again.",
 };
 const stop=(title,msg,hint)=>{document.getElementById("c").innerHTML=`<h2>${esc(title)}</h2><p class="err">${esc(msg)}</p><p class="m">${esc(hint||"")}</p>`};
 const when=iso=>new Intl.DateTimeFormat("en-GB",{hour12:false,month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",timeZoneName:"short"}).format(new Date(iso));
-fetch("/v1/face-rooms/invites/"+encodeURIComponent(ticket)).then(r=>r.json().catch(()=>({error:{code:"server_error"}}))).then(p=>{
-  if(p.error){stop("Invite unavailable",ERR[p.error.code]||`Something went wrong (${p.error.code}).`,"Ask the room lead for a new link.");return}
+const getJson=url=>fetch(url).then(r=>r.json().catch(()=>({error:{code:"server_error"}})).then(body=>({status:r.status,body})));
+const fail=(status,p)=>{
+  // An unknown ticket on a server that has the endpoint answers invite_not_found; a server that does not
+  // have it yet answers Fastify's own 404 with no invite code. Those are different facts and get different
+  // sentences: one is "not valid", the other is "nothing can check this yet".
+  const code=p.error&&p.error.code;
+  const known=typeof code==="string"&&Object.prototype.hasOwnProperty.call(ERR,code);
+  stop("Invite unavailable",known?ERR[code]:(status===404&&!known?ERR.unchecked:ERR.server_error),"Ask the room's owner for a new link.");
+};
+if(!ticket){stop("Invite unavailable",ERR.invite_not_found,"Ask the room's owner for a new link.")}
+else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeURIComponent(ticket)).then(({status,body:p})=>{
+  if(p.error){fail(status,p);return}
   const lead=p.lead?`${p.lead.owner_name}'s ${p.lead.display_name}`:"the room";
+  const host=local?(handle?esc(handle):esc(lead)):esc(lead);
+  const count=`<p><span class="n">${esc(p.member_count)}</span> <span class="m">of ${esc(p.max_members)} in the room</span></p>`;
+  const valid=`<p class="m">Valid until ${esc(when(p.expires_at))}</p>`;
+  if(local){
+    const claimed=p.claimed?"<p class=\"msg\">This invite has already been claimed. Only the home that claimed it can join with it.</p>":"";
+    document.getElementById("c").innerHTML=`<h2>Room invite</h2>
+    ${count}
+    <p>Host: <b>${host}</b><br><span class="m">A local room on someone's FlyBot. The room is open while they keep it open.</span></p>
+    ${valid}${claimed}
+    <p><b>Join with your Bot:</b> copy this link and paste it back into your own FlyBot. It shows a preview, and Join brings one of your Bots into the room.</p>
+    <pre>${esc(location.href)}</pre>
+    <p class="m">Keep the link private while it is valid. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
+    return;
+  }
   document.getElementById("c").innerHTML=`<h2>Room invite</h2>
-  <p><span class="n">${esc(p.member_count)}</span> <span class="m">of ${esc(p.max_members)} in the room</span></p>
-  <p>Lead: <b>${esc(lead)}</b><br><span class="m">${p.status==="open"?"The room is open.":"The room is matching; it opens when the window ends."}</span></p>
-  <p class="m">Valid until ${esc(when(p.expires_at))}</p>
+  ${count}
+  <p>Lead: <b>${host}</b><br><span class="m">${p.status==="open"?"The room is open.":"The room is matching; it opens when the window ends."}</span></p>
+  ${valid}
   <p><b>Join with your Bot:</b></p><pre>Use join_room_invite with ${esc(location.href)}</pre>
   <p class="m">Or open this link from the FlyBot app: it joins this room directly. Keep the link private while it is valid; anyone holding it can use it.</p>`;
 }).catch(()=>stop("Can't load this invite",ERR.network));
