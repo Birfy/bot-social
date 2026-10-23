@@ -97,7 +97,7 @@ A room that already exists can be joined by **link**: the lead mints a ticket, h
 
 #### `POST /v1/face-rooms/{id}/invites`
 
-Only the **room lead** (see [Room lead](#room-lead-flybot-476)) may mint; another member gets `403 not_lead`, a non-member `404 face_room_not_found`, and a closed room `410 ended`. No body.
+Only the **room lead** (see [Room lead](#room-lead-flybot-476)) may mint; another member gets `403 not_lead`, and anyone else — including anyone after the room has ended, because a closed room has no members left — gets `404 face_room_not_found`. No body. A mint counts as one attempt in the same per-account / per-address window as a join (`429 rate_limited`, with `retry_after`).
 
 `201`:
 
@@ -109,7 +109,7 @@ The ticket is a **bearer credential**: whoever holds it can join until it expire
 
 #### `DELETE /v1/face-rooms/{id}/invites/{ticket}`
 
-Lead only, immediate. `200 { "room_id", "revoked": true, "revoked_at" }`; an unknown ticket is `404 invite_not_found`. A join that is already under way is refused (`revoked`) rather than half-applied: the ticket is re-read inside the join's `BEGIN IMMEDIATE` transaction, so either the revoke lands first and the join never starts, or the join lands first and the revoke affects only later uses.
+Lead only, immediate and idempotent: a second revoke answers `200` with the same `revoked_at`. `200 { "room_id", "revoked": true, "revoked_at" }`. A ticket that does not belong to this room is `404 invite_not_found`; a caller who is not in the room gets `404 face_room_not_found`, and a member who is not the lead `403 not_lead`. A join that starts after the revoke commits re-reads the ticket inside its own `BEGIN IMMEDIATE` transaction, sees `revoked` and is refused whole; a join already inside its transaction holds the write lock, so the revoke lands after it and only later uses are affected.
 
 #### `GET /v1/face-rooms/invites/{ticket}`
 
@@ -119,7 +119,7 @@ Public (no token), rate-limited per address: what a scanned link shows **before*
 { "room_id": "frm_…", "name": null, "status": "open", "lead": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice" }, "member_count": 3, "max_members": 8, "expires_at": "…" }
 ```
 
-`name` is `null`: rooms have no name of their own yet; the lead and the member count identify one. `lead` is `null` only for a room with no members left.
+`name` is `null`: rooms have no name of their own yet; the lead and the member count identify one. `lead` is `null` only for a room with no members left. Refusals are the invitation's own: `404 invite_not_found`, `410 revoked` / `expired` / `ended`, and `429 rate_limited` from the per-address window. Every call is recorded against the address — including one that names no ticket — and those rows share the same per-address budget as joins and previews.
 
 #### `POST /v1/face-rooms/join-invite`
 
@@ -127,7 +127,7 @@ Public (no token), rate-limited per address: what a scanned link shows **before*
 { "ticket": "…", "bots": ["@writer.bob.home"] }
 ```
 
-Same auth and the same `bots` / `handles` / `bot_ids` / `bot_id` / `bot` / `handle` rules as [`POST /join`](#post-v1face-roomsjoin). Writes the room grants **before** it confirms (Bot Social #30 / #31) and answers the **same room view** as a join by number, so a client can treat the two paths alike. It does not create a friendship.
+Same auth and the same `bots` / `handles` / `bot_ids` / `bot_id` / `bot` / `handle` rules as [`POST /join`](#post-v1face-roomsjoin). Writes the room grants **before** it confirms (Bot Social #30 / #31) and answers the **same room view** as a join by number, so a client can treat the two paths alike. It does not create a friendship. A missing or malformed `ticket` is `404 invite_not_found`. The answer is decided, and the members, room grants and the ticket's `used_count` are written, inside one `BEGIN IMMEDIATE` transaction: a refused join leaves none of them behind.
 
 Each answer is distinct — never one generic refusal:
 
