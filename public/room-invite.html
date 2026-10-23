@@ -50,7 +50,8 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
   const lead=p.lead?`${p.lead.owner_name}'s ${p.lead.display_name}`:"the room";
   const host=esc(lead);
   const count=`<p><span class="n">${esc(p.member_count)}</span> <span class="m">of ${esc(p.max_members)} in the room</span></p>`;
-  const valid=`<p class="m">Valid until ${esc(when(p.expires_at))}</p>`;
+  // A local room's link has no deadline: it works until its owner withdraws it (or someone uses it).
+  const valid=p.expires_at?`<p class="m">Valid until ${esc(when(p.expires_at))}</p>`:`<p class="m">Valid until the owner withdraws it.</p>`;
   if(local){
     // A local preview has no member count (the room lives in the inviter's FlyBot, not here). The host is the
     // server's answer for this ticket, never the handle in the path: a link anyone edited to name another Bot
@@ -61,13 +62,12 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
     const edited=named&&real&&named.toLowerCase()!==real.toLowerCase()
       ?`<p class="msg">This link names ${esc("@"+named)}, but the invite was made by ${esc("@"+real)}. Someone changed the link; ask ${esc(who)} to send it again.</p>`:"";
     const title=p.name?esc(p.name):"Room invite";
-    const claimed=p.claimed?"<p class=\"msg\">This invite has already been claimed. Only the home that claimed it can join with it.</p>":"";
     document.getElementById("c").innerHTML=`<h2>${title}</h2>
     <p>Host: <b>${host}</b>${knock}<br><span class="m">A local room on someone's FlyBot. The room is open while they keep it open.</span></p>
-    ${valid}${edited}${claimed}
+    ${valid}${edited}
     <p><b>Join with your Bot:</b> copy this link and paste it back into your own FlyBot. It shows a preview, and Join brings one of your Bots into the room.</p>
     <pre>${esc(location.href)}</pre>
-    <p class="m">Keep the link private while it is valid. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
+    <p class="m">Anyone you give this link to can join with their Bot until the owner withdraws it, so share it only with people you want in the room. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
     return;
   }
   document.getElementById("c").innerHTML=`<h2>Room invite</h2>

@@ -194,7 +194,14 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     return platform.previewLocalRoomInvite(p, P(req).ticket, { ip: faceIp(req) });
   });
   app.post("/v1/local-room-invites/:ticket/claim", async (req) => platform.claimLocalRoomInvite(faceAuth(req), P(req).ticket, B(req), { ip: faceIp(req) }));
-  app.delete("/v1/local-room-invites/:ticket", async (req, reply) => { platform.revokeLocalRoomInvite(faceAuth(req), P(req).ticket); return reply.status(204).send(); });
+  // `?end_claims=1` (the room is gone) also ends the reach of every home that joined; without it they keep their seats.
+  app.delete("/v1/local-room-invites/:ticket", async (req, reply) => {
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    platform.revokeLocalRoomInvite(faceAuth(req), P(req).ticket, { endClaims: q.end_claims === "1" || q.end_claims === "true" });
+    return reply.status(204).send();
+  });
+  // The minting owner ends one home's claim (it removed that guest from the room).
+  app.delete("/v1/local-room-invites/:ticket/claims/:home", async (req, reply) => { platform.endLocalRoomInviteClaim(faceAuth(req), P(req).ticket, P(req).home); return reply.status(204).send(); });
   // Presence ("thinking"): owner login, connector token or the Bot's own token (a Bot token acts only as itself).
   app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
   app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));

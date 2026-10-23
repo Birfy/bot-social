@@ -155,21 +155,45 @@ A room created inside one FlyBot home has no `face_rooms` row. Its link is `{ori
 
 #### `POST /v1/local-room-invites`
 
-Body `{ room_id, name?, bot_id? }`. `room_id` is the home's own id for the room (`[A-Za-z0-9._:-]{1,64}`, never a face room id → `409 face_room`); `bot_id` (id or handle) is the caller's Bot the link knocks on (default: the first member Bot). `201 { kind: "local_room", ticket, url, room_id, name, expires_at, inviter: { handle, home } }`. The ticket is 22 characters of base64url and lives 10 minutes (`BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS`). Several tickets for one room may be live at once. Rate limited with the face-room attempt limits.
+Body `{ room_id, name?, bot_id? }`. `room_id` is the home's own id for the room (`[A-Za-z0-9._:-]{1,64}`, never a face room id → `409 face_room`); `bot_id` (id or handle) is the caller's Bot the link knocks on (default: the first member Bot). `201 { kind: "local_room", ticket, url, room_id, name, expires_at: null, inviter: { handle, home } }`. The ticket is 22 characters of base64url.
+
+A link has **no deadline and is not single-use** (owner decision 2026-10-24, #65). Anyone it is given to can join with it, each home once, until the minting owner withdraws it or the room is gone. A ticket minted before this change keeps the ten-minute `expires_at` it was given. Several tickets for one room may be live at once. Minting is rate limited with the face-room attempt limits.
 
 #### `GET /v1/local-room-invites/{ticket}`
 
-Public, per-address limited. `200 { kind: "local_room", room_id, name, lead: { handle, display_name, owner_name }, inviter: { handle, home }, expires_at, claimed }`. With the token of the minting or the claiming owner the answer also carries `claimer: { home, bots: ["@handle", …], members: [{ handle, display_name, owner_name }, …] } | null` (the handles are the authority; `members` only gives each seat a name to show); nobody else sees who claimed it. `404 invite_not_found`, `410 expired` / `revoked`. A claimed ticket stays readable for those two owners after its ten minutes. A released claim spends the ticket: it is never claimable again.
+Public, per-address limited. `200 { kind: "local_room", room_id, name, lead: { handle, display_name, owner_name }, inviter: { handle, home }, expires_at, claimed }`. `claimed` says whether the caller's own home has joined with it (always `false` without a token): another home's claim never closes a link.
+
+- With the minting owner's token the answer also carries `claimers: [{ home, bots: ["@handle", …], members: [{ handle, display_name, owner_name }, …] }, …]`, every home that joined, and `claimer`, the latest of them, for older readers. The handles are the authority; `members` only gives each seat a name to show.
+- With a claiming owner's token it carries `claimer`, that home's own claim only.
+- Nobody else sees any claim.
+
+Refusals: `404 invite_not_found`, `410 revoked` (`410 expired` only for an older ticket that had a deadline).
 
 #### `POST /v1/local-room-invites/{ticket}/claim`
 
-Body `{ bots: [id | "@handle", …] }` (1–8, every one the caller's own; a Bot token claims for itself). Binds the caller's home and that exact Bot set, once: the same owner with the same set again is an idempotent `200`; another owner, or the same owner with a different set, `409 already_claimed`; your own ticket `409 own_invite`; `410 expired` / `revoked`; `404 invite_not_found` / `bot_not_found`. Failures count toward the face-room lockout.
+Body `{ bots: [id | "@handle", …] }` (1–8, every one the caller's own; a Bot token claims for itself). Binds the caller's home and that exact Bot set:
 
-`200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. The claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of the claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat outlives the ten minutes it took to claim.
+- The same owner with the same set again is an idempotent `200`.
+- The same owner with a different set is `409 already_claimed`.
+- Another owner gets a claim of its own.
+- A home that released its claim may claim again while the link is not withdrawn.
+- Your own ticket is `409 own_invite`.
+- Refusals: `410 revoked` (or `expired` for an older ticket with a deadline), `404 invite_not_found` / `bot_not_found`.
+
+Failures count toward the face-room lockout.
+
+`200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. Each claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of that home's claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat has no clock of its own.
 
 #### `DELETE /v1/local-room-invites/{ticket}`
 
-The minting owner withdraws the ticket; the claiming owner releases its own claim. `204`; anyone else `403`; gone `404`. Either one revokes the room grants the claim wrote, so the pair is strangers again.
+- **The minting owner withdraws the ticket.** Nobody new can join with it, and the homes that already joined keep their reach. Add `?end_claims=1` when the room itself is gone: that also ends every claim's reach.
+- **A claiming owner releases its own claim**, which revokes the room grants that claim wrote.
+
+`204`; anyone else `403`; gone `404`.
+
+#### `DELETE /v1/local-room-invites/{ticket}/claims/{home}`
+
+The minting owner ends one home's claim, for example when it removed that guest from the room. `{home}` is the home's handle, or the handle of a Bot that home brought. `204`; `404 claim_not_found`; not the minter `403`. That home's room grants are revoked, and the link stays open for others.
 
 ### `GET /v1/face-rooms`
 

@@ -15,7 +15,7 @@ import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./tim
 import {
   FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
 } from "./face-rooms.js";
-import { LOCAL_INVITE_MAX_BOTS, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
+import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
@@ -3029,14 +3029,31 @@ export class Platform {
     if (!isLocalInviteTicket(ticket)) return null;
     return this.get("SELECT * FROM local_room_invites WHERE ticket = ?", ticket) ?? null;
   }
-  private localInviteClaimed(invite: any): string[] {
-    return invite?.claimed_at && !invite.released_at ? J(invite.claimed_bots, []) as string[] : [];
+  /** Every home's live claim on a ticket (a link admits anyone it is given to, until withdrawn). */
+  private localInviteClaims(invite: any): { owner_id: string; bots: string[]; claimed_at: string }[] {
+    if (!invite) return [];
+    return this.all("SELECT * FROM local_room_invite_claims WHERE ticket = ? AND released_at IS NULL ORDER BY claimed_at", invite.ticket)
+      .map((c: any) => ({ owner_id: c.owner_id, bots: J(c.bots, []) as string[], claimed_at: c.claimed_at }));
+  }
+  private localInviteClaimOf(invite: any, ownerId: string | null) {
+    if (!invite || ownerId === null) return null;
+    return this.localInviteClaims(invite).find((c) => c.owner_id === ownerId) ?? null;
+  }
+  private localClaimView(c: { owner_id: string; bots: string[] }) {
+    return {
+      home: this.homeHandleOf(c.owner_id),
+      bots: c.bots.map((id) => "@" + this.bot(id).handle),
+      // The names the inviting home shows on each seat; the handles above are the authority.
+      members: c.bots.map((id) => { const s = this.faceSnapshot(this.bot(id)); return { handle: s.handle, display_name: s.display_name, owner_name: s.owner_name }; }),
+    };
   }
   /** The refusals that belong to the ticket itself, before anyone claims it. */
   private localInviteRefusal(invite: any): { status: number; code: string; message: string } | null {
     if (!invite) return { status: 404, code: "invite_not_found", message: "this invite link is not valid" };
     if (invite.revoked_at) return { status: 410, code: "revoked", message: "this invite was withdrawn" };
-    if (Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
+    // A link minted since the owner's decision has no deadline (`expires_at` is ''): it lives until it is withdrawn
+    // or spent. A ticket minted with a deadline before that keeps it.
+    if (invite.expires_at && Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
     return null;
   }
   private localInviteUrl(handle: string, ticket: string) {
@@ -3049,24 +3066,24 @@ export class Platform {
   private localInviteView(invite: any, viewerOwnerId: string | null) {
     const inviter = this.bot(invite.inviter_bot);
     const lead = this.faceSnapshot(inviter);
-    const claimed = this.localInviteClaimed(invite);
-    const mine = viewerOwnerId !== null && (viewerOwnerId === invite.created_by_owner_id || viewerOwnerId === invite.claimed_by_owner_id);
+    const minter = viewerOwnerId !== null && viewerOwnerId === invite.created_by_owner_id;
+    const own = this.localInviteClaimOf(invite, viewerOwnerId);
+    const claims = minter ? this.localInviteClaims(invite) : [];
     return {
       kind: "local_room",
       room_id: invite.room_id,
       name: invite.name || null,
       lead: { handle: lead.handle, display_name: lead.display_name, owner_name: lead.owner_name },
       inviter: { handle: lead.handle, home: this.homeHandleOf(inviter.owner_id) },
-      expires_at: invite.expires_at,
-      claimed: claimed.length > 0,
+      expires_at: invite.expires_at || null,
+      // Whether the caller's own home has joined with it. A link admits anyone it is given to, so nobody
+      // else's claim closes it; an anonymous caller always reads false.
+      claimed: own !== null,
       ...(invite.revoked_at ? { revoked: true } : {}),
-      // Only the two owners the ticket binds see who claimed it; an anonymous caller sees claimed: true | false.
-      ...(mine ? { claimer: claimed.length ? {
-        home: this.homeHandleOf(invite.claimed_by_owner_id),
-        bots: claimed.map((id) => "@" + this.bot(id).handle),
-        // The names the inviting home shows on each seat; the handles above are the authority.
-        members: claimed.map((id) => { const s = this.faceSnapshot(this.bot(id)); return { handle: s.handle, display_name: s.display_name, owner_name: s.owner_name }; }),
-      } : null } : {}),
+      // The minting owner sees every home that joined (`claimers`; `claimer` is the latest, for older readers);
+      // a claiming owner sees its own claim; nobody else sees any.
+      ...(minter ? { claimers: claims.map((c) => this.localClaimView(c)), claimer: claims.length ? this.localClaimView(claims[claims.length - 1]) : null }
+        : own ? { claimer: this.localClaimView(own) } : viewerOwnerId !== null ? { claimer: null } : {}),
     };
   }
 
@@ -3093,14 +3110,15 @@ export class Platform {
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(ownerId, ip, "local", "minted");
     const ticket = newLocalInviteTicket();
-    const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
+    // No deadline: the owner withdraws the link, or a stranger spends it. The column is NOT NULL, so '' means none.
+    const expiresAt = LOCAL_INVITE_NO_DEADLINE;
     // Shown to a stranger before they join: one line, and none of the characters a card or a fence could misread.
     const name = sanitizePeerName(body?.name, "", FACE_ROOM_NAME_MAX).replace(/[[\]"<>`@]/g, "").replace(/\s+/g, " ").trim() || null;
     this.run("INSERT INTO local_room_invites (ticket, room_id, name, created_by_owner_id, inviter_bot, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
       ticket, roomId, name, ownerId, inviter.id, expiresAt, this.ts());
     // The ticket is a bearer credential: it is returned once and never written to the audit log.
-    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id, expires_at: expiresAt });
-    return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: expiresAt, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
+    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
+    return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: null, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
   }
 
   /** Public preview; the minting or claiming owner also sees the claimer. */
@@ -3110,16 +3128,18 @@ export class Platform {
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     const invite = this.localInviteOf(ticketRaw);
     const viewer = p && p.kind === "owner" ? p.ownerId : p && p.kind === "bot" ? p.ownerId : null;
-    const party = invite && viewer !== null && (viewer === invite.created_by_owner_id || viewer === invite.claimed_by_owner_id);
-    // The inviter re-reads a ticket after it expired to check a claim that landed in time: a claim outlives the window.
-    const refusal = party && this.localInviteClaimed(invite).length && !invite.revoked_at ? null : this.localInviteRefusal(invite);
+    // The minter, or a home that joined, re-reads a ticket that had a deadline after it passed, to check a claim
+    // that landed in time.
+    const party = invite && viewer !== null && (viewer === invite.created_by_owner_id || this.localInviteClaimOf(invite, viewer) !== null);
+    const refusal = party && !invite.revoked_at && (viewer !== invite.created_by_owner_id || this.localInviteClaims(invite).length) ? null : this.localInviteRefusal(invite);
     this.faceRecordAttempt(null, ip, "local", refusal ? refusal.code : "preview");
     if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
     return this.localInviteView(invite, viewer);
   }
 
   /**
-   * Claim a ticket for the caller's home and the Bots it brings, once. The claim writes one room-scoped grant pair
+   * Claim a ticket for the caller's home and the Bots it brings. Any number of homes may claim one ticket
+   * (owner decision 2026-10-24: the link admits anyone it is given to, until withdrawn); each home once. The claim writes one room-scoped grant pair
    * per brought Bot with the inviter's Bot (relationship status 'room'): reach for `send_as_member` naming that
    * room id between exactly those two Bots, nothing else.
    */
@@ -3148,10 +3168,10 @@ export class Platform {
       const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
       if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "local", "rate_limited"); return { ...attemptBlock } as Fail; }
       const invite = this.localInviteOf(ticketRaw);
-      const claimed = this.localInviteClaimed(invite);
-      // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even after the
-      // ten minutes, because the claim landed inside them.
-      if (invite && !invite.revoked_at && claimed.length && invite.claimed_by_owner_id === ownerId && JSON.stringify([...claimed].sort()) === JSON.stringify(wanted)) {
+      const mine = this.localInviteClaimOf(invite, ownerId);
+      // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even past an
+      // older ticket's deadline, because the claim landed before it.
+      if (invite && !invite.revoked_at && mine && JSON.stringify([...mine.bots].sort()) === JSON.stringify(wanted)) {
         return { ok: true, invite, fresh: false };
       }
       const refusal = this.localInviteRefusal(invite);
@@ -3159,14 +3179,16 @@ export class Platform {
         this.faceRecordAttempt(ownerId, ip, "local", refusal.code);
         return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
       }
-      // One ticket seats one home once (#878): a claim given back does not reopen the link for anyone.
-      if (claimed.length || invite.released_at) {
+      // One claim per home: a home that joined brings its Bots once (another set is a second claim it must release first).
+      if (mine) {
         this.faceRecordAttempt(ownerId, ip, "local", "already_claimed");
-        return { ok: false, status: 409, code: "already_claimed", message: invite.claimed_by_owner_id === ownerId ? "this invite was already used for other Bots of yours" : "this invite was already used by someone else" };
+        return { ok: false, status: 409, code: "already_claimed", message: "this invite was already used for other Bots of yours" };
       }
       if (invite.created_by_owner_id === ownerId) return { ok: false, status: 409, code: "own_invite", message: "this is your own invite link" };
       const now = this.ts();
-      this.run("UPDATE local_room_invites SET claimed_by_owner_id = ?, claimed_bots = ?, claimed_at = ?, released_at = NULL WHERE ticket = ?", ownerId, JSON.stringify(wanted), now, invite.ticket);
+      // A home that gave its claim back (left) may come back with the same link while it is not withdrawn.
+      this.run(`INSERT INTO local_room_invite_claims (ticket, owner_id, bots, claimed_at, released_at) VALUES (?,?,?,?,NULL)
+        ON CONFLICT (ticket, owner_id) DO UPDATE SET bots = excluded.bots, claimed_at = excluded.claimed_at, released_at = NULL`, invite.ticket, ownerId, JSON.stringify(wanted), now);
       const inviter = this.bot(invite.inviter_bot);
       for (const b of bots) this.ensureLocalPairGrant(invite.room_id, inviter, b, ownerId);
       this.faceRecordAttempt(ownerId, ip, "local", "claimed");
@@ -3183,25 +3205,48 @@ export class Platform {
     return {
       ...this.localInviteView(invite, ownerId),
       claimed: true,
+      claimer: this.localClaimView({ owner_id: ownerId, bots: wanted }),
       inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(inviter.owner_id) },
       bots: wanted.map((id) => "@" + this.bot(id).handle),
     };
   }
 
-  /** The minting owner withdraws the ticket; the claiming owner releases its own claim. Either ends the reach it wrote. */
-  revokeLocalRoomInvite(p: Principal, ticketRaw: unknown) {
+  /**
+   * The minting owner withdraws the ticket: nobody new can join with it, and the homes that already joined keep
+   * their seats (owner decision 2026-10-24) unless `endClaims` (the room is gone) ends every claim's reach too.
+   * A claiming owner releases its own claim, which ends the reach that claim wrote.
+   */
+  revokeLocalRoomInvite(p: Principal, ticketRaw: unknown, opts: { endClaims?: boolean } = {}) {
     const ownerId = p.ownerId;
     const invite = this.localInviteOf(ticketRaw);
-    if (!invite || invite.revoked_at) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
+    if (!invite) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
     const minter = invite.created_by_owner_id === ownerId;
-    const claimer = !minter && invite.claimed_by_owner_id === ownerId && !invite.released_at;
-    if (!minter && !claimer) throw new ApiError(403, "forbidden", "only the owner who made this link, or the one who used it, can end it");
-    const claimed = this.localInviteClaimed(invite);
+    const own = minter ? null : this.localInviteClaimOf(invite, ownerId);
+    if (!minter && !own) throw new ApiError(invite.revoked_at ? 404 : 403, invite.revoked_at ? "invite_not_found" : "forbidden", invite.revoked_at ? "this invite link is not valid" : "only the owner who made this link, or one who used it, can end it");
+    if (minter && invite.revoked_at && !opts.endClaims) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
     const now = this.ts();
-    if (minter) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
-    else this.run("UPDATE local_room_invites SET released_at = ? WHERE ticket = ?", now, invite.ticket);
-    if (claimed.length) this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claimed);
-    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, invite.claimed_by_owner_id].filter(Boolean), {});
+    const ended = minter ? (opts.endClaims ? this.localInviteClaims(invite) : []) : [own!];
+    if (minter && !invite.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
+    for (const c of ended) {
+      this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", now, invite.ticket, c.owner_id);
+      this.endLocalPairGrants(invite.room_id, invite.inviter_bot, c.bots);
+    }
+    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...ended.map((c) => c.owner_id)], minter ? { ended_claims: ended.length } : {});
+  }
+
+  /** The minting owner ends one home's claim (it removed that guest): that home's reach in the room ends, the link stays. `home` is the home's handle or one of its claimed Bots' handles. */
+  endLocalRoomInviteClaim(p: Principal, ticketRaw: unknown, homeRaw: unknown) {
+    const invite = this.localInviteOf(ticketRaw);
+    if (!invite) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
+    if (invite.created_by_owner_id !== p.ownerId) throw new ApiError(403, "forbidden", "only the owner who made this link can end a claim on it");
+    // The home's own handle, or the handle of a Bot that home brought: either names whose claim to end.
+    const handle = String(homeRaw ?? "").trim().replace(/^@/, "");
+    const home = handle ? this.get("SELECT owner_id FROM bots WHERE handle = ?", handle) : null;
+    const claim = home ? this.localInviteClaimOf(invite, home.owner_id) : null;
+    if (!claim) throw new ApiError(404, "claim_not_found", "no home joined with this link under that handle");
+    this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", this.ts(), invite.ticket, claim.owner_id);
+    this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claim.bots);
+    this.audit.append(`owner:${p.ownerId}`, "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
   }
 
   private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actorOwnerId: string) {
@@ -3235,12 +3280,16 @@ export class Platform {
       }
     }
   }
-  /** A live claim (not revoked, not released) that seats this pair in this local room. */
+  /**
+   * A live claim (not released) that seats this pair in this local room. A withdrawn link keeps the seats it
+   * already made (owner decision 2026-10-24); ending a claim, or the room, is what ends one.
+   */
   private localPairClaim(roomId: string, a: string, b: string, _relId?: string) {
-    const rows = this.all("SELECT * FROM local_room_invites WHERE room_id = ? AND claimed_at IS NOT NULL AND revoked_at IS NULL AND released_at IS NULL AND inviter_bot IN (?, ?)", roomId, a, b);
-    return rows.find((inv: any) => {
-      const guests = J(inv.claimed_bots, []) as string[];
-      return (inv.inviter_bot === a && guests.includes(b)) || (inv.inviter_bot === b && guests.includes(a));
+    const rows = this.all(`SELECT i.inviter_bot, c.bots FROM local_room_invites i JOIN local_room_invite_claims c ON c.ticket = i.ticket
+      WHERE i.room_id = ? AND c.released_at IS NULL AND i.inviter_bot IN (?, ?)`, roomId, a, b);
+    return rows.find((row: any) => {
+      const guests = J(row.bots, []) as string[];
+      return (row.inviter_bot === a && guests.includes(b)) || (row.inviter_bot === b && guests.includes(a));
     }) ?? null;
   }
 

@@ -53,8 +53,7 @@ test("#60: mint answers the two-segment link, the preview is public, and the pla
   assert.match(m.body.ticket, /^[A-Za-z0-9_-]{16,64}$/);
   assert.equal(m.body.url, `${s.base}/r/${A.handle}/${m.body.ticket}`);
   assert.equal(m.body.room_id, ROOM);
-  const left = Date.parse(m.body.expires_at) - Date.now();
-  assert.ok(left > 9 * 60e3 && left <= 10 * 60e3, `ten minutes, got ${left}`);
+  assert.equal(m.body.expires_at, null, "a local room's link has no deadline");
   assert.equal(m.body.inviter.handle, A.handle);
 
   const p = await preview(s.base, m.body.ticket);
@@ -93,7 +92,7 @@ test("#60: a room name is cleaned, a bad room id is refused, and a face room kee
   assert.equal(theirs.status, 404, "a link can only knock on one of your own Bots");
 });
 
-test("#60: one claim binds a home and its Bots, once; every other claim has its own refusal", async (t) => {
+test("#60, #65: each home claims once with its Bots; another home joins with the same link", async (t) => {
   const s = await startServer();
   t.after(s.stop);
   const A = await ownerWithBot(s.base, "ann");
@@ -122,20 +121,31 @@ test("#60: one claim binds a home and its Bots, once; every other claim has its 
   const otherSet = await claim(s.base, B, ticket, [B.bot.id]);
   assert.equal(otherSet.status, 409);
   assert.equal(otherSet.body.code, "already_claimed");
+  // #65: the link admits anyone it is given to, until withdrawn: a second home joins with the same ticket.
+  const before = await preview(s.base, ticket, tok(C));
+  assert.equal(before.body.claimed, false, "another home's claim does not close the link");
+  assert.equal(before.body.claimer, null, "a signed-in owner who has not joined sees no claim");
   const otherHome = await claim(s.base, C, ticket, [C.bot.id]);
-  assert.equal(otherHome.status, 409);
-  assert.equal(otherHome.body.code, "already_claimed");
+  assert.equal(otherHome.status, 200, JSON.stringify(otherHome.body));
+  assert.deepEqual(otherHome.body.bots, [C.handle]);
+  assert.deepEqual(otherHome.body.claimer.bots, [C.handle], "the claiming home reads its own claim only");
 
-  // The inviter re-reads the claimer; an anonymous caller only learns that it is claimed.
+  // The inviter re-reads every home that joined; an anonymous caller learns nothing about claims.
   const seen = await preview(s.base, ticket, tok(A));
-  assert.deepEqual([...seen.body.claimer.bots].sort(), [B.handle, B2.handle].sort());
-  assert.deepEqual(seen.body.claimer.members.map((m: any) => m.handle).sort(), [B.handle, B2.handle].sort(), "each seat carries a name to show");
-  assert.ok(seen.body.claimer.members.every((m: any) => typeof m.display_name === "string" && m.display_name), "names are cleaned strings");
+  assert.equal(seen.body.claimers.length, 2);
+  const forB = seen.body.claimers.find((c: any) => c.bots.includes(B.handle));
+  assert.deepEqual([...forB.bots].sort(), [B.handle, B2.handle].sort());
+  assert.deepEqual(forB.members.map((m: any) => m.handle).sort(), [B.handle, B2.handle].sort(), "each seat carries a name to show");
+  assert.ok(forB.members.every((m: any) => typeof m.display_name === "string" && m.display_name), "names are cleaned strings");
+  assert.deepEqual(seen.body.claimers.find((c: any) => c.bots.includes(C.handle)).bots, [C.handle]);
+  assert.deepEqual(seen.body.claimer.bots, [C.handle], "claimer is the latest, for an older reader");
   const anon = await preview(s.base, ticket);
-  assert.equal(anon.body.claimed, true);
+  assert.equal(anon.body.claimed, false);
   assert.equal("claimer" in anon.body, false);
-  const stranger = await preview(s.base, ticket, tok(C));
-  assert.equal("claimer" in stranger.body, false, "a third owner is as anonymous as no token");
+  assert.equal("claimers" in anon.body, false);
+  const asB = await preview(s.base, ticket, tok(B));
+  assert.equal(asB.body.claimed, true);
+  assert.equal("claimers" in asB.body, false, "a guest never sees the other guests' claims");
 
   const unknown = await claim(s.base, B, newLocalInviteTicket(), [B.bot.id]);
   assert.equal(unknown.status, 404);
@@ -150,6 +160,8 @@ test("#60: an expired or withdrawn ticket refuses a claim and writes nothing", a
   const B = await ownerWithBot(s.base, "ben");
   const count = () => (s.platform.db.prepare("SELECT COUNT(*) n FROM grants").get() as any).n as number;
   const late = await mint(s.base, A);
+  // A ticket minted before links lost their deadline keeps the one it was given.
+  s.platform.db.prepare("UPDATE local_room_invites SET expires_at = ? WHERE ticket = ?").run(new Date(Date.now() + 10 * 60e3).toISOString(), late.body.ticket);
   const gone = await mint(s.base, A);
   assert.equal((await revoke(s.base, A, gone.body.ticket)).status, 204);
   const before = count();
@@ -164,6 +176,39 @@ test("#60: an expired or withdrawn ticket refuses a claim and writes nothing", a
   assert.equal(revoked.body.code, "revoked");
   assert.equal(count(), before, "no grant for a refused claim");
   assert.equal((await preview(s.base, gone.body.ticket)).body.code, "revoked");
+});
+
+test("a local room's link has no deadline: a week later it still previews and claims, until it is withdrawn", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const B = await ownerWithBot(s.base, "ben");
+  const kept = await mint(s.base, A);
+  const pulled = await mint(s.base, A);
+  assert.equal(kept.body.expires_at, null);
+  const row = s.platform.db.prepare("SELECT expires_at FROM local_room_invites WHERE ticket = ?").get(kept.body.ticket) as any;
+  assert.equal(row.expires_at, "", "stored with no deadline");
+  const real = s.platform.nowMs;
+  s.platform.nowMs = () => real() + 7 * 24 * 60 * 60e3;
+  try {
+    const p = await preview(s.base, kept.body.ticket);
+    assert.equal(p.status, 200, JSON.stringify(p.body));
+    assert.equal(p.body.expires_at, null);
+    assert.equal(p.body.claimed, false);
+    const c = await claim(s.base, B, kept.body.ticket, [B.bot.id]);
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+    assert.equal(c.body.claimed, true);
+    // Withdrawing still ends a link, however old.
+    assert.equal((await revoke(s.base, A, pulled.body.ticket)).status, 204);
+    const after = await claim(s.base, B, pulled.body.ticket, [B.bot.id]);
+    assert.equal(after.status, 410);
+    assert.equal(after.body.code, "revoked");
+    // And a used link still works for the next person it is given to (#65).
+    const C = await ownerWithBot(s.base, "cat");
+    assert.equal((await claim(s.base, C, kept.body.ticket, [C.bot.id])).status, 200);
+  } finally {
+    s.platform.nowMs = real;
+  }
 });
 
 test("#60: several live tickets for one room; revoking one leaves the other", async (t) => {
@@ -210,14 +255,22 @@ test("#60: the claim is the room door — the pair talks naming that room, and n
   const rels = s.platform.db.prepare("SELECT status FROM relationships WHERE (requester_bot = ? AND target_bot = ?) OR (requester_bot = ? AND target_bot = ?)").all(A.bot.id, B.bot.id, B.bot.id, A.bot.id) as any[];
   assert.deepEqual(rels.map((r) => r.status), ["room"], "no friendship row is written");
 
-  // The seat outlives the ten minutes it took to claim it.
+  // The seat has no clock of its own.
   const real = s.platform.nowMs;
   s.platform.nowMs = () => real() + 60 * 60e3;
   assert.equal(s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "an hour later", room_id: ROOM }).message.status, "delivered");
   s.platform.nowMs = real;
 
-  // Withdrawn by the inviter: the door is gone.
+  // Withdrawn by the inviter (#65): nobody new can join, and the home that joined keeps its seat.
   assert.equal((await revoke(s.base, A, m.body.ticket)).status, 204);
+  assert.equal(s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "after", room_id: ROOM }).message.status, "delivered");
+  const late = await claim(s.base, C, m.body.ticket, [C.bot.id]);
+  assert.equal(late.status, 410);
+  assert.equal(late.body.code, "revoked");
+  // The inviter removing that guest ends its claim: the door is gone for that pair.
+  assert.equal((await req(s.base, "DELETE", `/v1/local-room-invites/${m.body.ticket}/claims/${encodeURIComponent(C.handle)}`, tok(A))).status, 404, "a home that never joined has no claim to end");
+  assert.equal((await req(s.base, "DELETE", `/v1/local-room-invites/${m.body.ticket}/claims/${encodeURIComponent(B.handle)}`, tok(B))).status, 403, "only the minter ends someone's claim");
+  assert.equal((await req(s.base, "DELETE", `/v1/local-room-invites/${m.body.ticket}/claims/${encodeURIComponent(B.handle)}`, tok(A))).status, 204);
   assert.throws(() => s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "after", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
   assert.throws(() => s.platform.sendAsMember(owner(A), { from_bot_id: A.bot.id, to: B.handle, text: "after", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
 });
@@ -237,12 +290,29 @@ test("#60: the guest's own release ends its reach, and the inviter's other guest
   assert.equal((await revoke(s.base, B, forB.body.ticket)).status, 204, "the claimer may release its own claim");
   assert.throws(() => s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "x", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
   assert.equal(s.platform.sendAsMember(owner(C), { from_bot_id: C.bot.id, to: A.handle, text: "still here", room_id: ROOM }).message.status, "delivered");
-  // A released ticket is spent: it reopens neither for the same home nor for another one.
+  // A link stays open after a guest leaves (#65): that home may come back, and so may anyone else it is given to.
   const again = await claim(s.base, B, forB.body.ticket, [B.bot.id]);
-  assert.equal(again.status, 409);
-  assert.equal(again.body.code, "already_claimed");
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "back", room_id: ROOM }).message.status, "delivered");
   const D = await ownerWithBot(s.base, "dan");
-  assert.equal((await claim(s.base, D, forB.body.ticket, [D.bot.id])).body.code, "already_claimed");
+  assert.equal((await claim(s.base, D, forB.body.ticket, [D.bot.id])).status, 200);
+});
+
+test("#65: withdrawing with end_claims (the room is gone) ends every home's reach", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const B = await ownerWithBot(s.base, "ben");
+  const C = await ownerWithBot(s.base, "cat");
+  for (const o of [B, C]) s.platform.enableCustody(owner(o), o.bot.id, { private_key_pem: o.kp.privateKeyPem });
+  const m = await mint(s.base, A);
+  assert.equal((await claim(s.base, B, m.body.ticket, [B.bot.id])).status, 200);
+  assert.equal((await claim(s.base, C, m.body.ticket, [C.bot.id])).status, 200);
+  assert.equal((await req(s.base, "DELETE", `/v1/local-room-invites/${m.body.ticket}?end_claims=1`, tok(A))).status, 204);
+  for (const o of [B, C]) {
+    assert.throws(() => s.platform.sendAsMember(owner(o), { from_bot_id: o.bot.id, to: A.handle, text: "x", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
+  }
+  assert.equal((await preview(s.base, m.body.ticket)).body.code, "revoked");
 });
 
 test("#60: the public preview has its own per-address limit", async (t) => {
