@@ -24,8 +24,12 @@ export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?:
  * Why a held send waits (#49), so a client branches on one field instead of reading `policy.reasons`.
  * The strongest finding wins: risk > attachment > policy > blanket_outbound. `blanket_outbound` is the
  * owner's own default hold and the only one a connector may decide; everything else is the owner's.
+ *
+ * `face_room_auto_send_off` (#49 follow-up) is a face-room draft that nothing else holds: the room's own
+ * Auto-send switch is off. It cannot be folded into `blanket_outbound`, or a connector allowed to clear a
+ * blanket hold could clear this card too and send into a room whose Auto-send the owner turned off.
  */
-export type HoldReason = "blanket_outbound" | "risk" | "attachment" | "policy";
+export type HoldReason = "blanket_outbound" | "risk" | "attachment" | "policy" | "face_room_auto_send_off";
 export function holdReasonOf(found: { riskFlags?: readonly unknown[]; attachments?: readonly unknown[]; injectionSuspected?: boolean } = {}): HoldReason {
   if ((found.riskFlags?.length ?? 0) > 0) return "risk";
   if ((found.attachments?.length ?? 0) > 0) return "attachment";
@@ -3032,9 +3036,12 @@ export class Platform {
     // Checked again when the line is delivered, since a member can leave while it waits for approval.
     const kept = this.roomMentions(roomId, mentions);
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
-    // #49: face-room drafts carry no attachments, so the field is risk, policy or the blanket hold.
+    // #49: face-room drafts carry no attachments, so the field is risk, policy or the room's own switch.
+    // Nothing else holding the line means `auto_approve_face_rooms` is off, and that card is the owner's:
+    // name it apart from the blanket hold a connector may decide.
     const injectionSuspected = detectInjection(text).suspected;
-    const holdReason = holdReasonOf({ riskFlags: flags, injectionSuspected });
+    const found = holdReasonOf({ riskFlags: flags, injectionSuspected });
+    const holdReason: HoldReason = found === "blanket_outbound" ? "face_room_auto_send_off" : found;
     const snap = this.faceSnapshot(sender);
     const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId }, holdReason);
     this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?)",
