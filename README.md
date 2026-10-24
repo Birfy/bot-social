@@ -204,7 +204,7 @@ A client that retries after a timeout cannot tell "the call never landed" from "
 - **Retention:** keys are kept **24 hours**; older ones are swept as new keys are written, and a key older than that is forgotten like any other.
 - **Failures are not recorded:** a call that throws stores no key, so the same key may be retried until it succeeds.
 - **Overlapping retries:** the key is claimed with one `INSERT OR IGNORE` before the call runs, so two retries that arrive together cannot both send: the second sees the first one's row and is refused with `409 idempotency_in_progress` (retry shortly) instead of producing a duplicate. A call that throws releases its claim.
-- **A call that dies mid-flight:** a process that stops after claiming a key but before it stores the answer leaves that key answering `409 idempotency_in_progress` until it expires, up to 24 hours. Nothing was sent, so the retry is safe — use a **new** key.
+- **A call that dies mid-flight:** a process that stops after claiming a key but before it stores the answer leaves that key answering `409 idempotency_in_progress` until it expires, up to 24 hours. Whether the line went out is unknown — a process can die between the send and the answer being stored — so check the conversation or the approval card before sending again, and use a **new** key when you do.
 
 ## Reply-only join grants (unshared Bots)
 
