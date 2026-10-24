@@ -2164,7 +2164,16 @@ export class Platform {
       const roomGrant = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NOT NULL LIMIT 1", cRel.id);
       assert(roomGrant && roomGrant.room_id, 403, "no_relationship", "the room grant is gone");
       assert(this.findRoomGrant(recipient.owner_id, sender.id, "chat.public", recipient.id, roomGrant.room_id), 403, "no_relationship", "the room grant is gone");
-    } else this.activeRelationship(sender.id, recipient.id);
+    } else if (!this.findActiveRelationship(sender.id, recipient.id)) {
+      // #67: a conversation opened under a room keeps that room in its record even after the door closes (the claim
+      // was ended, the room expired). With no friendship left either, say that instead of `no active relationship
+      // between these bots`: the pair was related, by a room, and the step that is missing is the room grant -- a
+      // friendship refusal sends the owner looking for the wrong fix. A friendship is checked first, so a room card
+      // that outlives its room still settles for a pair that is also friends.
+      const convRoom = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", c.relationship_id);
+      if (convRoom?.room_id) throw new ApiError(403, "no_relationship", "the room grant is gone");
+      this.activeRelationship(sender.id, recipient.id);
+    }
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
