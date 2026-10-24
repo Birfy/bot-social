@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ownerWithBot, startServer } from "./helpers.js";
+import { friends, ownerWithBot, startServer } from "./helpers.js";
 
 // #67: the room envelope a seat sends to its inviter. The server's room door works end to end when the line names
 // its room, card included -- so the reported card is a sender that named no room (#923's half). What this side owes
@@ -118,4 +118,24 @@ test("#67: a face room that ends before approval keeps saying the room grant is 
     () => s.platform.decideApproval(owner(B), (held.message as any).approval_id, { decision: "approved" }),
     (e: any) => e.status === 403 && /the room grant is gone/.test(String(e.message)),
   );
+});
+
+// The Reviewer found this one on the first tip: the room door closing must not take away the friendship door. A pair
+// that is both friends and seated keeps settling through the friendship, as it did before the change.
+test("#67: a card that outlives its room still settles for a pair that is also friends", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  s.platform.enableCustody(owner(A), A.bot.id, { private_key_pem: A.kp.privateKeyPem });
+  s.platform.enableCustody(owner(B), B.bot.id, { private_key_pem: B.kp.privateKeyPem });
+  const minted = await req(s.base, "POST", "/v1/local-room-invites", A.owner.token, { room_id: ROOM, name: "Launch plan", bot_id: A.bot.id });
+  assert.equal((await req(s.base, "POST", `/v1/local-room-invites/${encodeURIComponent(minted.body.ticket)}/claim`, B.owner.token, { bots: [B.bot.id] })).status, 200);
+  await req(s.base, "PATCH", "/v1/me", B.owner.token, { sensitive_terms: ["swordfish"] });
+  const held = s.platform.sendAsMember(owner(B), { from_bot_id: B.bot.id, to: A.handle, text: "the swordfish code", room_id: ROOM });
+  assert.equal(held.message.status, "pending_approval");
+  // the room ends before the card is approved; the friendship stays
+  assert.equal((await req(s.base, "DELETE", `/v1/local-room-invites/${encodeURIComponent(minted.body.ticket)}?end_claims=1`, A.owner.token)).status, 204);
+  const done = s.platform.decideApproval(owner(B), (held.message as any).approval_id, { decision: "approved" });
+  assert.equal((done as any).status, "delivered");
+  assert.equal((await received(A)).length, 1);
 });
