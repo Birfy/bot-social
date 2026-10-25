@@ -2568,12 +2568,22 @@ export class Platform {
   private faceRateFail(message: string, scope: string, windowMs: number) {
     return { ok: false as const, status: 429, code: "rate_limited", message, extra: { retry_after: Math.ceil(windowMs / 1000), scope } };
   }
+  /** 6-digit (and invite-join) attempts. A successful invite mint is not one of them: it has its own budget (#69). */
   private faceAttemptRateLimit(ownerId: string, ip: string | null) {
     const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
-    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ?", ownerId, since).n >= this.faceRoomLimits.attemptsPerAccount)
+    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome != 'minted'", ownerId, since).n >= this.faceRoomLimits.attemptsPerAccount)
       return this.faceRateFail("too many code attempts from this account", "account", this.faceRoomLimits.attemptWindowMs);
-    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ?", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome != 'minted'", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
       return this.faceRateFail("too many code attempts from this address", "ip", this.faceRoomLimits.attemptWindowMs);
+    return null;
+  }
+  /** Invite-link mints (local rooms and face rooms). Counts only `minted` rows, so it cannot starve a code join. */
+  private inviteMintRateLimit(ownerId: string, ip: string | null) {
+    const since = new Date(this.nowMs() - this.faceRoomLimits.inviteMintWindowMs).toISOString();
+    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome = 'minted'", ownerId, since).n >= this.faceRoomLimits.invitesPerAccount)
+      return this.faceRateFail("too many invite links from this account", "account_invite", this.faceRoomLimits.inviteMintWindowMs);
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome = 'minted'", ip, since).n >= this.faceRoomLimits.invitesPerIp)
+      return this.faceRateFail("too many invite links from this address", "ip_invite", this.faceRoomLimits.inviteMintWindowMs);
     return null;
   }
   private faceCreateRateLimit(ownerId: string, ip: string | null) {
@@ -2910,7 +2920,8 @@ export class Platform {
 
   private faceIpRateLimit(ip: string | null, message: string, scope: string) {
     const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
-    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ?", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+    // Previews share the per-address join budget. A mint does not: `minted` is the invite-link budget (#69).
+    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome != 'minted'", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
       return this.faceRateFail(message, scope, this.faceRoomLimits.attemptWindowMs);
     return null;
   }
@@ -2924,7 +2935,7 @@ export class Platform {
     const viewer = this.faceRequireMember(p, roomId);
     if (viewer.room.status === "closed") throw new ApiError(410, "ended", "this room has ended");
     this.faceRequireLead(p, roomId, "mint an invite");
-    const block = this.faceAttemptRateLimit(p.ownerId, ip);
+    const block = this.inviteMintRateLimit(p.ownerId, ip);
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(p.ownerId, ip, "invite", "minted");
     const ticket = newInviteTicket();
@@ -3115,7 +3126,7 @@ export class Platform {
     }
     assert(inviter && inviter.owner_id === ownerId, 404, "bot_not_found", "no such bot on this account");
     assert(inviter.status === "active", 403, "bot_revoked", "this bot identity was revoked");
-    const block = this.faceAttemptRateLimit(ownerId, ip);
+    const block = this.inviteMintRateLimit(ownerId, ip);
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(ownerId, ip, "local", "minted");
     const ticket = newLocalInviteTicket();

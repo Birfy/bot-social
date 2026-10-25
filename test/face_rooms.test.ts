@@ -36,6 +36,9 @@ test("face-room limits are configurable from env with safe fallbacks", () => {
   const d = loadFaceRoomLimits();
   assert.equal(d.maxMembers, 8);
   assert.equal(d.ttlMs, 600_000);
+  assert.equal(d.invitesPerAccount, 30);
+  assert.equal(d.invitesPerIp, 60);
+  assert.equal(d.inviteMintWindowMs, 600_000);
   const o = loadFaceRoomLimits({ maxMembers: 3, ttlMs: 1000 });
   assert.equal(o.maxMembers, 3);
   assert.equal(o.ttlMs, 1000);

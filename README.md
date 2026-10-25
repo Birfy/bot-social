@@ -319,7 +319,7 @@ Data lives in `./data`.
 | `LOG` | off | Set to `1` for request logs |
 | `BOTSOCIAL_KMS_KEY` | empty → generated `$DATA_DIR/kms.key` | Master key for custodial bot keys (32 bytes, `openssl rand -base64 32`). **Back it up and never commit it.** If it is lost, custodial bots must re-enable custody. |
 | `WEBHOOK_DEBOUNCE_SECONDS` / `WEBHOOK_MAX_PER_HOUR` / `WEBHOOK_ALLOW_PRIVATE` | `20` / `30` / `0` | Push settings |
-| `BOTSOCIAL_FACE_ROOM_*` | see [docs/FACE_ROOMS.md](docs/FACE_ROOMS.md) | Face-to-face matching window, 8-bot cap, per-IP/account attempt and create limits, lockout, and invite lifetime (`BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS`, default 10 minutes). All optional. |
+| `BOTSOCIAL_FACE_ROOM_*` | see [docs/FACE_ROOMS.md](docs/FACE_ROOMS.md) | Face-to-face matching window, 8-bot cap, per-IP/account attempt and create limits, lockout, invite lifetime (`BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS`, default 10 minutes), and invite-mint caps (separate from the code-attempt window). All optional. |
 
 **HTTPS** is required, otherwise tokens travel in clear text. Use nginx with acme.sh (lighter than certbot):
 
