@@ -19,8 +19,8 @@ async function req(base: string, method: string, path: string, token?: string, b
 const tok = (o: any) => o.owner.token;
 const owner = (o: any) => ({ kind: "owner" as const, ownerId: o.owner_id });
 const ROOM = "session-3f2a9c1e-6b7d-4e1a-9f0c-2d4b6a8c0e12";
-const mint = (base: string, o: any, body: Record<string, unknown> = {}) =>
-  req(base, "POST", "/v1/local-room-invites", tok(o), { room_id: ROOM, name: "Launch plan", bot_id: o.bot.id, ...body });
+const mint = (base: string, o: any, body: Record<string, unknown> = {}, ip?: string) =>
+  req(base, "POST", "/v1/local-room-invites", tok(o), { room_id: ROOM, name: "Launch plan", bot_id: o.bot.id, ...body }, ip ? { "x-forwarded-for": ip } : {});
 const preview = (base: string, ticket: string, token?: string, ip?: string) =>
   req(base, "GET", `/v1/local-room-invites/${encodeURIComponent(ticket)}`, token, undefined, ip ? { "x-forwarded-for": ip } : {});
 const claim = (base: string, o: any, ticket: string, bots: string[]) =>
@@ -313,6 +313,60 @@ test("#65: withdrawing with end_claims (the room is gone) ends every home's reac
     assert.throws(() => s.platform.sendAsMember(owner(o), { from_bot_id: o.bot.id, to: A.handle, text: "x", room_id: ROOM }), (e: any) => e.code === "room_not_shared");
   }
   assert.equal((await preview(s.base, m.body.ticket)).body.code, "revoked");
+});
+
+test("#69: creating local-room links does not spend the face-code attempt budget", async (t) => {
+  const s = await startServer({
+    faceRooms: {
+      attemptsPerAccount: 3, attemptsPerIp: 3, attemptWindowMs: 600_000,
+      createsPerAccount: 20, createsPerIp: 20,
+      invitesPerAccount: 30, invitesPerIp: 30,
+      failsBeforeLockout: 20,
+    },
+  });
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const ip = "203.0.113.69";
+  let ticket = "";
+  // More mints than either code-attempt cap (3). Each one is an ordinary owner action.
+  for (let i = 0; i < 6; i += 1) {
+    const m = await mint(s.base, A, {}, ip);
+    assert.equal(m.status, 201, JSON.stringify(m.body));
+    ticket = m.body.ticket;
+  }
+  assert.equal((await preview(s.base, ticket, undefined, ip)).status, 200, "mints are not in the per-address preview window");
+  const joined = await req(s.base, "POST", "/v1/face-rooms/join", tok(A), { code: "696969", bots: [A.bot.id] }, { "x-forwarded-for": ip });
+  assert.equal(joined.status, 200, "mints must not starve a code join");
+  // Guesses from another address, so the per-IP window (one preview + one join) is not what refuses them.
+  const guess = (code: string) => req(s.base, "POST", "/v1/face-rooms/join", tok(A), { code, bots: [A.bot.id] }, { "x-forwarded-for": "203.0.113.70" });
+  assert.equal((await guess("12")).status, 400);
+  assert.equal((await guess("34")).status, 400);
+  const blocked = await guess("56");
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.code, "rate_limited");
+  assert.equal(blocked.body.scope, "account", "the code-guess limiter still closes the account");
+});
+
+test("#69: invite-link mints have their own cap, and filling it still leaves code joins open", async (t) => {
+  const s = await startServer({
+    faceRooms: {
+      invitesPerAccount: 3, invitesPerIp: 20, inviteMintWindowMs: 600_000,
+      attemptsPerAccount: 2, attemptsPerIp: 20,
+      createsPerAccount: 5, createsPerIp: 5,
+    },
+  });
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const ip = "203.0.113.71";
+  for (let i = 0; i < 3; i += 1) assert.equal((await mint(s.base, A, {}, ip)).status, 201);
+  const over = await mint(s.base, A, {}, ip);
+  assert.equal(over.status, 429);
+  assert.equal(over.body.code, "rate_limited");
+  assert.equal(over.body.scope, "account_invite");
+  assert.match(over.body.message, /invite/);
+  assert.equal(typeof over.body.retry_after, "number");
+  const joined = await req(s.base, "POST", "/v1/face-rooms/join", tok(A), { code: "717171", bots: [A.bot.id] }, { "x-forwarded-for": ip });
+  assert.equal(joined.status, 200, JSON.stringify(joined.body));
 });
 
 test("#60: the public preview has its own per-address limit", async (t) => {

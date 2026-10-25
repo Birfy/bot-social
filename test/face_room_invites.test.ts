@@ -165,6 +165,28 @@ test("a room that ended answers ended instead of half-applying the join", async 
   assert.equal(listed.body.rooms.length, 0);
 });
 
+test("#69: minting a face-room invite does not spend the 6-digit attempt budget", async (t) => {
+  const s = await startServer({
+    faceRooms: {
+      attemptsPerAccount: 2, attemptsPerIp: 40,
+      createsPerAccount: 10, createsPerIp: 10,
+      invitesPerAccount: 20,
+    },
+  });
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const room = await newRoom(s.base, A, "696901");
+  assert.equal(room.status, 200);
+  // The create already used one of two code attempts. Three mints would trip the old shared bucket.
+  for (let i = 0; i < 3; i += 1) assert.equal((await mint(s.base, A, room.body.room_id)).status, 201);
+  const again = await newRoom(s.base, A, "696902");
+  assert.equal(again.status, 200, "mints must not starve the next code join");
+  const blocked = await newRoom(s.base, A, "696903");
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.error.code, "rate_limited");
+  assert.equal(blocked.body.error.scope, "account");
+});
+
 test("previews are rate-limited per address, so a leaked ticket cannot be brute-forced", async (t) => {
   const s = await startServer({ faceRooms: { attemptsPerIp: 3, attemptWindowMs: 60_000 } });
   t.after(s.stop);

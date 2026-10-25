@@ -20,6 +20,10 @@ export interface FaceRoomLimits {
   lockoutMs: number;
   /** How long an invite ticket for an established room stays valid (default 10 minutes). */
   inviteTtlMs: number;
+  /** Invite-link mints. Their own window, not the 6-digit code-attempt budget (#69). */
+  invitesPerAccount: number;
+  invitesPerIp: number;
+  inviteMintWindowMs: number;
 }
 
 export const DEFAULT_FACE_ROOM_LIMITS: FaceRoomLimits = {
@@ -34,6 +38,9 @@ export const DEFAULT_FACE_ROOM_LIMITS: FaceRoomLimits = {
   failsBeforeLockout: 8,
   lockoutMs: 15 * 60 * 1000,
   inviteTtlMs: 10 * 60 * 1000,
+  invitesPerAccount: 30,
+  invitesPerIp: 60,
+  inviteMintWindowMs: 10 * 60 * 1000,
 };
 
 /** Env vars (all optional, positive integers). Operator note: see README / docs/FACE_ROOMS.md. */
@@ -50,6 +57,9 @@ export function loadFaceRoomLimits(override: Partial<FaceRoomLimits> = {}): Face
     failsBeforeLockout: envN("BOTSOCIAL_FACE_ROOM_FAILS_BEFORE_LOCKOUT", DEFAULT_FACE_ROOM_LIMITS.failsBeforeLockout),
     lockoutMs: envMs("BOTSOCIAL_FACE_ROOM_LOCKOUT_SECONDS", DEFAULT_FACE_ROOM_LIMITS.lockoutMs / 1000),
     inviteTtlMs: envMs("BOTSOCIAL_FACE_ROOM_INVITE_TTL_SECONDS", DEFAULT_FACE_ROOM_LIMITS.inviteTtlMs / 1000),
+    invitesPerAccount: envN("BOTSOCIAL_FACE_ROOM_INVITES_PER_ACCOUNT", DEFAULT_FACE_ROOM_LIMITS.invitesPerAccount),
+    invitesPerIp: envN("BOTSOCIAL_FACE_ROOM_INVITES_PER_IP", DEFAULT_FACE_ROOM_LIMITS.invitesPerIp),
+    inviteMintWindowMs: envMs("BOTSOCIAL_FACE_ROOM_INVITE_MINT_WINDOW_SECONDS", DEFAULT_FACE_ROOM_LIMITS.inviteMintWindowMs / 1000),
   };
   return { ...DEFAULT_FACE_ROOM_LIMITS, ...omitUndef(env), ...omitUndef(override) };
 }
