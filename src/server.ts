@@ -41,8 +41,18 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   const P = (req: FastifyRequest) => req.params as Record<string, string>;
   const B = (req: FastifyRequest) => (req.body ?? {}) as any;
   const Q = (req: FastifyRequest) => req.query as Record<string, string>;
-  // Query numbers are parsed here, before anything reaches SQLite: a missing, empty, non-finite,
-  // fractional or negative value becomes a page bound instead of NaN. 0 is a real (empty) page.
+  // Query numbers are parsed here, before anything reaches SQLite. `limit` is a page bound: absent or
+  // empty takes the documented default, and anything that is not a non-negative integer is a 400 — a
+  // NaN would reach SQLite as an internal error and a negative number is read by SQLite as "unlimited".
+  // 0 is a real (empty) page. The 200-delivery ceiling stays in the storage layer (`webhookDeliveries`).
+  const limitQ = (raw: unknown, fallback: number, max?: number) => {
+    const s = raw === undefined || raw === null ? "" : String(raw).trim();
+    if (!s) return fallback;
+    const n = Number(s);
+    if (!Number.isSafeInteger(n) || n < 0) throw new ApiError(400, "invalid_request", "limit must be a non-negative integer");
+    return max === undefined ? n : Math.min(n, max);
+  };
+  // The events cursor is not a page bound: a malformed `since` is answered with the first page, as before.
   const intQ = (raw: unknown, o: { fallback: number; min?: number; max?: number }) => {
     const s = typeof raw === "string" ? raw.trim() : "";
     const n = s ? Number(s) : NaN;
@@ -135,7 +145,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.put("/v1/bots/:id/webhook", async (req) => platform.setWebhook(auth(req), P(req).id, B(req)));
   app.delete("/v1/bots/:id/webhook", async (req) => platform.clearWebhook(auth(req), P(req).id));
   app.post("/v1/bots/:id/webhook/test", async (req) => platform.testWebhook(auth(req), P(req).id));
-  app.get("/v1/bots/:id/webhook/deliveries", async (req) => platform.webhookDeliveries(auth(req), P(req).id, intQ(Q(req).limit, { fallback: 30, max: 200 })));
+  app.get("/v1/bots/:id/webhook/deliveries", async (req) => platform.webhookDeliveries(auth(req), P(req).id, limitQ(Q(req).limit, 30)));
   app.post("/v1/bots/:id/resume", async (req) => platform.resumeBot(auth(req), P(req).id));
   app.post("/v1/bots/:id/token", async (req) => platform.rotateBotToken(auth(req), P(req).id));
   app.post("/v1/emergency-stop", async (req) => platform.emergencyStop(auth(req), B(req)));
@@ -177,8 +187,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/calendar/entries", async (req) => ({ entries: platform.listCalendar(auth(req)) }));
 
   // ---- events & audit
-  app.get("/v1/events", async (req) => platform.listEvents(auth(req), intQ(Q(req).since, { fallback: 0 }), intQ(Q(req).limit, { fallback: 100, max: 500 })));
-  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: intQ(Q(req).limit, { fallback: 1000 }) }));
+  app.get("/v1/events", async (req) => platform.listEvents(auth(req), intQ(Q(req).since, { fallback: 0 }), limitQ(Q(req).limit, 100, 500)));
+  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: limitQ(Q(req).limit, 1000) }));
 
   // ---- face-to-face rooms (FlyBot #83). Accepts owner login tokens, connector tokens
   // (the same Bearer FlyBot already stores from /v1/onboard/flybot), and bot tokens

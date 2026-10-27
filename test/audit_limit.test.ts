@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { AuditLog } from "../src/audit.js";
-import { ownerWithBot, startServer } from "./helpers.js";
+import { expectApiError, ownerWithBot, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
 let A: Awaited<ReturnType<typeof ownerWithBot>>;
@@ -30,16 +30,14 @@ test("audit ?limit=N is the newest N records, still ascending (not the oldest N)
   assert.deepEqual(seqs(five), seqs(all).slice(-5));
 });
 
-test("audit ?limit: abc, 1.5, 1e21 and -5 answer 200 with a bounded page (never 500)", async () => {
-  const all = await A.owner.req("GET", "/v1/audit-events?limit=1000");
-  for (const raw of ["abc", "1e21"]) {
-    const r = await A.owner.req("GET", `/v1/audit-events?limit=${raw}`);
-    assert.equal(seqs(r).length, all.events.length, `limit=${raw} falls back to 1000`);
+test("audit ?limit: abc, 1.5, 1e21 and -5 answer 400 invalid_request (never 500, never unlimited)", async () => {
+  for (const raw of ["abc", "1.5", "1e21", "-5", "10abc", "NaN"]) {
+    await expectApiError(A.owner.req("GET", `/v1/audit-events?limit=${raw}`), 400, "invalid_request");
   }
-  const frac = await A.owner.req("GET", "/v1/audit-events?limit=1.5");
-  assert.deepEqual(seqs(frac), seqs(all).slice(-1), "1.5 floors to 1");
-  const neg = await A.owner.req("GET", "/v1/audit-events?limit=-5");
-  assert.ok(seqs(neg).length <= 1000, "-5 is a fallback page, not SQLite's unlimited");
+  // valid values keep their meaning: a safe integer is the page size, 0 is an empty page.
+  const all = await A.owner.req("GET", "/v1/audit-events?limit=1000");
+  assert.deepEqual(seqs(await A.owner.req("GET", "/v1/audit-events?limit=2")), seqs(all).slice(-2));
+  assert.deepEqual(seqs(await A.owner.req("GET", "/v1/audit-events?limit=0")), []);
 });
 
 test("storage guard: a negative, fractional or unsafe limit never becomes an SQL LIMIT", () => {
@@ -57,20 +55,20 @@ test("storage guard: a negative, fractional or unsafe limit never becomes an SQL
   a.db.close();
 });
 
-test("webhook deliveries ?limit=abc answers 200 instead of passing NaN to SQLite", async () => {
+test("webhook deliveries ?limit=abc answers 400 instead of passing NaN to SQLite", async () => {
   const all = await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries`);
   assert.deepEqual(all.deliveries, []);
   for (const raw of ["abc", "1.5", "-5", "1e21"]) {
-    const r = await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=${raw}`);
-    assert.equal(r.deliveries.length, 0, `limit=${raw} still answers a page`);
+    await expectApiError(A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=${raw}`), 400, "invalid_request");
   }
+  assert.equal((await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=1`)).deliveries.length, 0, "a valid bound still answers a page");
 });
 
-test("events ?limit=abc and ?since=abc/1.5 stay integers on the wire", async () => {
+test("events ?limit=abc answers 400, and ?since=abc/1.5 stays an integer on the wire", async () => {
   for (const raw of ["abc", "1.5", "1e21", "-5"]) {
-    const r = await A.bot.req("GET", `/v1/events?limit=${raw}`);
-    assert.ok(Array.isArray(r.events), `limit=${raw} answers events`);
+    await expectApiError(A.bot.req("GET", `/v1/events?limit=${raw}`), 400, "invalid_request");
   }
+  assert.ok(Array.isArray((await A.bot.req("GET", "/v1/events?limit=5")).events), "a valid bound answers events");
   const bad = await A.bot.req("GET", "/v1/events?since=abc");
   assert.equal(bad.next_cursor, 0, "a bad cursor is 0, not NaN/null");
   const frac = await A.bot.req("GET", "/v1/events?since=1.5");
