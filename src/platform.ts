@@ -905,6 +905,9 @@ export class Platform {
     assert(payload.target_handle || payload.target_bot_id, 400, "invalid_request", "target_handle or target_bot_id required");
     const target = payload.target_bot_id ? this.bot(payload.target_bot_id) : this.botByHandle(payload.target_handle);
     assert(target.id !== fromBot.id && target.owner_id !== fromBot.owner_id, 400, "invalid_request", "cannot befriend your own bot");
+    // A pending request that timed out must not keep answering relationship_exists: expire it here, before the
+    // duplicate check, because requesting again is the first call after the 7-day window in many clients.
+    this.expireStale();
     const existing = this.pairRelationships(fromBot.id, target.id);
     assert(!existing.some((r) => r.status === "blocked"), 403, "blocked", "relationship is blocked");
     assert(!existing.some((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status)), 409, "relationship_exists");
@@ -1667,6 +1670,9 @@ export class Platform {
       joiner = payload.from_bot_id ? this.ownBot(p.ownerId, payload.from_bot_id) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", p.ownerId);
       assert(joiner, 400, "invalid_request", "you have no bot");
     }
+    // Give back the use of any earlier pending join before reading this invite's status: the expired
+    // relationship may have been the one use this 1-use link had.
+    this.expireStale();
     code = payload.code ?? code;
     const i = this.get("SELECT * FROM invites WHERE code = ?", code);
     assert(i, 404, "invite_not_found");
