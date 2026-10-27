@@ -76,3 +76,32 @@ test("send_as_member resolves a recipient handle in any case", async (t) => {
   assert.equal(sent.error, undefined, `the recipient must resolve: ${JSON.stringify(sent.error)}`);
   assert.ok(sent.conversation_id, "a conversation is opened for the resolved recipient");
 });
+
+test("a legacy row pair that differs only by case: exact wins, a third spelling is refused", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { client: owner } = await OwnerClient.register(s.base, "legacy", "secret-pw", "Legacy");
+  // Two rows written by an older build, before handles were stored lowercased. `registerBot` cannot
+  // produce this state any more, so it is written directly.
+  const me = await owner.req("GET", "/v1/me");
+  const insert = (id: string, handle: string) => (s.platform as any).run(
+    "INSERT INTO bots (id, owner_id, handle, display_name, integration_type, webhook_url, webhook_secret, created_at) VALUES (?,?,?,?,?,?,?,?)",
+    id, me.owner_id, handle, handle, "rest", null, "whs_legacy", new Date().toISOString());
+  insert("bot_legacy_A", "Zed.Bot");
+  insert("bot_legacy_B", "zed.bot");
+  assert.equal(s.platform.botByHandle("@Zed.Bot").id, "bot_legacy_A", "the exact spelling wins");
+  assert.equal(s.platform.botByHandle("@zed.bot").id, "bot_legacy_B", "the other exact spelling wins too");
+  await expectApiError(Promise.resolve().then(() => s.platform.botByHandle("@ZED.BOT")), 409, "ambiguous_handle");
+  // and the in-memory half of the same rule (an owner's own bots, as the console lists them)
+  const { client: other } = await OwnerClient.register(s.base, "legacy2", "secret-pw", "Legacy Two");
+  await other.req("POST", "/v1/bots", { handle: "peer.bot", public_key: publicKey() });
+});
+
+test("the handle_taken error names the handle that was already there", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { client: owner } = await OwnerClient.register(s.base, "taken", "secret-pw", "Taken");
+  await owner.req("POST", "/v1/bots", { handle: "Zed.Bot", public_key: publicKey() });
+  const err = await expectApiError(owner.req("POST", "/v1/bots", { handle: "zEd.bOt", public_key: publicKey() }), 409, "handle_taken");
+  assert.match(String(err.message), /@zed\.bot/, "the error names the handle that exists");
+});
