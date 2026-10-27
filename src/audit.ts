@@ -62,8 +62,13 @@ export class AuditLog {
     const args: unknown[] = [];
     if (opts.owner) { where.push("owners LIKE ?"); args.push(`%"${opts.owner}"%`); }
     if (opts.subject) { where.push("(subject = ? OR data LIKE ?)"); args.push(opts.subject, `%${opts.subject}%`); }
-    const sql = `SELECT * FROM audit_events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY seq ASC LIMIT ?`;
-    return (this.db.prepare(sql).all(...args, opts.limit ?? 1000) as any[]).map((r) => this.parse(r));
+    // A page is the NEWEST N records, still ascending: every reader (console, botctl, docs) treats the
+    // last row as the latest. The older shape returned the OLDEST N, so a busy account could never read
+    // its latest events. The bound is also enforced here: SQLite reads a negative LIMIT as "unlimited"
+    // and rejects a REAL one ("datatype mismatch"), so anything but a safe non-negative integer is 1000.
+    const limit = typeof opts.limit === "number" && Number.isSafeInteger(opts.limit) && opts.limit >= 0 ? opts.limit : 1000;
+    const sql = `SELECT * FROM (SELECT * FROM audit_events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC`;
+    return (this.db.prepare(sql).all(...args, limit) as any[]).map((r) => this.parse(r));
   }
 
   /** Number of records that list this owner (what an owner may see of the chain). */

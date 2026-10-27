@@ -41,6 +41,15 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   const P = (req: FastifyRequest) => req.params as Record<string, string>;
   const B = (req: FastifyRequest) => (req.body ?? {}) as any;
   const Q = (req: FastifyRequest) => req.query as Record<string, string>;
+  // Query numbers are parsed here, before anything reaches SQLite: a missing, empty, non-finite,
+  // fractional or negative value becomes a page bound instead of NaN. 0 is a real (empty) page.
+  const intQ = (raw: unknown, o: { fallback: number; min?: number; max?: number }) => {
+    const s = typeof raw === "string" ? raw.trim() : "";
+    const n = s ? Number(s) : NaN;
+    let v = Number.isFinite(n) ? Math.floor(n) : NaN;
+    if (!Number.isFinite(v) || v < (o.min ?? 0)) v = o.fallback;
+    return o.max === undefined ? v : Math.min(v, o.max);
+  };
 
   // ---- public
   app.get("/", async (_req, reply) => reply.redirect("/ui"));
@@ -126,7 +135,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.put("/v1/bots/:id/webhook", async (req) => platform.setWebhook(auth(req), P(req).id, B(req)));
   app.delete("/v1/bots/:id/webhook", async (req) => platform.clearWebhook(auth(req), P(req).id));
   app.post("/v1/bots/:id/webhook/test", async (req) => platform.testWebhook(auth(req), P(req).id));
-  app.get("/v1/bots/:id/webhook/deliveries", async (req) => platform.webhookDeliveries(auth(req), P(req).id, Number(Q(req).limit ?? 30)));
+  app.get("/v1/bots/:id/webhook/deliveries", async (req) => platform.webhookDeliveries(auth(req), P(req).id, intQ(Q(req).limit, { fallback: 30, max: 200 })));
   app.post("/v1/bots/:id/resume", async (req) => platform.resumeBot(auth(req), P(req).id));
   app.post("/v1/bots/:id/token", async (req) => platform.rotateBotToken(auth(req), P(req).id));
   app.post("/v1/emergency-stop", async (req) => platform.emergencyStop(auth(req), B(req)));
@@ -168,8 +177,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/calendar/entries", async (req) => ({ entries: platform.listCalendar(auth(req)) }));
 
   // ---- events & audit
-  app.get("/v1/events", async (req) => platform.listEvents(auth(req), Number(Q(req).since ?? 0), Math.min(Number(Q(req).limit ?? 100), 500)));
-  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: Q(req).limit ? Number(Q(req).limit) : undefined }));
+  app.get("/v1/events", async (req) => platform.listEvents(auth(req), intQ(Q(req).since, { fallback: 0 }), intQ(Q(req).limit, { fallback: 100, max: 500 })));
+  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: intQ(Q(req).limit, { fallback: 1000 }) }));
 
   // ---- face-to-face rooms (FlyBot #83). Accepts owner login tokens, connector tokens
   // (the same Bearer FlyBot already stores from /v1/onboard/flybot), and bot tokens
