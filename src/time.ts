@@ -1,3 +1,18 @@
+/** An owner-supplied IANA zone name, trimmed, or undefined when Intl cannot use it.
+ *
+ *  Write-side guard only: a bad value must never reach the owners row, because every later calendar/freebusy
+ *  answer formats dates with it. A trailing/leading space is a paste artefact, not a different zone, so it is
+ *  trimmed and accepted — the trimmed name is what gets stored. Strings Intl rejects ("UTC+8", "GMT+8",
+ *  "Mars/Olympus") are undefined, and the caller answers 400 invalid_timezone. Rows written before this
+ *  existed are deliberately neither rewritten nor reinterpreted here. */
+export function ianaTimezone(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const tz = raw.trim();
+  if (!tz) return undefined;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); } catch { return undefined; }
+  return tz;
+}
+
 /** Minutes since local midnight of an instant in an IANA timezone. */
 export function localMinutes(ms: number, tz: string): number {
   const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms));

@@ -11,7 +11,7 @@ import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeader
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-look.js";
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
-import { isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
+import { ianaTimezone, isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
   FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
 } from "./face-rooms.js";
@@ -197,11 +197,21 @@ export class Platform {
     assert(body?.username && /^[a-z0-9._-]{2,32}$/i.test(body.username), 400, "invalid_request", "username: 2-32 chars [a-z0-9._-]");
     assert(typeof body.password === "string" && body.password.length >= 6, 400, "invalid_request", "password must be >= 6 chars");
     assert(!this.get("SELECT 1 FROM owners WHERE username = ?", body.username), 409, "username_taken");
+    // Absent timezone keeps today's default; a supplied one must be a zone Intl can use (P5).
+    const timezone = body.timezone ? this.validateTimezone(body.timezone) : "Asia/Shanghai";
     const id = newId("own");
     this.run("INSERT INTO owners (id, username, display_name, password_hash, timezone, created_at) VALUES (?,?,?,?,?,?)",
-      id, body.username, body.display_name || body.username, hashPassword(body.password), body.timezone || "Asia/Shanghai", nowIso());
+      id, body.username, body.display_name || body.username, hashPassword(body.password), timezone, nowIso());
     this.audit.append(`owner:${id}`, "owner.registered", id, [id], { username: body.username });
     return { owner_id: id, owner_token: this.issueToken("owner", id) };
+  }
+
+  /** Write-side IANA check (P5): Intl is the authority on what a zone name means, so a string it refuses is a
+   *  400 invalid_timezone here instead of an owners row that 500s every calendar/freebusy answer later. */
+  private validateTimezone(raw: unknown): string {
+    const tz = ianaTimezone(raw);
+    if (!tz) throw new ApiError(400, "invalid_timezone", 'timezone must be an IANA zone name, e.g. "Asia/Shanghai" or "UTC"');
+    return tz;
   }
 
   login(body: { username: string; password: string }) {
@@ -733,8 +743,10 @@ export class Platform {
 
   updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean }) {
     const ownerId = this.requireOwner(p);
+    // Validate before any write, so a bad zone cannot leave the rest of the patch behind it half-applied.
+    const timezone = body.timezone ? this.validateTimezone(body.timezone) : undefined;
     if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms.map(String)), ownerId);
-    if (body.timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", body.timezone, ownerId);
+    if (timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId);
     if (body.display_name) this.run("UPDATE owners SET display_name = ? WHERE id = ?", body.display_name, ownerId);
     if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
     this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], { fields: Object.keys(body) });
