@@ -3489,7 +3489,9 @@ export class Platform {
   leaveFaceRoom(p: Principal, roomId: string, body: any = {}) {
     this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId);
-    let leaving = viewer.members;
+    // Only the caller's own Bots leave. A brought guest is the other owner's seat even though this owner
+    // added it, and the other owner ends it by revoking the grant (or leaving with their own token).
+    let leaving = viewer.members.filter((m: any) => m.owner_id === p.ownerId);
     const refs = this.normalizeBotRefs(body);
     if (refs.length) {
       for (const r of refs) {
@@ -3500,7 +3502,7 @@ export class Platform {
         if (ci.length > 1) throw ambiguous(raw, ci.length);
       }
       leaving = leaving.filter((m: any) => refs.some((r) => m.bot_id === r || handleKey(m.handle) === handleKey(r)));
-      assert(leaving.length, 404, "bot_not_found", "none of those bots are in this room");
+      assert(leaving.length, 404, "bot_not_found", "none of your Bots are in this room");
     }
     this.db.transaction(() => {
       for (const m of leaving) this.removeFaceMember(roomId, m);
@@ -3550,8 +3552,10 @@ export class Platform {
     assert(roles && typeof roles === "object" && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.keys(roles).length <= this.faceRoomLimits.maxMembers,
       400, "invalid_request", "roles must be an object of your Bots in this room: { \"@handle\": \"role\" | null }");
     const changes: [string, string | null][] = [];
+    // Role labels belong to the Bot's owner, even when someone else brought the Bot into the room.
+    const ownMembers = viewer.members.filter((m: any) => m.owner_id === p.ownerId);
     for (const [ref, value] of Object.entries(roles)) {
-      const m = viewer.members.find((x: any) => x.bot_id === ref) ?? pickByHandle(viewer.members, ref);
+      const m = ownMembers.find((x: any) => x.bot_id === ref) ?? pickByHandle(ownMembers, ref);
       assert(m, 404, "bot_not_found", `${ref} is not one of your Bots in this room`);
       assert(value === null || typeof value === "string", 400, "invalid_request", "a role is a string or null");
       changes.push([m.bot_id, value === null ? null : sanitizePeerName(value, "", FACE_ROOM_ROLE_MAX) || null]);
@@ -3569,7 +3573,11 @@ export class Platform {
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
     const text = String(body?.text ?? "");
     assert(text.length > 0 && text.length <= 4000, 400, "invalid_request", "text (1-4000 chars) required");
-    const sender = this.bot(viewer.botIds[0]);
+    // A room can contain a Bot another owner brought with a grant (added_by_owner_id = this owner). That
+    // lets the bringer see and manage the seat, never speak as that Bot: only its own owner may send.
+    const own = viewer.members.filter((m: any) => m.owner_id === p.ownerId);
+    assert(own.length, 403, "forbidden", "you can only send as your own Bot");
+    const sender = this.bot(own[0].bot_id);
     const flags = this.dlp(sender.owner_id, { text });
     const blocked = flags.filter((f) => f.action === "block");
     if (blocked.length) throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
