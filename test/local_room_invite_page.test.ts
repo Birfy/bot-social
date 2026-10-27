@@ -44,8 +44,14 @@ test("#61: the page tells the two link shapes apart and asks the matching endpoi
 });
 
 test("#61: a local ticket has a sentence per refusal, and an uncheckable link is not a 404 in disguise", async () => {
-  for (const code of ["invite_not_found", "expired", "revoked", "ended", "already_claimed", "rate_limited", "locked_out", "network", "unchecked", "server_error"]) {
-    assert.match(page, new RegExp(`${code}:["\`]`), `every refusal has its own sentence: ${code}`);
+  // Reason: this page's only request is a preview — GET /v1/face-rooms/invites/<ticket> or GET /v1/local-room-invites/<ticket>.
+  for (const code of ["invite_not_found", "expired", "revoked", "ended", "rate_limited", "network", "unchecked", "server_error"]) {
+    assert.match(page, new RegExp(`${code}:["\`]`), `every reachable refusal has its own sentence: ${code}`);
+  }
+  // `already_claimed` is only written by claimLocalRoomInvite and `locked_out` only by the claim/join
+  // lockout check: neither preview can answer with them, so the page must not carry their sentences.
+  for (const code of ["already_claimed", "locked_out"]) {
+    assert.equal(new RegExp(`${code}:["\`]`).test(page), false, `${code} is unreachable from the preview request`);
   }
   // "Nothing can check this yet" is a different fact from "this link is not valid", and it is the one a
   // server without the local endpoint answers (Fastify's 404 has no invite code).
