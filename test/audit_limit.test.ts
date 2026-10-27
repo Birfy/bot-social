@@ -98,3 +98,19 @@ test("botctl audit rejects a bad --limit up front and prints the newest page", a
   const lim = JSON.parse((await run("audit", "--limit", "2", "--json")).stdout);
   assert.deepEqual(lim.events.map((e: any) => e.seq), [7, 8], "the CLI shows the newest two, not the oldest two");
 });
+
+test("the 200-delivery clamp still applies when the route only validates (one source: webhookDeliveries)", async () => {
+  const ins = (S.platform as any).run.bind(S.platform);
+  const ts = new Date().toISOString();
+  for (let i = 0; i < 210; i++) {
+    ins("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, attempts, created_at) VALUES (?,?,?,?,?,?,?,?)",
+      `del_${i}`, A.bot.id, "event", "delivered", 1, "{}", 1, ts);
+  }
+  const big = await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=1000`);
+  assert.equal(big.deliveries.length, 200, "limit is clamped to 200 by the storage layer, not by the route");
+  const mid = await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=500`);
+  assert.equal(mid.deliveries.length, 200, "still 200, not the requested value and not unbounded");
+  const small = await A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=5`);
+  assert.equal(small.deliveries.length, 5, "a smaller valid page is honoured");
+  await expectApiError(A.owner.req("GET", `/v1/bots/${A.bot.id}/webhook/deliveries?limit=1000.5`), 400, "invalid_request");
+});
