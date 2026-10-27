@@ -44,7 +44,11 @@ export const LIMITS = {
   ratePerConversationPerMin: 6,
   ratePerBotPerHour: 60,
   // New conversations per relationship in a rolling 24 h; override with BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY.
-  newConversationsPerPairPerDay: limitFromEnv(process.env.BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY, DEFAULT_NEW_CONVERSATIONS_PER_PAIR_PER_DAY),
+  // A getter, not a module-level value: botsocial.env is loaded before the server starts, and a module constant
+  // would have frozen whatever process.env held when policy.ts happened to be imported.
+  get newConversationsPerPairPerDay() {
+    return limitFromEnv(process.env.BOTSOCIAL_NEW_CONVERSATIONS_PER_PAIR_PER_DAY, DEFAULT_NEW_CONVERSATIONS_PER_PAIR_PER_DAY);
+  },
   tsSkewMs: 5 * 60 * 1000,
   nonceTtlMs: 10 * 60 * 1000,
   approvalTtlMs: 24 * 3600 * 1000,
