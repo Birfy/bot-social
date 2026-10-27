@@ -179,6 +179,20 @@ export class Platform {
     return { owner_id: o.id, owner_token: this.issueToken("owner", o.id) };
   }
 
+  /** Revoke the login token that made this request. The console's "Log out" used to forget the token locally
+   *  only, so a copied token stayed valid. Connector tokens are deliberately not accepted here (they are
+   *  listed and revoked separately); this signs out one login session, not every session of the owner. */
+  logout(p: Principal, token: string | undefined) {
+    const ownerId = this.requireOwner(p);
+    const row = token
+      ? this.get("SELECT * FROM tokens WHERE token_hash = ? AND kind = 'owner' AND scope IS NULL AND revoked_at IS NULL", hashToken(token))
+      : undefined;
+    assert(row && row.subject_id === ownerId, 401, "unauthorized", "invalid or revoked token");
+    this.run("UPDATE tokens SET revoked_at = ? WHERE token_hash = ?", nowIso(), row.token_hash);
+    this.audit.append(`owner:${ownerId}`, "owner.logout", ownerId, [ownerId], {});
+    return { ok: true };
+  }
+
   private issueToken(kind: "owner" | "bot", subject: string) {
     const t = randomToken(kind === "owner" ? "otk" : "btk");
     this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at) VALUES (?,?,?,?)", hashToken(t), kind, subject, nowIso());

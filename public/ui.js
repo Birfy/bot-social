@@ -94,7 +94,13 @@ const LOGIN_MSG = {
   bot: "This is a Bot token. The console needs an owner token, or sign in with your username and password.",
   signed_out: "You were signed out. Please sign in again.",
 };
-function logout(reason) { localStorage.removeItem("bs_owner_token"); token = null; me = null; if (reason) loginView({ reason }); else render(); }
+function logout(reason) {
+  const old = token;
+  localStorage.removeItem("bs_owner_token"); token = null; me = null;
+  // Revoke the server-side login token as well (best effort: a network failure still signs this browser out).
+  if (old) fetch("/v1/auth/logout", { method: "POST", headers: { authorization: "Bearer " + old } }).catch(() => {});
+  if (reason) loginView({ reason }); else render();
+}
 const copy = async (text) => { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy:", text); } };
 
 // ------------------------------------------------------------------ login

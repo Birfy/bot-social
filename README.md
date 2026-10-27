@@ -391,6 +391,7 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | Method | Path | Caller | Description |
 |---|---|---|---|
 | POST | /v1/owners · /v1/auth/login | public | Owner sign-up / login |
+| POST | /v1/auth/logout | owner (login token) | Revoke the login token that made this request (the console does this on Log out; connector tokens are separate) |
 | POST | /v1/onboard | public (10 per IP per hour) | One-step registration: owner + custodial bot + connector token. Returns only the connector token (and a generated web password, if one was generated) |
 | GET | /setup | public | Setup guide for Grok Bot (markdown) |
 | POST · GET · DELETE | /v1/connector-tokens[/{id}] | owner (login token) | Create / list / revoke connector tokens (usable at /mcp and the FlyBot REST routes marked "connector" below). `POST {label?, attest_typed_by_owner?}`; list shows `attest_typed_by_owner` |
