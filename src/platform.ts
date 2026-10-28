@@ -1103,12 +1103,27 @@ export class Platform {
     return [...groups.values()];
   }
 
+  /** A caller-supplied `expires_in_days` becomes an expiry here, before anything is written. `null`/omitted keeps
+   *  LIMITS.grantDefaultDays; anything that is not a finite positive number of days, or that lands outside the Date
+   *  range, is a 400. Doing it in `insertGrant` covers every path that writes a grant (the owner route, the approval
+   *  branch's `edited_params`, consent), so a typo is refused instead of superseding a live grant and then answering
+   *  500 from `toISOString()`. */
+  private grantExpiry(expiresInDays: unknown): string {
+    const days = expiresInDays == null ? LIMITS.grantDefaultDays : Number(expiresInDays);
+    assert(Number.isFinite(days) && days > 0, 400, "invalid_request", "expires_in_days must be a positive number of days");
+    const ms = Date.now() + days * 86400e3;
+    assert(Number.isFinite(ms) && Math.abs(ms) <= 8.64e15, 400, "invalid_request", "expires_in_days is too large: the expiry date would be invalid");
+    return new Date(ms).toISOString();
+  }
+
   /** `extra.replyOnly` (#23): the grantee may answer in a conversation the granted Bot started, but not start one
    *  or bring the Bot into a face room. Set only for the joiner-side grants a join writes; every explicit grant is full. */
-  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: number | undefined, actor: string, extra: { roomId?: string; replyOnly?: boolean } = {}) {
+  private insertGrant(relId: string, grantorOwner: string, granteeBot: string, cap: string, scope: any, expiresInDays: unknown, actor: string, extra: { roomId?: string; replyOnly?: boolean } = {}) {
+    // Validate and compute the expiry before the supersede: a rejected value must never take the live grant down
+    // with it (the UPDATE below would mark the old grant superseded and nothing would replace it).
+    const exp = extra.roomId ? null : this.grantExpiry(expiresInDays);
     this.run("UPDATE grants SET status = 'superseded' WHERE relationship_id = ? AND grantor_owner = ? AND capability = ? AND status = 'active' AND IFNULL(room_id,'') = ?", relId, grantorOwner, cap, extra.roomId ?? "");
     const id = newId("grt");
-    const exp = extra.roomId ? null : new Date(Date.now() + (expiresInDays ?? LIMITS.grantDefaultDays) * 86400e3).toISOString();
     const sc = extra.roomId ? { ...(scope ?? {}), kind: "room", room_id: extra.roomId } : { ...(scope ?? {}) };
     const replyOnly = !!extra.replyOnly && !extra.roomId;
     this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at, room_id, reply_only) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1119,7 +1134,14 @@ export class Platform {
   }
 
   grantsFor(relId: string) {
-    return this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId).map((g) => ({ ...g, scope: J(g.scope, {}) }));
+    const out: any[] = [];
+    for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId)) {
+      // The lazy expiry `findGrant` and `listBotGrants` already do: a row whose expiry has passed must not be listed
+      // by `/v1/relationships` while `/v1/bots/:id/grants` hides it.
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
+      out.push({ ...g, scope: J(g.scope, {}) });
+    }
+    return out;
   }
 
   /** An active relationship-level grant; a full grant wins over a reply-only one (#23), so check `reply_only` on the result. */
@@ -1180,7 +1202,8 @@ export class Platform {
     assert(ownerId === r.requester_owner || ownerId === r.target_owner, 403, "forbidden");
     this.validCaps([body?.capability]);
     const grantee = ownerId === r.requester_owner ? r.target_bot : r.requester_bot;
-    const id = this.insertGrant(relId, ownerId, grantee, body.capability, body.scope, body.expires_in_days, `owner:${ownerId}`);
+    // The supersede and the insert are one write: a throw between them must not leave the old grant revoked.
+    const id = this.db.transaction(() => this.insertGrant(relId, ownerId, grantee, body.capability, body.scope, body.expires_in_days, `owner:${ownerId}`)).immediate();
     this.emit(grantee, "grant.changed", { relationship_id: relId, capability: body.capability, status: "granted" });
     return { grant_id: id, capability: body.capability, grantee_bot: grantee, status: "active" };
   }
@@ -2054,7 +2077,10 @@ export class Platform {
       result = { invite_id: a.subject_id, status: approve ? "active" : "rejected" };
     } else if (a.kind === "grant_request") {
       const req = J(a.note, {});
-      if (approve) result.grant_id = this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, body.edited_params?.scope ?? req.scope, body.edited_params?.expires_in_days, `owner:${ownerId}`);
+      if (approve) {
+        // One write, like the owner route: the supersede cannot survive a throw from the insert.
+        result.grant_id = this.db.transaction(() => this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, body.edited_params?.scope ?? req.scope, body.edited_params?.expires_in_days, `owner:${ownerId}`)).immediate();
+      }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, capability: req.capability, decision, note_to_bot: body.note_to_bot ?? null });
     }
     this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
