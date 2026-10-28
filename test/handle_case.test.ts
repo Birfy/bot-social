@@ -97,11 +97,31 @@ test("a legacy row pair that differs only by case: exact wins, a third spelling 
   await other.req("POST", "/v1/bots", { handle: "peer.bot", public_key: publicKey() });
 });
 
-test("the handle_taken error names the handle that was already there", async (t) => {
+test("handle_taken names an own Bot's handle and stays generic for another owner's", async (t) => {
   const s = await startServer();
   t.after(s.stop);
   const { client: owner } = await OwnerClient.register(s.base, "taken", "secret-pw", "Taken");
   await owner.req("POST", "/v1/bots", { handle: "Zed.Bot", public_key: publicKey() });
-  const err = await expectApiError(owner.req("POST", "/v1/bots", { handle: "zEd.bOt", public_key: publicKey() }), 409, "handle_taken");
-  assert.match(String(err.message), /@zed\.bot/, "the error names the handle that exists");
+  const err = await expectApiError(owner.req("POST", "/v1/bots", { handle: "zEd.Bot", public_key: publicKey() }), 409, "handle_taken");
+  assert.match(String(err.message), /@zed\.bot/, "the owner's own Bot is named");
+
+  // A legacy mixed-case row belonging to someone else: its stored spelling is the exact spelling that
+  // addresses that row, so a stranger's refusal stays generic and reveals nothing about it.
+  const me = await owner.req("GET", "/v1/me");
+  (s.platform as any).run(
+    "INSERT INTO bots (id, owner_id, handle, display_name, integration_type, webhook_url, webhook_secret, created_at) VALUES (?,?,?,?,?,?,?,?)",
+    "bot_legacy_owned", me.owner_id, "Legacy.Mixed", "Legacy Mixed", "rest", null, "whs_legacy_owned", new Date().toISOString());
+  const { client: stranger } = await OwnerClient.register(s.base, "taken2", "secret-pw", "Taken Two");
+  const foreign = await expectApiError(stranger.req("POST", "/v1/bots", { handle: "legacy.mixed", public_key: publicKey() }), 409, "handle_taken");
+  const msg = String(foreign.message);
+  assert.equal(/@|legacy/i.test(msg), false, `a stranger must not get another owner's spelling: ${msg}`);
+  // ...while the owner of that row (who already sees it in their own list) still gets the name
+  const again = await expectApiError(owner.req("POST", "/v1/bots", { handle: "LEGACY.MIXED", public_key: publicKey() }), 409, "handle_taken");
+  assert.match(String(again.message), /@legacy\.mixed/i, "the owning owner still gets the name");
+
+  // onboarding creates a brand-new owner, so that path can never name an existing row
+  const dup = await post(s.base, "/v1/onboard/flybot", { display_name: "Taken Three", bot_handle: "ZED.BOT" });
+  assert.equal(dup.status, 409);
+  assert.equal(dup.body.error.code, "handle_taken");
+  assert.equal(/@|zed/i.test(String(dup.body.error.message)), false, `onboarding stays generic: ${dup.body.error.message}`);
 });

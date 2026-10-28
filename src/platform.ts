@@ -285,8 +285,8 @@ export class Platform {
     if (!body.password) { body.password = randomBytes(12).toString("base64url"); generated.password = body.password; }
     const handle = handleKey(body.bot_handle || `${body.username}.bot`);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "bot handle: 2-40 chars [a-z0-9._-]");
-    const taken = this.get("SELECT handle FROM bots WHERE LOWER(handle) = ?", handle);
-    assert(!taken, 409, "handle_taken", `handle @${taken?.handle ?? handle} is already taken`);
+    // A brand-new owner cannot own an existing row yet, so this is always the generic (no-name) refusal.
+    this.assertHandleFree(handle);
     let out: any;
     this.db.transaction(() => {
       const o = this.registerOwner(body as { username: string; password: string; display_name?: string });
@@ -706,12 +706,24 @@ export class Platform {
   }
 
   // ================================================================ bots & keys
+  /**
+   * Handle uniqueness is global and case-insensitive (see `botByRef`). The refusal names the stored spelling only when
+   * the caller already owns that row: for another owner's Bot the message stays generic, because naming it would echo
+   * back the one string that addresses that exact row (with a legacy mixed-case pair, the exact spelling) to a caller
+   * who could not have known it — a probe for other people's handles.
+   */
+  private assertHandleFree(handle: string, ownerId?: string) {
+    const taken = this.get("SELECT handle, owner_id FROM bots WHERE LOWER(handle) = ?", handle);
+    const own = !!taken && ownerId !== undefined && taken.owner_id === ownerId;
+    assert(!taken, 409, "handle_taken", own ? `handle @${taken!.handle} is already taken` : "that handle is already taken");
+    return taken;
+  }
+
   registerBot(p: Principal, body: { handle: string; display_name?: string; avatar?: string | null; color?: string | null; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
     const ownerId = this.requireOwner(p);
     const handle = handleKey(body?.handle);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
-    const taken = this.get("SELECT handle FROM bots WHERE LOWER(handle) = ?", handle);
-    assert(!taken, 409, "handle_taken", `handle @${taken?.handle ?? handle} is already taken`);
+    this.assertHandleFree(handle, ownerId);
     const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     let generated: { kid: string; publicKey: string; privateKeyPem: string } | undefined;
     let key = body.public_key;
