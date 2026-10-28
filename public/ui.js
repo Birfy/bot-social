@@ -280,6 +280,22 @@ function approvalCard(a) {
     <div class="row" style="margin-top:10px"><button class="btn ok" data-dec="approved">✓ Approve</button>${a.message ? `<button class="btn" data-dec="approved_with_edits">Approve with edits</button>` : ""}<button class="btn d" data-dec="rejected">Reject</button>
     ${a.conversation ? `<span class="grow"></span><a class="small" href="#/chat/${a.conversation.conversation_id}">Open chat →</a>` : ""}</div></div>`;
 }
+// The "Recently cancelled" list is ordered by when it was cancelled, not when the draft was written: a draft
+// written weeks ago and revoked today is the newest record, and the owner came to read the cancellation.
+const recentCancelled = (list) => (list || []).slice()
+  .sort((x, y) => String(y.decided_at ?? y.created_at).localeCompare(String(x.decided_at ?? x.created_at)))
+  .slice(0, 20);
+// A revoked member's draft stays as a record: read-only, with the destination and why it cannot be approved.
+// No buttons here on purpose: the pending list is the only place a decision can be made.
+function cancelledCard(a) {
+  let dest = "";
+  if (a.message) dest = `<div class="mut small" style="margin-top:6px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}</div><div class="small" style="margin-top:4px">${esc(a.message.payload.text)}</div>`;
+  else if (a.face_room) dest = `<div class="mut small" style="margin-top:6px">In room ${esc(a.face_room.room_id)}</div><div class="small" style="margin-top:4px">${esc(a.face_room.payload.text)}</div>`;
+  else if (a.action) dest = `<div class="mut small" style="margin-top:6px">${esc(a.action.action_type)}</div><div class="struct">${esc(JSON.stringify(a.action.params, null, 1))}</div>`;
+  const why = a.decision === "member_revoked" ? `<div class="small" style="margin-top:6px;color:var(--mut)">sending Bot ${esc(a.sender ? a.sender.handle : "?")} was revoked — this draft can no longer be approved</div>` : "";
+  return `<div class="card" data-cancelled="${a.approval_id}"><div class="row"><span class="pill gray">${esc(KIND[a.kind] || a.kind)}</span><span class="grow"></span><span class="mut">${ago(a.decided_at ?? a.created_at)}</span></div>
+    <div style="font-weight:600;margin-top:8px">${esc(a.summary)}</div>${dest}${why}</div>`;
+}
 function bindApprovals(root, after) {
   $$("[data-apr]", root).forEach((card) => $$("[data-dec]", card).forEach((b) => (b.onclick = async () => {
     const id = card.dataset.apr, d = b.dataset.dec, body = { decision: d };
@@ -309,19 +325,21 @@ function bindRequests(root, after) {
 // ------------------------------------------------------------------ pages
 const PAGES = {};
 PAGES[""] = async (v) => {
-  const [a, r, c, bots] = await Promise.all([api("GET", "/v1/approvals?status=pending"), api("GET", "/v1/relationships"), api("GET", "/v1/conversations"), api("GET", "/v1/bots")]);
+  const [a, r, c, bots, cancelled] = await Promise.all([api("GET", "/v1/approvals?status=pending"), api("GET", "/v1/relationships"), api("GET", "/v1/conversations"), api("GET", "/v1/bots"), api("GET", "/v1/approvals?status=cancelled")]);
   const incoming = r.relationships.filter((x) => x.status === "pending_target" && x.direction === "incoming");
   const friends = r.relationships.filter((x) => x.status === "active");
   const live = c.conversations.filter((x) => x.status !== "closed");
   badges = { approvals: a.approvals.length, requests: incoming.length };
   const hour = +new Date().toLocaleString("en-US", { hour: "numeric", hour12: false, timeZone: TZ });
   const todo = a.approvals.length + incoming.length, hasBot = bots.bots.length > 0;
+  const recent = recentCancelled(cancelled.approvals);
   v.innerHTML = `<h1>${hour < 6 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening"}, ${esc(me.display_name)}</h1>
     <p class="sub">${todo ? `${plural(todo, "item needs", "items need")} your decision.` : hasBot ? "Nothing to do — your Bots are all fine ✓" : "Let's set up your first Bot."}</p>
     ${hasBot ? "" : `<div class="card cta"><b>🚀 Set up your first Bot</b><p style="margin:6px 0 10px">Tell your Grok Bot: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”. Or register a Bot yourself under My Bots.</p><a class="btn p" href="#/bots">Go to My Bots</a></div>`}
     <div class="stats"><a class="stat ${a.approvals.length ? "hot" : ""}" href="#/"><b>${a.approvals.length}</b><span>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"}</span></a><a class="stat ${incoming.length ? "hot" : ""}" href="#/friends"><b>${incoming.length}</b><span>${incoming.length === 1 ? "Friend request" : "Friend requests"}</span></a>
       <a class="stat" href="#/chats"><b>${live.length}</b><span>${live.length === 1 ? "Active chat" : "Active chats"}</span></a><a class="stat" href="#/friends"><b>${friends.length}</b><span>${friends.length === 1 ? "Friend" : "Friends"}</span></a></div>
     <h2>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"} <span class="n">${a.approvals.length}</span></h2>${a.approvals.length ? a.approvals.map(approvalCard).join("") : `<div class="empty">Nothing pending 🎉</div>`}
+    ${recent.length ? `<h2>Recently cancelled <span class="n">${recent.length}</span></h2>${recent.map(cancelledCard).join("")}` : ""}
     ${incoming.length ? `<h2>${incoming.length === 1 ? "Friend request" : "Friend requests"} <span class="n">${incoming.length}</span></h2>${incoming.map(requestCard).join("")}` : ""}
     <h2>Recent chats</h2>${live.length || c.conversations.length ? convList(c.conversations.slice(0, 5)) : `<div class="empty">No chats yet</div>`}`;
   bindApprovals(v, render); bindRequests(v, render);

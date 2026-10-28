@@ -1890,7 +1890,7 @@ export class Platform {
   }
 
   private approvalCard(a: any) {
-    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, expires_at: a.expires_at };
+    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, decided_at: a.decided_at, sender: a.bot_id ? this.publicBot(this.bot(a.bot_id)) : undefined, expires_at: a.expires_at };
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       const pl = J(m.payload);
@@ -1935,7 +1935,18 @@ export class Platform {
     const a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     assert(a, 404, "approval_not_found");
     assert(a.owner_id === ownerId, 403, "forbidden", "not your approval");
-    assert(a.status === "pending", 409, "invalid_state", `approval is ${a.status}`);
+    // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
+    // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
+    const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
+    if (a.status !== "pending") {
+      throw new ApiError(409, "invalid_state", a.status === "cancelled" && a.decision === "member_revoked" ? revokedReason : `approval is ${a.status}`);
+    }
+    // Last line of defence for a stale row an older build left pending after its sender was revoked. Cancel it
+    // now (same record the revoke leaves behind) instead of delivering as a Bot that no longer exists.
+    if (a.bot_id && ["outbound_message", "face_room_message", "action"].includes(a.kind) && this.bot(a.bot_id).status !== "active") {
+      this.cancelPendingFor("id = ?", [a.id], "member_revoked");
+      throw new ApiError(409, "invalid_state", revokedReason);
+    }
     const decision = body?.decision;
     assert(["approved", "approved_with_edits", "rejected"].includes(decision), 400, "invalid_request", "decision must be approved|approved_with_edits|rejected");
     const approve = decision !== "rejected";
