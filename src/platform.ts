@@ -439,6 +439,17 @@ export class Platform {
         if (member) this.removeFaceMember(room.room_id, member);
         this.endRoomGrantsForBots(room.room_id, [m.id]);
       }
+      // #90: the local-room tickets this identity minted are reach of its own. Withdraw them and end every claim
+      // they made, so the room-scoped grants those claims wrote stop being active. This includes a ticket already
+      // withdrawn while the identity lived: owner decision 2026-10-24 keeps the seats of a withdrawn link, not the
+      // seats of a revoked identity that can no longer answer in that room.
+      for (const inv of this.all("SELECT * FROM local_room_invites WHERE inviter_bot = ?", m.id)) {
+        if (!inv.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", nowIso(), inv.ticket);
+        for (const claim of this.localInviteClaims(inv)) {
+          this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", nowIso(), inv.ticket, claim.owner_id);
+          this.endLocalPairGrants(inv.room_id, inv.inviter_bot, claim.bots);
+        }
+      }
     })();
     this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, rooms_left: rooms.length });
     return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
@@ -1047,6 +1058,9 @@ export class Platform {
     }
     assert(payload.target_handle || payload.target_bot_id, 400, "invalid_request", "target_handle or target_bot_id required");
     const target = payload.target_bot_id ? this.bot(payload.target_bot_id) : this.botByHandle(payload.target_handle);
+    // #90: a revoked Bot answers exactly like one that never existed — same status, code, message and fields.
+    // Any difference would turn this door into an oracle for "which handle was revoked".
+    assert(target.status === "active", 404, "bot_not_found", payload.target_bot_id ? `bot ${payload.target_bot_id} not found` : `bot ${payload.target_handle} not found`);
     assert(target.id !== fromBot.id && target.owner_id !== fromBot.owner_id, 400, "invalid_request", "cannot befriend your own bot");
     // A pending request that timed out must not keep answering relationship_exists: expire it here, before the
     // duplicate check, because requesting again is the first call after the 7-day window in many clients.
@@ -1805,6 +1819,8 @@ export class Platform {
       bot = payload.bot_id ? this.ownBot(p.ownerId, payload.bot_id) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", p.ownerId);
       assert(bot, 400, "invalid_request", "you have no bot");
     }
+    // #90: a revoked identity cannot hand itself out again — an invite for it would share a Bot that no longer answers.
+    assert(bot.status === "active", 403, "bot_revoked", "this bot identity was revoked");
     const offered = this.validCaps(payload.offered_capabilities ?? DEFAULT_CAPABILITIES);
     const requested = this.validCaps(payload.requested_capabilities ?? DEFAULT_CAPABILITIES);
     const maxUses = Math.max(1, Math.min(Number(payload.max_uses) || 1, 50));
@@ -3482,6 +3498,13 @@ export class Platform {
       if (refusal) {
         this.faceRecordAttempt(ownerId, ip, "local", refusal.code);
         return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      // #90: a live ticket whose inviter is no longer active must not write new reach for it. Checked before the
+      // claim row, so a ticket minted before the revocation cannot be claimed during or after it. A withdrawn
+      // ticket keeps its own answer above (410): the revocation of the link is the more specific fact.
+      if (this.bot(invite.inviter_bot).status !== "active") {
+        this.faceRecordAttempt(ownerId, ip, "local", "bot_revoked");
+        return { ok: false, status: 403, code: "bot_revoked", message: "the Bot that made this invite was revoked" };
       }
       // One claim per home: a home that joined brings its Bots once (another set is a second claim it must release first).
       if (mine) {
