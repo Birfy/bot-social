@@ -935,6 +935,12 @@ export class Platform {
       this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
       throw new ApiError(403, "no_relationship", "no active relationship between these bots");
     }
+    // Revoking a FlyBot home member keeps the relationship rows (so re-adding the same handle can restore
+    // them), but the identity itself is gone: a friend must not be able to open a new conversation or draft
+    // into an existing one toward it. A frozen Bot is different: freeze stops its outbound side, not reach.
+    for (const id of [a, b]) {
+      if (this.bot(id).status === "revoked") throw new ApiError(403, "bot_revoked", "a Bot in this relationship was revoked");
+    }
     return rel;
   }
 
