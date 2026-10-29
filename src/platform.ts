@@ -1014,11 +1014,22 @@ export class Platform {
     }
     // Revoking a FlyBot home member keeps the relationship rows (so re-adding the same handle can restore
     // them), but the identity itself is gone: a friend must not be able to open a new conversation or draft
-    // into an existing one toward it. A frozen Bot is different: freeze stops its outbound side, not reach.
+    // into an existing one toward it. A frozen Bot is deliberately not filtered here: the kill switch stops its
+    // outbound side and stops anything new starting toward it, but it does that where reach is decided -- the peer
+    // check in createConversation and the recipient check in deliverMessage -- while a conversation that already
+    // exists stays paused_stop, so a draft into it still answers conversation_paused (that pause outlives a
+    // resume). The owner's own resume, token rotate, audit read, grant revoke and block never come through here:
+    // they resolve the owner principal.
     for (const id of [a, b]) {
       if (this.bot(id).status === "revoked") throw new ApiError(403, "bot_revoked", "a Bot in this relationship was revoked");
     }
     return rel;
+  }
+
+  /** The target of reach must be an active Bot: frozen (kill switch) and revoked (identity gone) both refuse. */
+  private assertReachable(b: any) {
+    if (b.status === "frozen") throw new ApiError(403, "bot_frozen", "a Bot in this relationship is frozen (emergency stop)");
+    if (b.status === "revoked") throw new ApiError(403, "bot_revoked", "a Bot in this relationship was revoked");
   }
 
   /** Access is only the two endpoint bots. Home / Chief never cover their members. */
@@ -2226,6 +2237,11 @@ export class Platform {
     // #43: a conversation opened from a claimed room runs on that room's grants, not on a friendship.
     const roomRel = roomId ? this.roomReach(botId, peer.id, roomId) : null;
     const rel = roomRel ?? this.activeRelationship(botId, peer.id);
+    // A stranger is still answered `no_relationship` above: the peer's status is not a probe. Past that, the room
+    // path can reach a peer without a friendship, so the peer's own status is checked here too (activeRelationship
+    // only filters a revoked identity). Nothing is written and no event is queued for a Bot the kill switch has
+    // taken offline: the check sits before the INSERT and the emit(peer) that follows it.
+    this.assertReachable(peer);
     const intentDef = INTENTS[pl.intent?.type];
     if (!intentDef) {
       this.policyDecision(botId, null, [ownerId], "conversation.create", "deny", ["intent.unsupported"]);
@@ -2417,6 +2433,10 @@ export class Platform {
       if (convRoom?.room_id) throw new ApiError(403, "no_relationship", "the room grant is gone");
       this.activeRelationship(sender.id, recipient.id);
     }
+    // A frozen recipient holds the card: the kill switch must not let a line written before the freeze land
+    // inside it. Nothing is written here -- not the message, not the approval -- and the card stays pending,
+    // so the owner can still decide it after a resume.
+    this.assertReachable(recipient);
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     // Validate the edit before any write: a refused edit must not already have cleared the draft's mention list.
