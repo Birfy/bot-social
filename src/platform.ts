@@ -92,6 +92,31 @@ function mentionsOf(raw: unknown): string[] {
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; }
 }
 
+/**
+ * What an owner's edit may change on a held line: the text, the structured payload, the reply expectation. Nothing
+ * else is merged into the delivered payload -- an attachment ref in an edit never passed the draft's attachment
+ * checks, and `trust`, a mention list or a platform flag must never be writable through this door. `attachments: []`
+ * is tolerated (the console sends the list back), but the draft's own refs are kept because the merge starts from
+ * the signed payload. A refused edit throws before anything is written.
+ */
+function editedPayloadOf(body: any): { text: string; structured?: unknown; expects_reply?: boolean } {
+  const ep = body?.edited_payload;
+  assert(ep && typeof ep === "object" && !Array.isArray(ep), 400, "invalid_request", "edited_payload must be an object");
+  assert(typeof ep.text === "string" && ep.text.length >= 1 && ep.text.length <= 4000, 400, "invalid_request", "edited_payload.text (1-4000 chars) required");
+  const out: { text: string; structured?: unknown; expects_reply?: boolean } = { text: ep.text };
+  if (ep.structured !== undefined) {
+    assert(ep.structured === null || (typeof ep.structured === "object" && !Array.isArray(ep.structured)), 400, "invalid_request", "edited_payload.structured must be an object or null");
+    out.structured = ep.structured;
+  }
+  if (ep.expects_reply !== undefined) {
+    assert(typeof ep.expects_reply === "boolean", 400, "invalid_request", "edited_payload.expects_reply must be a boolean");
+    out.expects_reply = ep.expects_reply;
+  }
+  const atts = ep.attachments;
+  assert(atts === undefined || (Array.isArray(atts) && atts.length === 0), 400, "invalid_request", "attachments cannot be added or changed at approval; edit the draft instead");
+  return out;
+}
+
 export class Platform {
   db: Database.Database;
   audit: AuditLog;
@@ -2341,11 +2366,12 @@ export class Platform {
     }
     let payload = J(m.payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
+    // Validate the edit before any write: a refused edit must not already have cleared the draft's mention list.
+    const patch = edited ? editedPayloadOf(body) : null;
     // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
     if (edited && m.mentions) { this.run("UPDATE messages SET mentions = NULL WHERE id = ?", m.id); m.mentions = null; }
     if (edited) {
-      payload = { ...payload, ...body.edited_payload, ...(payload.attachments ? { attachments: payload.attachments } : {}) };
-      if (!payload.attachments) delete payload.attachments;
+      payload = { ...payload, ...patch };
       const blocked = this.dlp(sender.owner_id, payload).filter((f) => f.action === "block");
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
