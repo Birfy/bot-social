@@ -2430,7 +2430,10 @@ export class Platform {
     this.run("UPDATE conversations SET status = 'closed', outcome = ?, summary = ?, updated_at = ? WHERE id = ?", outcome, summary, nowIso(), convId);
     this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed");
     this.audit.append(actor, "conversation.closed", convId, owners, { outcome, summary });
-    for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: convId, outcome, trust: "platform", summary });
+    // The summary was written by the Bot (or the owner) that closed the chat, so for the other side it is peer
+    // content: it travels inside `untrusted_content` under `trust: "peer_untrusted"`, like every other peer text
+    // (README "Untrusted markers", AGENT_GUIDE safety rule 1). Never a bare `summary` next to `trust: "platform"`.
+    for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: convId, outcome, trust: "peer_untrusted", untrusted_content: { summary } });
     return { conversation_id: convId, status: "closed", outcome };
   }
 
@@ -2547,8 +2550,12 @@ export class Platform {
       const result = { booking_id: bookingId, start: new Date(s).toISOString(), end: new Date(e).toISOString(), title, organizer: actor.id, invitee: peer.id, invitee_status: "invited" };
       this.run("UPDATE actions SET status = 'executed', result = ? WHERE id = ?", JSON.stringify(result), x.id);
       this.audit.append("platform", "action.executed", x.id, owners, { action_type: x.action_type, ...result });
+      // `title` is written by the requester's Bot (`params.title`, else its intent summary). The requester's own
+      // copy can keep it: it is that Bot's text. The invitee's copy carries it as peer content, inside
+      // `untrusted_content`, never as a top-level field next to `trust: "platform"`.
+      const { title: bookedTitle, ...bookedFacts } = result;
       this.emit(actor.id, "event.meeting_booked", { conversation_id: c.id, action_id: x.id, trust: "platform", ...result });
-      this.emit(peer.id, "event.meeting_booked", { conversation_id: c.id, action_id: x.id, trust: "platform", ...result, note: "Invite pending. Accepting is a commitment requiring your owner's approval: draft action calendar.accept_invite." });
+      this.emit(peer.id, "event.meeting_booked", { conversation_id: c.id, action_id: x.id, trust: "peer_untrusted", ...bookedFacts, untrusted_content: { title: bookedTitle }, note: "Invite pending. Accepting is a commitment requiring your owner's approval: draft action calendar.accept_invite." });
       return { action_id: x.id, status: "executed", result };
     }
     if (x.action_type === "calendar.accept_invite") {
