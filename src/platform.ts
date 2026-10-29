@@ -2612,6 +2612,25 @@ export class Platform {
     const peer = this.bot(c.initiator_bot === actor.id ? c.peer_bot : c.initiator_bot);
     this.activeRelationship(actor.id, peer.id);
     const params = { ...J(x.params), ...(body.decision === "approved_with_edits" && body.edited_params ? body.edited_params : {}) };
+    // An owner edit amends the bot's draft; it does not create a new unchecked commitment. The invariants the
+    // action draft door set (range, attendees, DLP text, and the invite the accept points at) are re-checked here,
+    // before any write — before `fail()` and before any calendar/actions/events row — so a refusal leaves the
+    // card pending and the same card can be retried with a valid edit. `edited_params: null` is no edit.
+    const edit = body.decision === "approved_with_edits" ? body.edited_params : undefined;
+    if (edit !== undefined && edit !== null) {
+      assert(typeof edit === "object" && !Array.isArray(edit), 400, "invalid_request", "edited_params must be an object");
+      if (x.action_type === "calendar.book") {
+        const s = ms(params.start), e = ms(params.end);
+        assert(e > s, 400, "invalid_request", "end must be after start");
+        const att: string[] = params.attendees ?? [peer.id];
+        assert(att.length === 1 && att[0] === peer.id, 400, "invalid_request", "attendees must be exactly the peer bot");
+        const dlpFlags = this.dlp(actor.owner_id, { text: [params.title, x.justification].filter(Boolean).join(" ") });
+        assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "edited_params blocked by DLP");
+      } else if (x.action_type === "calendar.accept_invite") {
+        const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, actor.owner_id);
+        assert(inv, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
+      }
+    }
     const owners = [actor.owner_id, peer.owner_id];
     const fail = (reason: string, detail: any = {}) => {
       this.run("UPDATE actions SET status = 'failed', result = ? WHERE id = ?", JSON.stringify({ error: reason, ...detail }), x.id);
