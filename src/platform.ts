@@ -997,6 +997,9 @@ export class Platform {
     assert(["accept", "decline"].includes(body?.decision), 400, "invalid_request", "decision must be accept|decline");
     if (body.decision === "decline") {
       this.run("UPDATE relationships SET status = 'declined', updated_at = ? WHERE id = ?", nowIso(), relId);
+      // A declined join never became a friendship: give the invite slot back, exactly as `expireStale` and a
+      // rejected approval do, so a 1-use link does not read "used" while no relationship exists (P9).
+      this.releaseInviteUse(relId);
       this.audit.append(`owner:${ownerId}`, "relationship.declined", relId, [r.requester_owner, r.target_owner], {});
       this.emit(r.requester_bot, "relationship.changed", { relationship_id: relId, status: "declined" });
       return { relationship_id: relId, status: "declined" };
