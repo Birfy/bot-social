@@ -117,6 +117,15 @@ function editedPayloadOf(body: any): { text: string; structured?: unknown; expec
   return out;
 }
 
+/** An owner-side write body is a JSON object or absent. `null` is normalised to `{}` by the route, and `{}` is a
+ *  legal "take the default" body; a string, number, boolean or array is a 400. Without this, `POST /v1/invites`
+ *  with `"x"` minted a live link for the caller's oldest Bot. */
+function ownerWriteBody(body: any): any {
+  if (body === undefined) return {};
+  assert(body !== null && typeof body === "object" && !Array.isArray(body), 400, "invalid_request", "body must be a JSON object");
+  return body;
+}
+
 export class Platform {
   db: Database.Database;
   audit: AuditLog;
@@ -1795,15 +1804,48 @@ export class Platform {
     return i.status;
   }
 
+  /** The one Bot an owner names as id and/or handle, resolved inside that owner's account with the platform's
+   *  usual handle semantics (`resolveOwnBot`). Naming a Bot that does not resolve is a 404 instead of a silent
+   *  fallback, and two names that resolve to different Bots are a 400 — `bot_id` never wins silently. */
+  private namedOwnBot(ownerId: string, idRef: unknown, handleRef: unknown): any | undefined {
+    const id = idRef === undefined || idRef === null ? "" : String(idRef).trim();
+    const handle = handleRef === undefined || handleRef === null ? "" : String(handleRef).trim();
+    const byId = id ? this.resolveOwnBot(ownerId, id) : undefined;
+    const byHandle = handle ? this.resolveOwnBot(ownerId, handle) : undefined;
+    if (byId && byHandle && byId.id !== byHandle.id) throw new ApiError(400, "invalid_request", "bot_id and bot_handle name different Bots");
+    return byId ?? byHandle;
+  }
+
+  /** The Bot an unnamed invite shares or joins with. Compatibility order (owner decision 2026-10-29): the oldest
+   *  active member Bot, then any other active non-home Bot, then the active FlyBot home — a home-only account keeps
+   *  minting. A home Bot is still only ever shared when it is named. No active Bot at all is a 400. */
+  private inviteBotFor(ownerId: string): any {
+    const active = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at, id", ownerId);
+    const bot = active.find((b: any) => b.integration_type === "flybot-member")
+      ?? active.find((b: any) => b.integration_type !== "flybot-home")
+      ?? active.find((b: any) => b.integration_type === "flybot-home");
+    assert(bot, 400, "invalid_request", "you have no active member Bot: name one explicitly");
+    return bot;
+  }
+
+  /** A frozen or revoked Bot is handed out by no invite: the kill switch also closes links that name it, and the
+   *  link is checked again when it is joined. A named Bot that exists but is down is a 403, not a 404.
+   *  The same check guards the last write of an auto-accept invite, so a stop that happened while the card
+   *  waited cannot be undone by approving it. */
+  private assertInvitable(bot: any) {
+    assert(bot.status === "active", 403, bot.status === "frozen" ? "bot_frozen" : "bot_revoked",
+      bot.status === "frozen" ? "this bot is frozen (emergency stop)" : "this bot identity was revoked");
+  }
+
   /** Create an invite link. Owner-created invites are active at once (creating it is the owner's consent);
    *  bot-created invites (signed invite.create) need the owner's approval first. */
   createInvite(p: Principal, body: any) {
     let bot: any, payload: any, viaBot = false;
     if (p.kind === "bot") { const env = this.verifyEnvelope(p, body, "invite.create"); payload = env.payload ?? {}; bot = this.bot(p.botId); viaBot = true; }
     else {
-      payload = body ?? {};
-      bot = payload.bot_id ? this.ownBot(p.ownerId, payload.bot_id) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", p.ownerId);
-      assert(bot, 400, "invalid_request", "you have no bot");
+      payload = ownerWriteBody(body);
+      bot = this.namedOwnBot(p.ownerId, payload.bot_id, payload.bot_handle) ?? this.inviteBotFor(p.ownerId);
+      this.assertInvitable(bot);
     }
     const offered = this.validCaps(payload.offered_capabilities ?? DEFAULT_CAPABILITIES);
     const requested = this.validCaps(payload.requested_capabilities ?? DEFAULT_CAPABILITIES);
@@ -1850,9 +1892,9 @@ export class Platform {
     let payload: any, joiner: any, viaBot = false;
     if (p.kind === "bot") { const env = this.verifyEnvelope(p, body, "invite.join"); payload = env.payload ?? {}; joiner = this.bot(p.botId); viaBot = true; }
     else {
-      payload = body ?? {};
-      joiner = payload.from_bot_id ? this.ownBot(p.ownerId, payload.from_bot_id) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", p.ownerId);
-      assert(joiner, 400, "invalid_request", "you have no bot");
+      payload = ownerWriteBody(body);
+      joiner = this.namedOwnBot(p.ownerId, payload.from_bot_id, payload.bot_handle) ?? this.inviteBotFor(p.ownerId);
+      this.assertInvitable(joiner);
     }
     // Give back the use of any earlier pending join before reading this invite's status: the expired
     // relationship may have been the one use this 1-use link had.
@@ -1863,6 +1905,10 @@ export class Platform {
     const st = this.inviteStatus(i);
     assert(st === "active", 410, "invite_unavailable", `invite is ${st}`, { invite_status: st });
     const inviter = this.bot(i.bot_id);
+    // A link minted before an emergency stop must not outlive it: both ends are checked at join time, before
+    // anything is written. A frozen or revoked Bot at either end is a 403 and spends no use.
+    this.assertInvitable(joiner);
+    this.assertInvitable(inviter);
     assert(inviter.owner_id !== joiner.owner_id, 400, "invalid_request", "cannot join your own invite");
     const existing = this.pairRelationships(joiner.id, inviter.id);
     assert(!existing.some((r) => r.status === "blocked"), 403, "blocked", "relationship is blocked");
@@ -1894,7 +1940,7 @@ export class Platform {
     else this.notifyTarget(id);
     const r = this.get("SELECT status FROM relationships WHERE id = ?", id);
     const active = r.status === "active";
-    return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), awaiting: active ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent", ...(active ? { grants_ready: true, grants: this.grantSummary(id) } : {}) };
+    return { relationship_id: id, status: r.status, approval_id, inviter: this.publicBot(inviter), joined_as: { bot_id: joiner.id, handle: "@" + joiner.handle }, awaiting: active ? null : r.status === "pending_requester_owner" ? "your_owner_approval" : "inviter_owner_consent", ...(active ? { grants_ready: true, grants: this.grantSummary(id) } : {}) };
   }
 
   /** Does `grantorOwner` still share its Bot with `granteeBot` on this relationship (an unexpired, active relationship-level
@@ -1906,6 +1952,9 @@ export class Platform {
   }
 
   private regrantViaInvite(i: any, rel: any, inviter: any, joiner: any, payload: any) {
+    // The regrant writes the same grants a first join would, so the same kill-switch rule applies to both ends.
+    this.assertInvitable(joiner);
+    this.assertInvitable(inviter);
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
     const actor = `owner:${i.owner_id}(invite:${i.id})`;
     this.db.transaction(() => {
@@ -1922,7 +1971,7 @@ export class Platform {
     })();
     this.audit.append(`owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: rel.id, regrant: true, offered });
     for (const b of [inviter.id, joiner.id]) this.emit(b, "grant.changed", { relationship_id: rel.id, status: "granted", granted_bot: inviter.id, grantee_bot: joiner.id });
-    return { relationship_id: rel.id, status: "active", approval_id: undefined, inviter: this.publicBot(inviter), awaiting: null, regranted: true };
+    return { relationship_id: rel.id, status: "active", approval_id: undefined, inviter: this.publicBot(inviter), joined_as: { bot_id: joiner.id, handle: "@" + joiner.handle }, awaiting: null, regranted: true };
   }
 
   /** A join that never became a friendship (requester owner rejected / request expired) must give its
@@ -1947,6 +1996,10 @@ export class Platform {
     if (!link || !link.auto_accept || link.status === "revoked" || link.status === "pending_owner") return null;
     const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     if (r.status !== "pending_target") return null;
+    // The one place an auto-accept invite writes grants: both ends are checked here, before writeActivation, so a
+    // stop that happened while the card waited cannot be undone by approving it. A refusal leaves the card pending.
+    this.assertInvitable(this.bot(r.requester_bot));
+    this.assertInvitable(this.bot(r.target_bot));
     const specs = J(link.offered_caps, []).map((c: string) => ({ capability: c }));
     const actor = `owner:${link.owner_id}(invite:${link.id})`;
     this.writeActivation(r, specs, actor);
