@@ -81,7 +81,7 @@ const serverUrl = () => (str(f.url) ?? process.env.BOTSOCIAL_URL ?? (DEFAULT_URL
 
 async function resolvePeer(c: Cfg, peer: string): Promise<{ bot_id: string; rel: any }> {
   const { friends } = await bot(c).friends();
-  const hit = friends.find((r: any) => r.peer.bot_id === peer || r.peer.handle === "@" + peer.replace(/^@/, "") || r.relationship_id === peer);
+  const hit = friends.find((r: any) => r.peer.bot_id === peer || String(r.peer.handle ?? "").replace(/^@/, "").toLowerCase() === peer.replace(/^@/, "").toLowerCase() || r.relationship_id === peer);
   if (!hit) fail(`no friend matching ${peer}`, { hint: "botctl friends lists your friends" });
   return { bot_id: hit.peer.bot_id, rel: hit };
 }

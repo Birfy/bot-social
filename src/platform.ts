@@ -19,6 +19,24 @@ import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, i
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
+/** Comparison key for a Bot handle: surrounding spaces and an optional leading `@` removed, lowercased.
+ *  Writes store this form; lookups compare `LOWER(handle)` with it, so `@Zed.Bot` and `@zed.bot` are one Bot. */
+const handleKey = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "").toLowerCase();
+/** The handle as the caller spelled it (spaces and one leading `@` removed, case kept). */
+const handleRef = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "");
+/** A reference that names rows differing only by case is refused, never guessed. */
+const ambiguous = (raw: string, n: number) => new ApiError(409, "ambiguous_handle", `"${raw}" matches ${n} Bots that differ only by case; name the exact handle`);
+/** In-memory version of the same rule: exact spelling wins, else the unique case-insensitive match. */
+const pickByHandle = <T extends { handle?: string | null }>(rows: T[], ref: unknown): T | undefined => {
+  const raw = handleRef(ref);
+  if (!raw) return undefined;
+  const exact = rows.find((r) => String(r.handle ?? "").replace(/^@/, "") === raw);
+  if (exact) return exact;
+  const ci = rows.filter((r) => handleKey(r.handle) === raw.toLowerCase());
+  if (ci.length > 1) throw ambiguous(raw, ci.length);
+  return ci[0];
+};
+
 /**
  * A row of `relationships`: the two endpoint Bots and the owners behind them. One pair can hold several rows —
  * a friendship (`active`) and one `room` row per shared room — and code that picks a door must say which one.
@@ -118,9 +136,23 @@ export class Platform {
     return b;
   }
   botByHandle(handle: string) {
-    const b = this.get("SELECT * FROM bots WHERE handle = ?", handle.replace(/^@/, ""));
+    const b = this.botByRef(handle);
     assert(b, 404, "bot_not_found", `bot ${handle} not found`);
     return b;
+  }
+
+  /** Bot lookup by handle: the exact spelling wins; only when nothing matches exactly does the unique
+   *  case-insensitive match count. Two rows that differ only by case make a case-variant reference
+   *  ambiguous — refuse rather than silently pick one, so an old mixed-case row cannot shadow the real Bot. */
+  private botByRef(ref: unknown, where = "", args: unknown[] = []) {
+    const raw = handleRef(ref);
+    if (!raw) return undefined;
+    const tail = where ? ` AND ${where}` : "";
+    const exact = this.get(`SELECT * FROM bots WHERE handle = ?${tail}`, raw, ...args);
+    if (exact) return exact;
+    const rows = this.all(`SELECT * FROM bots WHERE LOWER(handle) = ?${tail}`, raw.toLowerCase(), ...args);
+    if (rows.length > 1) throw ambiguous(raw, rows.length);
+    return rows[0];
   }
   owner(id: string) {
     const o = this.get("SELECT * FROM owners WHERE id = ?", id);
@@ -251,9 +283,10 @@ export class Platform {
       generated.username = body.username;
     }
     if (!body.password) { body.password = randomBytes(12).toString("base64url"); generated.password = body.password; }
-    const handle = String(body.bot_handle || `${body.username}.bot`).replace(/^@/, "");
+    const handle = handleKey(body.bot_handle || `${body.username}.bot`);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "bot handle: 2-40 chars [a-z0-9._-]");
-    assert(!this.get("SELECT 1 FROM bots WHERE handle = ?", handle), 409, "handle_taken");
+    // A brand-new owner cannot own an existing row yet, so this is always the generic (no-name) refusal.
+    this.assertHandleFree(handle);
     let out: any;
     this.db.transaction(() => {
       const o = this.registerOwner(body as { username: string; password: string; display_name?: string });
@@ -290,7 +323,7 @@ export class Platform {
   }
 
   private ownHome(ownerId: string, homeId: string) {
-    const home = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", homeId, String(homeId).replace(/^@/, ""), ownerId);
+    const home = this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", homeId, ownerId) ?? this.botByRef(homeId, "owner_id = ?", [ownerId]);
     assert(home && home.integration_type === "flybot-home", 404, "home_not_found", "no FlyBot home with that id for this owner");
     return home;
   }
@@ -304,8 +337,8 @@ export class Platform {
     assert(room >= 2, 400, "invalid_request", "home handle too long for members");
     const name = String(body?.name ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, room);
     assert(name.length >= 1, 400, "invalid_request", "member name required");
-    const handle = `${name}.${home.handle}`;
-    const existing = this.get("SELECT * FROM bots WHERE handle = ?", handle);
+    const handle = `${name}.${handleKey(home.handle)}`;
+    const existing = this.botByRef(handle);
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
       this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
@@ -323,7 +356,7 @@ export class Platform {
   removeHomeMember(p: Principal, homeId: string, memberId: string) {
     const ownerId = this.requireOwner(p);
     const home = this.ownHome(ownerId, homeId);
-    const m = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND home_bot_id = ?", memberId, String(memberId).replace(/^@/, ""), home.id);
+    const m = this.get("SELECT * FROM bots WHERE id = ? AND home_bot_id = ?", memberId, home.id) ?? this.botByRef(memberId, "home_bot_id = ?", [home.id]);
     assert(m, 404, "member_not_found");
     this.run("UPDATE bots SET status = 'revoked' WHERE id = ?", m.id);
     this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), m.id);
@@ -439,7 +472,7 @@ export class Platform {
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
     const cb = this.custodialBot(p, body?.from_bot_id);
-    const to = this.get("SELECT * FROM bots WHERE handle = ? OR id = ?", String(body?.to ?? "").replace(/^@/, ""), body?.to);
+    const to = this.get("SELECT * FROM bots WHERE id = ?", body?.to) ?? this.botByRef(body?.to);
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
     void ownerId;
     // #45: optional room context. The line names the room it belongs to; the server checks that a room-scoped grant
@@ -673,11 +706,24 @@ export class Platform {
   }
 
   // ================================================================ bots & keys
+  /**
+   * Handle uniqueness is global and case-insensitive (see `botByRef`). The refusal names the stored spelling only when
+   * the caller already owns that row: for another owner's Bot the message stays generic, because naming it would echo
+   * back the one string that addresses that exact row (with a legacy mixed-case pair, the exact spelling) to a caller
+   * who could not have known it — a probe for other people's handles.
+   */
+  private assertHandleFree(handle: string, ownerId?: string) {
+    const taken = this.get("SELECT handle, owner_id FROM bots WHERE LOWER(handle) = ?", handle);
+    const own = !!taken && ownerId !== undefined && taken.owner_id === ownerId;
+    assert(!taken, 409, "handle_taken", own ? `handle @${taken!.handle} is already taken` : "that handle is already taken");
+    return taken;
+  }
+
   registerBot(p: Principal, body: { handle: string; display_name?: string; avatar?: string | null; color?: string | null; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
     const ownerId = this.requireOwner(p);
-    const handle = String(body?.handle ?? "").replace(/^@/, "");
+    const handle = handleKey(body?.handle);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
-    assert(!this.get("SELECT 1 FROM bots WHERE handle = ?", handle), 409, "handle_taken");
+    this.assertHandleFree(handle, ownerId);
     const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     let generated: { kid: string; publicKey: string; privateKeyPem: string } | undefined;
     let key = body.public_key;
@@ -1152,7 +1198,7 @@ export class Platform {
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
     const granted = this.grantedBotOf(g, r);
     if (botId) {
-      const ref = this.get("SELECT id FROM bots WHERE id = ? OR handle = ?", botId, String(botId).replace(/^@/, ""));
+      const ref = this.get("SELECT id FROM bots WHERE id = ?", botId) ?? this.botByRef(botId);
       assert(ref && ref.id === granted, 404, "grant_not_found", "that grant is not for this bot");
     }
     // #35: never decline reply-only rows — those let this Bot answer the friend's Bot after a join.
@@ -1187,7 +1233,7 @@ export class Platform {
     assert(namedOwner || namedBot, 400, "invalid_request", "friend_owner_id or friend_bot_id required");
     const bot = this.resolveOwnBot(ownerId, botId);
     const peerBot = namedBot
-      ? this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", namedBot, namedBot.replace(/^@/, ""))
+      ? this.get("SELECT * FROM bots WHERE id = ?", namedBot) ?? this.botByRef(namedBot)
       : undefined;
     if (namedBot) assert(peerBot, 404, "friend_not_found", "no such Bot");
     if (peerBot) assert(peerBot.owner_id !== ownerId, 400, "invalid_request", "cannot grant a Bot to yourself");
@@ -1220,7 +1266,7 @@ export class Platform {
       const friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
       if (myBot !== bot.id) continue;
       if (this.hasLiveGrant(ownerId, friendBot, rel.id)) {
-        const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.relationship_id === rel.id && (g.grantee.bot_id === friendBot || g.grantee.handle === "@" + this.bot(friendBot).handle));
+        const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.relationship_id === rel.id && (g.grantee.bot_id === friendBot || handleKey(g.grantee.handle) === handleKey(this.bot(friendBot).handle)));
         const summary = this.grantSummary(rel.id).find((g: any) => g.granted_bot.bot_id === bot.id && g.grantee_bot.bot_id === friendBot && !g.reply_only);
         return {
           grant_id: listed?.grant_id ?? summary?.grant_id ?? this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id,
@@ -1283,7 +1329,7 @@ export class Platform {
       this.emit(b, "grant.changed", { relationship_id: rel.id, status: "granted", granted_bot: bot.id, grantee_bot: friendBot });
     }
 
-    const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.grantee.bot_id === friendBot || g.grantee.handle === "@" + this.bot(friendBot).handle);
+    const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.grantee.bot_id === friendBot || handleKey(g.grantee.handle) === handleKey(this.bot(friendBot).handle));
     const summary = this.grantSummary(rel.id).find((g: any) => g.granted_bot.bot_id === bot.id && g.grantee_bot.bot_id === friendBot && !g.reply_only);
     return {
       grant_id: listed?.grant_id ?? summary?.grant_id ?? this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id,
@@ -1428,7 +1474,7 @@ export class Platform {
   }
 
   private resolveOwnBot(ownerId: string, ref: string) {
-    const b = this.get("SELECT * FROM bots WHERE owner_id = ? AND (id = ? OR handle = ?)", ownerId, ref, String(ref).replace(/^@/, ""));
+    const b = this.get("SELECT * FROM bots WHERE owner_id = ? AND id = ?", ownerId, ref) ?? this.botByRef(ref, "owner_id = ?", [ownerId]);
     assert(b, 404, "bot_not_found", "no such bot on this account");
     return b;
   }
@@ -1768,7 +1814,7 @@ export class Platform {
     let bots: any[];
     if (p.kind === "bot") bots = [this.bot(p.botId)];
     else bots = this.all("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at", p.ownerId);
-    const selected = botId ? bots.find((b) => b.id === botId || "@" + b.handle === botId || b.handle === botId) : bots[0];
+    const selected = botId ? bots.find((b) => b.id === botId) ?? pickByHandle(bots, botId) : bots[0];
     if (botId && !selected) throw new ApiError(403, "forbidden", "not your bot");
     const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, ...lookOf(b), status: b.status }));
     if (!selected) return { bots: list, bot: null, friends: [], pending_incoming: [], pending_outgoing: [], others: [] };
@@ -2603,7 +2649,7 @@ export class Platform {
     const wrap = (bot: any, viaGrant?: any) => ({ bot, viaGrant });
     if (p.kind === "bot") {
       const extra = this.normalizeBotRefs(body);
-      if (extra.some((r) => r !== p.botId && r.replace(/^@/, "") !== this.bot(p.botId).handle)) throw new ApiError(403, "forbidden", "a bot token may only bring itself");
+      if (extra.some((r) => r !== p.botId && handleKey(r) !== handleKey(this.bot(p.botId).handle))) throw new ApiError(403, "forbidden", "a bot token may only bring itself");
       const b = this.bot(p.botId);
       assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
       return [wrap(b)];
@@ -2621,13 +2667,13 @@ export class Platform {
     const out: { bot: any; viaGrant?: any }[] = [];
     const mine = this.all("SELECT id FROM bots WHERE owner_id = ? AND status = 'active'", p.ownerId).map((b: any) => b.id);
     for (const ref of refs) {
-      const own = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), p.ownerId);
+      const own = this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, p.ownerId) ?? this.botByRef(ref, "owner_id = ?", [p.ownerId]);
       if (own) {
         assert(own.status === "active", 403, "bot_revoked", "this bot identity was revoked");
         if (!out.some((x) => x.bot.id === own.id)) out.push(wrap(own));
         continue;
       }
-      const other = this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", ref, String(ref).replace(/^@/, ""));
+      const other = this.get("SELECT * FROM bots WHERE id = ?", ref) ?? this.botByRef(ref);
       assert(other && other.status === "active", 404, "bot_not_found", `no bot matching ${ref} on this account`);
       const grant = this.accessGrantTo(p.ownerId, mine, other.id);
       assert(grant, 404, "bot_not_found", `no bot matching ${ref} on this account`);
@@ -2759,8 +2805,13 @@ export class Platform {
     let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR added_by_owner_id = ?)";
     const args: unknown[] = [roomId, ownerId, ownerId];
     if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
-    if (asBot) { sql += " AND (bot_id = ? OR handle = ?)"; args.push(asBot, asBot.startsWith("@") ? asBot : "@" + String(asBot).replace(/^@/, "")); }
-    const members = this.all(sql, ...args);
+    let members = this.all(sql, ...args);
+    if (asBot) {
+      const raw = handleRef(asBot);
+      const exact = members.filter((m: any) => m.bot_id === asBot || String(m.handle ?? "").replace(/^@/, "") === raw);
+      members = exact.length ? exact : members.filter((m: any) => handleKey(m.handle) === raw.toLowerCase());
+      if (!exact.length && members.length > 1) throw ambiguous(raw, members.length);
+    }
     if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
     return { ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
   }
@@ -3055,6 +3106,15 @@ export class Platform {
     return this.all("SELECT * FROM local_room_invite_claims WHERE ticket = ? AND released_at IS NULL ORDER BY claimed_at", invite.ticket)
       .map((c: any) => ({ owner_id: c.owner_id, bots: J(c.bots, []) as string[], claimed_at: c.claimed_at }));
   }
+  /** A room member named by handle: exact `@handle` first, else the unique case-insensitive match. */
+  private faceMemberByHandle(roomId: string, ref: unknown) {
+    const raw = handleRef(ref);
+    if (!raw) return undefined;
+    const rows = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND LOWER(handle) = ?", roomId, "@" + raw.toLowerCase());
+    if (rows.length > 1) throw ambiguous(raw, rows.length);
+    return rows[0];
+  }
+
   private localInviteClaimOf(invite: any, ownerId: string | null) {
     if (!invite || ownerId === null) return null;
     return this.localInviteClaims(invite).find((c) => c.owner_id === ownerId) ?? null;
@@ -3120,7 +3180,7 @@ export class Platform {
     else {
       const ref = String(body?.bot_id ?? body?.bot_handle ?? body?.handle ?? "").trim();
       inviter = ref
-        ? this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, ref.replace(/^@/, ""), ownerId)
+        ? this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, ownerId) ?? this.botByRef(ref, "owner_id = ?", [ownerId])
         : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type = 'flybot-member' ORDER BY created_at LIMIT 1", ownerId)
           ?? this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
     }
@@ -3171,7 +3231,7 @@ export class Platform {
     assert(refs.length <= LOCAL_INVITE_MAX_BOTS, 400, "invalid_request", `bots: at most ${LOCAL_INVITE_MAX_BOTS}`);
     const bots: any[] = [];
     for (const ref of refs) {
-      const b = this.get("SELECT * FROM bots WHERE (id = ? OR handle = ?) AND owner_id = ?", ref, String(ref).replace(/^@/, ""), ownerId);
+      const b = this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, ownerId) ?? this.botByRef(ref, "owner_id = ?", [ownerId]);
       // A home can only bring Bots it owns: a ticket is not authority over anyone else's identity.
       assert(b, 404, "bot_not_found", `no bot matching ${ref} on this account`);
       assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
@@ -3261,7 +3321,7 @@ export class Platform {
     if (invite.created_by_owner_id !== p.ownerId) throw new ApiError(403, "forbidden", "only the owner who made this link can end a claim on it");
     // The home's own handle, or the handle of a Bot that home brought: either names whose claim to end.
     const handle = String(homeRaw ?? "").trim().replace(/^@/, "");
-    const home = handle ? this.get("SELECT owner_id FROM bots WHERE handle = ?", handle) : null;
+    const home = handle ? this.botByRef(handle) ?? null : null;
     const claim = home ? this.localInviteClaimOf(invite, home.owner_id) : null;
     if (!claim) throw new ApiError(404, "claim_not_found", "no home joined with this link under that handle");
     this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", this.ts(), invite.ticket, claim.owner_id);
@@ -3358,7 +3418,14 @@ export class Platform {
     let leaving = viewer.members;
     const refs = this.normalizeBotRefs(body);
     if (refs.length) {
-      leaving = leaving.filter((m: any) => refs.some((r) => m.bot_id === r || m.handle === r || m.handle === "@" + String(r).replace(/^@/, "")));
+      for (const r of refs) {
+        const raw = handleRef(r);
+        if (leaving.some((m: any) => m.bot_id === r)) continue;
+        if (leaving.some((m: any) => String(m.handle ?? "").replace(/^@/, "") === raw)) continue;
+        const ci = leaving.filter((m: any) => handleKey(m.handle) === raw.toLowerCase());
+        if (ci.length > 1) throw ambiguous(raw, ci.length);
+      }
+      leaving = leaving.filter((m: any) => refs.some((r) => m.bot_id === r || handleKey(m.handle) === handleKey(r)));
       assert(leaving.length, 404, "bot_not_found", "none of those bots are in this room");
     }
     this.db.transaction(() => {
@@ -3386,7 +3453,8 @@ export class Platform {
     let botId: string | null = null;
     if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
       const ref = String(raw).trim();
-      const m = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (bot_id = ? OR handle = ?)", roomId, ref, "@" + ref.replace(/^@/, ""));
+      const m = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (bot_id = ? OR handle = ?)", roomId, ref, "@" + handleRef(ref))
+        ?? this.faceMemberByHandle(roomId, ref);
       assert(m, 400, "bot_not_in_room", "that Bot is not in this room now");
       botId = m.bot_id;
     }
@@ -3409,7 +3477,7 @@ export class Platform {
       400, "invalid_request", "roles must be an object of your Bots in this room: { \"@handle\": \"role\" | null }");
     const changes: [string, string | null][] = [];
     for (const [ref, value] of Object.entries(roles)) {
-      const m = viewer.members.find((x: any) => x.bot_id === ref || x.handle === "@" + String(ref).replace(/^@/, ""));
+      const m = viewer.members.find((x: any) => x.bot_id === ref) ?? pickByHandle(viewer.members, ref);
       assert(m, 404, "bot_not_found", `${ref} is not one of your Bots in this room`);
       assert(value === null || typeof value === "string", 400, "invalid_request", "a role is a string or null");
       changes.push([m.bot_id, value === null ? null : sanitizePeerName(value, "", FACE_ROOM_ROLE_MAX) || null]);
@@ -3515,7 +3583,7 @@ export class Platform {
     } else {
       const ownerId = this.requireOwner(p);
       b = want
-        ? this.get("SELECT * FROM bots WHERE id = ? OR handle = ?", want, want)
+        ? this.get("SELECT * FROM bots WHERE id = ?", want) ?? this.botByRef(want)
         : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
       assert(b, 404, "bot_not_found", "no such bot");
       assert(b.owner_id === ownerId, 403, "forbidden", "not your bot");
@@ -3542,7 +3610,7 @@ export class Platform {
     const me = this.presenceBot(p, body?.bot_id);
     let target: { toBot?: string; roomId?: string };
     if (to) {
-      const peer = this.get("SELECT * FROM bots WHERE (handle = ? OR id = ?) AND status = 'active'", to.replace(/^@/, ""), to);
+      const peer = this.get("SELECT * FROM bots WHERE id = ? AND status = 'active'", to) ?? this.botByRef(to, "status = 'active'");
       assert(peer, 404, "bot_not_found", "no such remote bot");
       // Same gate as sending, but a refused signal is not an audit event: it is not content and can repeat.
       assert(this.findActiveRelationship(me.id, peer.id), 403, "no_relationship", "no active relationship between these bots");

@@ -497,7 +497,7 @@ PAGES.bots = async (v) => {
   $$("[data-wh]", v).forEach((el) => loadWebhook(el, el.dataset.wh));
   $("#regbot").onclick = async () => {
     const form = $("#regbot").closest("details"); clearErrs(form); formErr($("#regout"), "");
-    const handle = $("#bh").value.trim().replace(/^@/, "");
+    const handle = $("#bh").value.trim().replace(/^@/, "").toLowerCase();
     if (fieldErr($("#bh"), handleError(handle))) return $("#bh").focus();
     const body = { handle, display_name: $("#bd").value.trim() || undefined, integration_type: "manual" };
     if ($("#bk").value.trim()) body.public_key = { alg: "Ed25519", kid: "key_1", value: $("#bk").value.trim() };

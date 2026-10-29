@@ -119,7 +119,18 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/connector-tokens", async (req) => ({ tokens: platform.listConnectorTokens(auth(req)) }));
   app.delete("/v1/connector-tokens/:id", async (req) => platform.revokeConnectorToken(auth(req), P(req).id));
   // Webhook via shell (so a secret header from an env var never passes through the model). Accepts connector or login owner tokens.
-  const myBotId = (p: Principal, id?: string) => { const bots = platform.listBots(p); const b = id ? bots.find((x: any) => x.id === id || "@" + x.handle === id || x.handle === id) : bots[0]; if (!b) throw new ApiError(404, "bot_not_found"); return b.id as string; };
+  // Same handle rule as the platform: exact spelling first, then the unique case-insensitive match.
+  const myBotId = (p: Principal, id?: string) => {
+    const bots = platform.listBots(p);
+    const raw = String(id ?? "").trim().replace(/^@/, "");
+    if (!id) { const first = bots[0]; if (!first) throw new ApiError(404, "bot_not_found"); return first.id as string; }
+    const exact = bots.find((x: any) => x.id === id) ?? bots.find((x: any) => String(x.handle).replace(/^@/, "") === raw);
+    const hits = exact ? [exact] : bots.filter((x: any) => String(x.handle).replace(/^@/, "").toLowerCase() === raw.toLowerCase());
+    if (hits.length > 1) throw new ApiError(409, "ambiguous_handle", `"${raw}" matches ${hits.length} Bots that differ only by case; name the exact handle`);
+    const b = hits[0];
+    if (!b) throw new ApiError(404, "bot_not_found");
+    return b.id as string;
+  };
   app.put("/v1/connector/webhook", async (req) => { const p = ownerAny(req); const b = B(req); return platform.setWebhook(p, myBotId(p, b.bot_id), { url: b.url, headers: b.headers }); });
   app.get("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.getWebhook(p, myBotId(p, Q(req).bot_id)); });
   app.post("/v1/connector/webhook/test", async (req) => { const p = ownerAny(req); return platform.testWebhook(p, myBotId(p, B(req).bot_id)); });
