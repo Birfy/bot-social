@@ -13,7 +13,7 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { ianaTimezone, isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, sanitizePeerName,
+  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerDisplayName, sanitizePeerName,
 } from "./face-rooms.js";
 import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
@@ -184,11 +184,17 @@ export class Platform {
     assert(o, 404, "owner_not_found");
     return o;
   }
-  /** `look` adds avatar/color. Opt-in per call site: only places where the viewer may already see the Bot
-   *  (own bots, active friends, grants, profile.read); never events, messages, invites or pending requests. */
+  /** Two different things here, and only one of them is opt-in.
+   *  `look` (avatar/color) is opt-in per call site: it is added only where the viewer may already see the Bot
+   *  (own bots, active friends, grants, profile.read).
+   *  `display_name` and `owner_display_name` are not opt-in: they are the peer's own names, written by the
+   *  peer's owner, and they reach every surface that names a peer — events, messages, invites, pending
+   *  requests and approval cards. They are cleaned here on read as well as on write, because rows written
+   *  before the write-side check (legacy SQLite rows are the likeliest) may still hold control characters,
+   *  an over-long name or an empty string. */
   private publicBot(b: any, look = false) {
     const o = this.owner(b.owner_id);
-    return { bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, owner_display_name: o.display_name, owner_verified: true, ...(look ? lookOf(b) : {}) };
+    return { bot_id: b.id, handle: "@" + b.handle, display_name: peerDisplayName(b.display_name, sanitizePeerName(b.handle)), owner_display_name: peerDisplayName(o.display_name, o.username), owner_verified: true, ...(look ? lookOf(b) : {}) };
   }
   private requireOwner(p: Principal): string {
     if (p.kind !== "owner") throw new ApiError(403, "owner_only", "this operation can only be performed by the owner");
@@ -222,11 +228,13 @@ export class Platform {
     assert(body?.username && /^[a-z0-9._-]{2,32}$/i.test(body.username), 400, "invalid_request", "username: 2-32 chars [a-z0-9._-]");
     assert(typeof body.password === "string" && body.password.length >= 6, 400, "invalid_request", "password must be >= 6 chars");
     assert(!this.get("SELECT 1 FROM owners WHERE username = ?", body.username), 409, "username_taken");
+    assert(body.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
+    const displayName = peerDisplayName(body.display_name, body.username);
     // Absent timezone keeps today's default; a supplied one must be a zone Intl can use (P5).
     const timezone = body.timezone ? this.validateTimezone(body.timezone) : "Asia/Shanghai";
     const id = newId("own");
     this.run("INSERT INTO owners (id, username, display_name, password_hash, timezone, created_at) VALUES (?,?,?,?,?,?)",
-      id, body.username, body.display_name || body.username, hashPassword(body.password), timezone, nowIso());
+      id, body.username, displayName, hashPassword(body.password), timezone, nowIso());
     this.audit.append(`owner:${id}`, "owner.registered", id, [id], { username: body.username });
     return { owner_id: id, owner_token: this.issueToken("owner", id) };
   }
@@ -380,6 +388,7 @@ export class Platform {
   /** Registers (or reactivates) a local FlyBot Bot as @<name>.<home>, its key custodied with the home. */
   addHomeMember(p: Principal, homeId: string, body: { name?: string; display_name?: string; local_id?: string; avatar?: string | null; color?: string | null }) {
     const ownerId = this.requireOwner(p);
+    assert(body?.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
     const home = this.ownHome(ownerId, homeId);
     const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     const room = 40 - home.handle.length - 1;
@@ -390,7 +399,7 @@ export class Platform {
     const existing = this.botByRef(handle);
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
-      this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", body?.display_name || existing.display_name, existing.id);
+      this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", peerDisplayName(body?.display_name, existing.display_name || handle), existing.id);
       this.applyLook(existing.id, look);
       return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
     }
@@ -741,8 +750,9 @@ export class Platform {
     assert(has("display_name") || has("avatar") || has("color"), 400, "invalid_request", "provide display_name, avatar and/or color");
     let name: string | undefined;
     if (has("display_name")) {
-      name = String(body.display_name).trim();
-      assert(name.length >= 1 && name.length <= 60, 400, "invalid_request", "display_name: 1-60 chars");
+      assert(typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
+      name = peerDisplayName(body.display_name, "");
+      assert(name.length >= 1, 400, "invalid_request", "display_name: 1-60 chars");
     }
     const avatar = has("avatar") ? validateAvatar(body.avatar) : undefined;
     const color = has("color") ? validateColor(body.color) : undefined;
@@ -768,11 +778,18 @@ export class Platform {
 
   updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean }) {
     const ownerId = this.requireOwner(p);
+    // A refused field must not leave the other fields of the same request written: validate first.
+    let displayName: string | undefined;
+    if (body?.display_name !== undefined) {
+      assert(typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
+      displayName = peerDisplayName(body.display_name, "");
+      assert(displayName.length >= 1, 400, "invalid_request", "display_name: 1-60 chars");
+    }
     // Validate before any write, so a bad zone cannot leave the rest of the patch behind it half-applied.
     const timezone = body.timezone ? this.validateTimezone(body.timezone) : undefined;
     if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms.map(String)), ownerId);
     if (timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId);
-    if (body.display_name) this.run("UPDATE owners SET display_name = ? WHERE id = ?", body.display_name, ownerId);
+    if (displayName !== undefined) this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId);
     if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
     this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], { fields: Object.keys(body) });
     return this.me(p);
@@ -794,6 +811,7 @@ export class Platform {
 
   registerBot(p: Principal, body: { handle: string; display_name?: string; avatar?: string | null; color?: string | null; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
     const ownerId = this.requireOwner(p);
+    assert(body?.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
     const handle = handleKey(body?.handle);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
     this.assertHandleFree(handle, ownerId);
@@ -812,7 +830,7 @@ export class Platform {
     const webhookSecret = randomToken("whs");
     this.db.transaction(() => {
       this.run("INSERT INTO bots (id, owner_id, handle, display_name, integration_type, webhook_url, webhook_secret, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        id, ownerId, handle, body.display_name || handle, body.integration_type || "rest", body.webhook_url ? validateUrl(body.webhook_url) : null, webhookSecret, nowIso());
+        id, ownerId, handle, peerDisplayName(body.display_name, handle), body.integration_type || "rest", body.webhook_url ? validateUrl(body.webhook_url) : null, webhookSecret, nowIso());
       this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", id, key!.kid, "Ed25519", key!.value, nowIso());
     })();
     const botToken = this.issueToken("bot", id);
