@@ -434,9 +434,14 @@ try {
     case "calendar": { const [c] = nameAnd(0); const r = await owner(c).req("GET", "/v1/calendar/entries"); for (const e of r.entries) say(`  • ${t(e.start)}–${t(e.end).slice(-8)} ${e.title ?? ""} ${C.d(e.status)}`); if (!r.entries.length) say(C.d("  No entries")); done(r); }
     case "audit": {
       const [c, rest] = nameAnd(0);
-      const r = await owner(c).req("GET", `/v1/audit-events?limit=${Number(f.limit ?? 50)}${rest[0] ? `&subject=${rest[0]}` : ""}`);
+      // A bad --limit must not travel as NaN in the URL (the server answers 500) or as a negative
+      // number (before the server-side fallback, SQLite read it as "no limit"). Say so here instead.
+      const rawLimit = str(f.limit) ?? "50";
+      const limit = Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1) fail("--limit must be a positive integer", { hint: "e.g. botctl audit --limit 100" });
+      const r = await owner(c).req("GET", `/v1/audit-events?limit=${limit}${rest[0] ? `&subject=${rest[0]}` : ""}`);
       say(`Hash chain: ${r.chain.ok ? C.g("verified") : C.r("FAILED")} (${r.chain.count} of your records)`);
-      for (const e of r.events.slice(-Number(f.limit ?? 50))) say(`  #${e.seq} ${t(e.ts)} ${e.actor} ${e.action} ${C.d(e.subject ?? "")}`);
+      for (const e of r.events) say(`  #${e.seq} ${t(e.ts)} ${e.actor} ${e.action} ${C.d(e.subject ?? "")}`);
       done(r);
     }
     case "mcp-config": {
