@@ -2204,7 +2204,9 @@ export class Platform {
     const id = newId("msg");
     const reasons = ["mvp.all_outbound_requires_approval", ...flags.map((f) => `dlp.${f.category}`)];
     // #49: one field says why this line is held; a client never has to read `reasons`.
-    const injectionSuspected = detectInjection(pl.text).suspected;
+    // The delivery path asks the same question over the same input (text + `structured`); a draft must not answer
+    // "nothing found" for content the recipient will receive marked `security.injection_suspected`.
+    const injectionSuspected = detectInjection([pl.text, pl.structured ? JSON.stringify(pl.structured) : ""].join("\n")).suspected;
     const holdReason = holdReasonOf({ riskFlags: flags, attachments: refs, injectionSuspected });
     const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
     // Only the two ends of this conversation can be mentioned in it.
