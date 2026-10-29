@@ -1147,7 +1147,11 @@ export class Platform {
     const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     if (!r) return [];
     const groups = new Map<string, any>();
-    for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL ORDER BY created_at, id", relId)) {
+    // Only unexpired rows: this is the internal summary behind `announceActivation`, the join response's
+    // `grants_ready` and `grantBotToFriend`, and it used to list a grant whose `expires_at` had already passed —
+    // `grantsFor`/`findGrant`/`listBotGrants` expired lazily but this aggregate did not. Strict `>`: an expiry
+    // equal to now is already over.
+    for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at, id", relId, nowIso())) {
       const key = `${g.grantor_owner}:${g.grantee_bot}`;
       const granted = this.bot(this.grantedBotOf(g, r));
       const grantee = this.bot(g.grantee_bot);
