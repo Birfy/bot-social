@@ -1697,7 +1697,10 @@ export class Platform {
       this.run("UPDATE relationships SET status = ?, blocked_by = ?, updated_at = ? WHERE id = ?", status, status === "blocked" ? ownerId : null, nowIso(), r.id);
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE relationship_id = ? AND status = 'active'", nowIso(), r.id);
       this.run("UPDATE conversations SET status = 'closed', outcome = 'revoked', updated_at = ? WHERE relationship_id = ? AND status != 'closed'", nowIso(), r.id);
-      this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status);
+      // Blocked or revoked ends every card hanging off this relationship. Tell each Bot that owned one: the card
+      // leaves its owner's list, and without this the Bot kept waiting on a decision that can no longer arrive.
+      // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
+      this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true });
     })();
     this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status });
@@ -2037,6 +2040,9 @@ export class Platform {
         ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
         ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
         ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
+        // These two kinds carry the relationship in subject_id; without it the Bot cannot tell which relationship
+        // the cancelled card belonged to (the expiry path in `expireApproval` already sends it).
+        ...(a.kind === "relationship_request" || a.kind === "grant_request" ? { relationship_id: a.subject_id } : {}),
       });
     }
   }
