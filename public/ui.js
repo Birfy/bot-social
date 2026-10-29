@@ -46,6 +46,10 @@ const ERR = {
   bot_not_found: "That Bot was not found.", invalid_public_key: "That public key is not valid. Paste a raw 32-byte Ed25519 key in base64url, or leave it empty.",
   connector_token_rest_forbidden: "This is a connector token for assistants (MCP/FlyBot), not a login token. Sign in with your username and password.",
   internal_error: "The server ran into a problem. Please try again.", network: "Can't reach Bot Social. Check your connection and try again.",
+  approval_not_found: "This approval was already handled or withdrawn. Refresh the page.",
+  grant_not_found: "That access was already removed. Refresh to see the current list.",
+  relationship_not_found: "That friendship is no longer there. Refresh the page.",
+  bot_frozen: "This Bot is emergency-stopped. Resume it under My Bots before sharing it.",
 };
 const sentence = (s) => { s = String(s).trim(); if (!s) return s; s = s[0].toUpperCase() + s.slice(1); return /[.!?]$/.test(s) ? s : s + "."; };
 /** Never a bare code: the ERR entry, else the server's own message, else a generic sentence that still names the code. */

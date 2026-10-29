@@ -10,6 +10,11 @@ test("errText: never a bare code; ERR entry, else server message, else a generic
   assert.equal(errText("invite_not_found", "invite_not_found", 404), "This invite does not exist or was revoked.");
   assert.equal(errText("invalid_request", "username: 2-32 chars [a-z0-9._-]", 400), "Username: 2-32 chars [a-z0-9._-].");
   assert.equal(errText("invalid_request", "password must be >= 6 chars", 400), "Password must be >= 6 chars.");
+  // #127: four codes that reach /ui get a sentence plus an action, never the generic fallback.
+  assert.equal(errText("approval_not_found", "approval_not_found", 404), "This approval was already handled or withdrawn. Refresh the page.");
+  assert.equal(errText("grant_not_found", "grant_not_found", 404), "That access was already removed. Refresh to see the current list.");
+  assert.equal(errText("relationship_not_found", "relationship_not_found", 404), "That friendship is no longer there. Refresh the page.");
+  assert.equal(errText("bot_frozen", "bot is frozen (emergency stop)", 403), "This Bot is emergency-stopped. Resume it under My Bots before sharing it.");
   // code-only errors and bare statuses get a sentence that still names the code
   assert.equal(errText("weird_code", "weird_code", 418), "Something went wrong (weird_code). Please try again.");
   assert.equal(errText(undefined, undefined, 502), "Something went wrong (502). Please try again.");
