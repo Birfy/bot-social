@@ -2227,7 +2227,12 @@ export class Platform {
     // that names a room the Bot is no longer in falls back to the friendship door above; it must not auto-deliver as
     // room context, and its stated reason must name the friendship door it really used.
     const byRoom = !!roomRel && refs.length === 0;
-    if ((autoChat || byRoom) && flags.length === 0 && !injectionSuspected) {
+    // This gate reads the reason the card already carries. holdReasonOf ranks its findings
+    // risk > attachment > policy > blanket_outbound (:40-45); only the last one is the owner's own default hold,
+    // the one thing auto-approve may lift. Every finding ranked above it — a DLP flag, an attachment, suspected
+    // injection — keeps the card. Do not re-list the findings here: the next one holdReasonOf learns would
+    // drift out of this branch again.
+    if ((autoChat || byRoom) && holdReason === "blanket_outbound") {
       this.decideApproval({ kind: "owner", ownerId }, aprId, { decision: "approved" }, byRoom ? "policy:room_context" : "policy:auto_approve");
       return { message_id: id, status: "delivered", approval_id: aprId, auto_approved: true, ...(byRoom ? { room_id: roomContext! } : {}), ...(typedByOwner ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: [byRoom ? "room.context" : "owner.auto_approve_chat", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
