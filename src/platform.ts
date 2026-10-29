@@ -1708,10 +1708,13 @@ export class Platform {
     return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.publicBot(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
   }
   private inviteStatus(i: any) {
-    if (i.status !== "active") return i.status;
+    // Stored terminal states win over the clock: a revoked or rejected invite never flips back to expired.
+    if (i.status !== "active" && i.status !== "pending_owner") return i.status;
+    // Both live states carry their own clock. A pending_owner invite whose approval is gone (or whose own window ran
+    // out) must read expired instead of "Awaiting your approval" forever.
     if (Date.parse(i.expires_at) < Date.now()) return "expired";
     if (i.uses >= i.max_uses) return "used";
-    return "active";
+    return i.status;
   }
 
   /** Create an invite link. Owner-created invites are active at once (creating it is the owner's consent);
@@ -1964,6 +1967,13 @@ export class Platform {
       this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
       if (d) this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
+    }
+    if (a.kind === "invite") {
+      // A Bot-created invite waits at status pending_owner for this approval. Expiring only the approval row left
+      // the link stuck: decide answered 409, the joining side read 410 pending_owner, and the Bot heard nothing.
+      // Only a still-waiting invite is expired, so an invite approved earlier is never flipped by a later sweep.
+      this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
+      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
     }
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
