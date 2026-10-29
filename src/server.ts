@@ -24,6 +24,13 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     app.log.error(err);
     return reply.status(500).send({ error: { code: "internal_error", message: "internal error" } });
   });
+  // An unknown path, or a real path with the wrong method, answers in the same { error: { code, message } }
+  // shape as every route. Fastify's default body ({"message","error","statusCode"}) carries no error.code,
+  // so the console (public/ui.js) and botctl show "Something went wrong (undefined)" instead of the refusal.
+  app.setNotFoundHandler((req, reply) => {
+    const path = String(req.url ?? "").split("?")[0];
+    return reply.status(404).send({ error: { code: "not_found", message: `no such route: ${req.method} ${path}` } });
+  });
 
   const auth = (req: FastifyRequest): Principal => {
     const h = req.headers.authorization;
