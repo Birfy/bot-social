@@ -1308,8 +1308,15 @@ export class Platform {
       friendships.push(...named);
     }
 
+    // A block is per Bot pair. Never let this shortcut create a fresh relationship around one:
+    // `requestRelationship` and `joinInvite` both refuse a blocked pair, and so must this.
+    const pairBotOf = (r: any) => (r.requester_owner === ownerId ? r.target_bot : r.requester_bot);
+    const blockedPair = (otherBot: string) => this.pairRelationships(bot.id, otherBot).some((r: any) => r.status === "blocked");
+    const usable = friendships.filter((r: any) => !blockedPair(pairBotOf(r)));
+    assert(usable.length > 0, 403, "blocked", "relationship is blocked");
+
     // Idempotent: already a live full share of this Bot to any of the friend's bots.
-    for (const rel of friendships) {
+    for (const rel of usable) {
       const myBot = rel.requester_owner === ownerId ? rel.requester_bot : rel.target_bot;
       const friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
       if (myBot !== bot.id) continue;
@@ -1331,13 +1338,13 @@ export class Platform {
     }
 
     // Prefer an existing relationship whose endpoint on our side is this Bot; else open one with the friend's bot from the newest friendship.
-    let rel = friendships.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
+    let rel = usable.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
     let friendBot: string;
     let createdRel = false;
     if (rel) {
-      friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
+      friendBot = pairBotOf(rel);
     } else {
-      const base = friendships[0];
+      const base = usable[0];
       friendBot = base.requester_owner === friendOwnerId ? base.requester_bot : base.target_bot;
       const existingPair = this.findActiveRelationship(bot.id, friendBot);
       if (existingPair) {
@@ -1639,13 +1646,18 @@ export class Platform {
       const other = this.bot(body.bot_id);
       const mine = body.my_bot_id ? this.ownBot(ownerId, body.my_bot_id) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", ownerId);
       assert(mine, 400, "invalid_request", "you have no bot");
-      r = this.pairRelationships(mine.id, other.id)[0];
-      if (!r) {
+      // A pair can hold several rows (the friendship and one room per shared room, newest first). Blocking a
+      // Bot must end every door between the two, not whichever row happens to be newest: a newer room row left
+      // the friendship active after "Block". The blocked friendship still makes requestRelationship refuse.
+      const rows = this.pairRelationships(mine.id, other.id);
+      if (!rows.length) {
         const id = newId("rel");
         this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, requested_caps, offered_caps, created_at, updated_at) VALUES (?,?,?,?,?,'none','[]','[]',?,?)`,
           id, mine.id, other.id, ownerId, other.owner_id, nowIso(), nowIso());
-        r = this.get("SELECT * FROM relationships WHERE id = ?", id);
+        rows.push(this.get("SELECT * FROM relationships WHERE id = ?", id));
       }
+      for (const row of rows) if (row.status !== "blocked") this.endRelationship(ownerId, row, "blocked");
+      return { relationship_id: rows[0].id, status: "blocked" };
     }
     this.endRelationship(ownerId, r, "blocked");
     return { relationship_id: r.id, status: "blocked" };
