@@ -91,6 +91,24 @@ export function sanitizePeerName(value: unknown, fallback = "", max = FACE_ROOM_
   return cleaned || fallback;
 }
 
+/**
+ * A display name is peer-written data, whether it is arriving from a caller or already sitting in a row.
+ * Clean it the same way in both directions: C0/C1 controls, U+2028/U+2029 and lone surrogates never reach a
+ * reader, whitespace collapses, and the length cap counts **code points** so a surrogate pair is never cut in
+ * half. The value is not coerced: a non-string yields the fallback, and each door decides what that means
+ * (a 400 on an update, the identity's own name on a create).
+ */
+export function peerDisplayName(value: unknown, fallback = "", max = FACE_ROOM_NAME_MAX): string {
+  if (typeof value !== "string") return fallback;
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "")
+    .replace(/@/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return [...cleaned].slice(0, max).join("") || fallback;
+}
+
 /** Six decimal digits, nothing else. Does not look up a room (no leak). */
 export function parseFaceCode(raw: unknown): string {
   const s = String(raw ?? "").trim();
