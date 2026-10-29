@@ -2060,6 +2060,12 @@ export class Platform {
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
       if (d) this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
     }
+    if (a.kind === "grant_request") {
+      // The request exists only as this approval: the grant row is created when the owner approves, so there is
+      // nothing else to sweep. Without this branch the card simply left the owner's pending list and the Bot that
+      // asked for the capability was never told; the peer owner is not the addressee (same as the invite, #104).
+      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
+    }
     if (a.kind === "invite") {
       // A Bot-created invite waits at status pending_owner for this approval. Expiring only the approval row left
       // the link stuck: decide answered 409, the joining side read 410 pending_owner, and the Bot heard nothing.
