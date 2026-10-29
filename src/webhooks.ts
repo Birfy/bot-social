@@ -108,7 +108,12 @@ export class WebhookPusher {
   private inflight = new Set<Promise<unknown>>();
   readonly opts: Required<WebhookOptions>;
   constructor(private db: Database.Database, private fetchImpl: typeof fetch, private baseUrl: () => string, opts: WebhookOptions = {}) {
-    this.opts = { debounceMs: 20_000, maxPerHour: 30, retryBaseMs: 2_000, maxAttempts: 4, timeoutMs: 10_000, allowPrivate: true, ...opts };
+    const { debounceMs: rawDebounceMs, maxPerHour: rawMaxPerHour, ...rest } = opts;
+    // Invalid env input (Number("abc") → NaN, negative, Infinity) must not silently disable the
+    // coalescing window or the hourly cap: keep valid values exactly, fall back to the defaults.
+    const debounceMs = typeof rawDebounceMs === "number" && Number.isFinite(rawDebounceMs) && rawDebounceMs >= 0 ? rawDebounceMs : 20_000;
+    const maxPerHour = typeof rawMaxPerHour === "number" && Number.isFinite(rawMaxPerHour) && rawMaxPerHour >= 1 ? rawMaxPerHour : 30;
+    this.opts = { debounceMs, maxPerHour, retryBaseMs: 2_000, maxAttempts: 4, timeoutMs: 10_000, allowPrivate: true, ...rest };
   }
 
   /** Queue an event for this bot's next push (no-op if the bot has no webhook). */
