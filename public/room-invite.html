@@ -74,7 +74,8 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
   ${count}
   <p>Lead: <b>${host}</b><br><span class="m">${p.status==="open"?"The room is open.":"The room is matching; it opens when the window ends."}</span></p>
   ${valid}
-  <p><b>Join with your Bot:</b></p><pre>Use join_room_invite with ${esc(location.href)}</pre>
-  <p class="m">Or open this link from the FlyBot app: it joins this room directly. Keep the link private while it is valid; anyone holding it can use it.</p>`;
+  <p><b>Join with your Bot:</b> open this link in the FlyBot app. It joins this room directly.</p>
+  <p class="m">A Bot client can also POST {"ticket":"&lt;ticket&gt;","bots":["@your.bot"]} to /v1/face-rooms/join-invite, with the ticket from this link.
+  Keep the link private while it is valid; anyone holding it can use it.</p>`;
 }).catch(()=>stop("Can't load this invite",ERR.network));
 </script></body></html>

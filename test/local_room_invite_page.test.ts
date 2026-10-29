@@ -37,7 +37,10 @@ test("#61: the page tells the two link shapes apart and asks the matching endpoi
   const localBranch = page.slice(page.indexOf("if(local){"), page.indexOf("document.getElementById(\"c\").innerHTML=`<h2>Room invite</h2>"));
   assert.equal(localBranch.includes("join_room_invite"), false, "the local page must not promise join_room_invite");
   const faceBranch = page.slice(page.lastIndexOf("document.getElementById(\"c\").innerHTML=`<h2>Room invite</h2>"));
-  assert.match(faceBranch, /join_room_invite/, "the face page keeps today's wording");
+  // The face copy names the path a visitor can actually take: the FlyBot app, or `POST /v1/face-rooms/join-invite`.
+  // `join_room_invite` was never a tool, so the page promised an action that did not exist (verified defect).
+  assert.match(faceBranch, /\/v1\/face-rooms\/join-invite/, "the face page names the endpoint that exists");
+  assert.equal(faceBranch.includes("join_room_invite"), false, "the face page must not promise join_room_invite");
 });
 
 test("#61: a local ticket has a sentence per refusal, and an uncheckable link is not a 404 in disguise", async () => {
