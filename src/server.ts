@@ -141,6 +141,12 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   // ---- owners
   app.post("/v1/owners", async (req, reply) => reply.status(201).send(platform.registerOwner(B(req))));
   app.post("/v1/auth/login", async (req) => platform.login(B(req)));
+  // Sign out this login token on the server too, not only in localStorage.
+  app.post("/v1/auth/logout", async (req) => {
+    const h = req.headers.authorization;
+    const p = auth(req);
+    return platform.logout(p, h?.startsWith("Bearer ") ? h.slice(7) : undefined);
+  });
   app.get("/v1/me", async (req) => platform.me(auth(req)));
   app.patch("/v1/me", async (req) => platform.updateSettings(auth(req), B(req)));
 
