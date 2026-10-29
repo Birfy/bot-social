@@ -1,11 +1,8 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { loadEnvFile } from "node:process";
-import { ensureBotctl } from "./botctl-build.js";
-
-// Config: env vars, or a botsocial.env file in the working directory (see botsocial.env.example).
-const envFile = process.env.BOTSOCIAL_ENV_FILE ?? "botsocial.env";
-if (existsSync(envFile)) loadEnvFile(envFile);
+// Load botsocial.env before any module that reads process.env at import time (policy.ts LIMITS does).
+import "./load-env.js";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { ensureBotctl } from "./botctl-build.js";
 import { Platform } from "./platform.js";
 import { loadKmsKey } from "./custody.js";
 import { buildServer } from "./server.js";
