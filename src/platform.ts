@@ -372,9 +372,31 @@ export class Platform {
     const home = this.ownHome(ownerId, homeId);
     const m = this.get("SELECT * FROM bots WHERE id = ? AND home_bot_id = ?", memberId, home.id) ?? this.botByRef(memberId, "home_bot_id = ?", [home.id]);
     assert(m, 404, "member_not_found");
-    this.run("UPDATE bots SET status = 'revoked' WHERE id = ?", m.id);
-    this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), m.id);
-    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id });
+    const conversations = this.all("SELECT DISTINCT conversation_id FROM messages WHERE sender_bot = ? AND status = 'pending_approval'", m.id)
+      .map((r: any) => r.conversation_id as string);
+    const rooms = this.all("SELECT * FROM face_room_members WHERE bot_id = ? AND left_at IS NULL", m.id);
+    let revokedInvites = 0;
+    this.db.transaction(() => {
+      // Stop the push first: a revoked identity must not keep receiving metadata through its webhook.
+      this.run("UPDATE bots SET status = 'revoked', webhook_url = NULL, webhook_headers = '[]', webhook_updated_at = ? WHERE id = ?", nowIso(), m.id);
+      this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), m.id);
+      // An invite for a Bot that no longer exists must not share it again. Pending owner approvals for those
+      // invites are cancelled by the bot_id below, with the member's other drafts.
+      revokedInvites = this.run("UPDATE invites SET status = 'revoked' WHERE bot_id = ? AND status IN ('active','pending_owner')", m.id).changes;
+      // A revoked identity must not keep in-flight drafts: the owner can otherwise approve one later and the
+      // platform would deliver a message as a Bot that no longer exists. `cancelPendingFor` cancels the
+      // approvals and marks their messages / actions / face-room drafts cancelled.
+      this.cancelPendingFor("bot_id = ?", [m.id], "member_revoked");
+      for (const id of conversations) this.refreshConversationStatus(id);
+      // A revoked identity must also leave the rooms it was in; otherwise it stays a visible member and the
+      // room keeps writing events (and countersignatures) for a Bot nobody can read.
+      for (const room of rooms) {
+        const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", room.room_id, m.id);
+        if (member) this.removeFaceMember(room.room_id, member);
+        this.endRoomGrantsForBots(room.room_id, [m.id]);
+      }
+    })();
+    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, rooms_left: rooms.length });
     return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
   }
 
@@ -1943,7 +1965,7 @@ export class Platform {
   }
 
   private approvalCard(a: any) {
-    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, expires_at: a.expires_at };
+    const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, decided_at: a.decided_at, sender: a.bot_id ? this.publicBot(this.bot(a.bot_id)) : undefined, expires_at: a.expires_at };
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       const pl = J(m.payload);
@@ -1988,7 +2010,18 @@ export class Platform {
     const a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     assert(a, 404, "approval_not_found");
     assert(a.owner_id === ownerId, 403, "forbidden", "not your approval");
-    assert(a.status === "pending", 409, "invalid_state", `approval is ${a.status}`);
+    // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
+    // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
+    const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
+    if (a.status !== "pending") {
+      throw new ApiError(409, "invalid_state", a.status === "cancelled" && a.decision === "member_revoked" ? revokedReason : `approval is ${a.status}`);
+    }
+    // Last line of defence for a stale row an older build left pending after its sender was revoked. Cancel it
+    // now (same record the revoke leaves behind) instead of delivering as a Bot that no longer exists.
+    if (a.bot_id && ["outbound_message", "face_room_message", "action"].includes(a.kind) && this.bot(a.bot_id).status !== "active") {
+      this.cancelPendingFor("id = ?", [a.id], "member_revoked");
+      throw new ApiError(409, "invalid_state", revokedReason);
+    }
     const decision = body?.decision;
     assert(["approved", "approved_with_edits", "rejected"].includes(decision), 400, "invalid_request", "decision must be approved|approved_with_edits|rejected");
     const approve = decision !== "rejected";

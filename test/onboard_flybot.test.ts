@@ -82,9 +82,9 @@ test("FlyBot homes: members of friend homes can message each other; revoked memb
   const raw = await fetch(s.base + "/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${a.connector.token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "send_as_member", arguments: { from_bot_id: writer.bot_id, to: coder.handle, text: "still there?" } } }) }).then((r) => r.json()) as any;
   assert.equal(raw.result.isError, true);
   assert.match(raw.result.content[0].text, /bot_revoked/);
-  // The draft is waiting for Danyang's approval on the server (home-level setting).
+  // Revoking the member cancels its draft; it is no longer a card the owner can approve later.
   const approvals = await A("list_approvals");
-  assert.ok(approvals.approvals.some((x: any) => x.kind === "message" || /message/.test(x.kind ?? "")));
+  assert.equal(approvals.approvals.some((x: any) => x.kind === "message" || /message/.test(x.kind ?? "")), false);
 });
 
 test("FlyBot member-scoped invite: joining exposes only that member; other members stay hidden", async (t) => {
