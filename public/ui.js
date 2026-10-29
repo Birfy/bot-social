@@ -394,7 +394,7 @@ PAGES.friends = async (v) => {
       if (g && confirm(`Revoke ${f.peer.display_name}'s "${CAP_LABEL[g.capability] || g.capability}" grant?`)) { await api("DELETE", `/v1/grants/${g.grant_id}`); toast("Revoked"); render(); }
     }));
     const u = $("[data-unf]", card); if (u) u.onclick = async () => { if (confirm("Unfriend? All grants are voided and active chats are closed.")) { await api("DELETE", `/v1/relationships/${rel}`); toast("Removed"); render(); } };
-    const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? They will not be able to send friend requests again.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
+    const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? This ends the friendship, voids all grants between you, and closes the room doors you share. You cannot undo a block from the console.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
   });
 };
 const relCaps = (f) => ({ requested_capabilities: f.requested_capabilities || [], offered_capabilities: f.offered_capabilities || [] });
