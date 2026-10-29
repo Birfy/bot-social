@@ -1978,12 +1978,23 @@ export class Platform {
     return id;
   }
 
-  private cancelPendingFor(where: string, args: unknown[], reason: string) {
-    for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND ${where}`, ...args)) {
+  private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean } = {}) {
+    // `keep` is one extra condition on the rows to cancel: a row it excludes (the caller spells that as a NOT) keeps
+    // both its pending status and the side effect on its subject row, so the card stays decidable.
+    const keepSql = opts.keep ? ` AND ${opts.keep.where}` : "";
+    const keepArgs = opts.keep ? opts.keep.args : [];
+    for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND ${where}${keepSql}`, ...args, ...keepArgs)) {
       this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
       if (a.kind === "outbound_message") this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
+      // A cancelled card is never silent: the Bot that owned it hears the outcome and the reason it can show.
+      if (opts.notify && a.bot_id) this.emit(a.bot_id, "approval.decided", {
+        approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
+        ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
+        ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
+        ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
+      });
     }
   }
 
@@ -1997,7 +2008,10 @@ export class Platform {
         this.emit(m.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
       }
     }
-    if (a.kind === "action") this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
+    if (a.kind === "action") {
+      this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
+      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
+    }
     if (a.kind === "face_room_message") {
       this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
@@ -2133,15 +2147,26 @@ export class Platform {
     return { c, peer: c.initiator_bot === botId ? c.peer_bot : c.initiator_bot };
   }
 
-  private assertConvActive(c: any) {
+  /** Close a conversation whose own clock ran out: the same write the assert used to do inline, without throwing.
+   *  Callers that may still act on a closed conversation (an invite acceptance) read the closed state off the row. */
+  private materializeExpiry(c: any) {
     if (c.expires_at && Date.parse(c.expires_at) < Date.now() && c.status !== "closed") {
       this.run("UPDATE conversations SET status = 'closed', outcome = 'expired', updated_at = ? WHERE id = ?", nowIso(), c.id);
-      throw new ApiError(409, "conversation_closed", "conversation expired");
+      c.status = "closed";
+      c.outcome = "expired";
     }
-    assert(c.status !== "closed", 409, "conversation_closed", `conversation is closed (${c.outcome})`);
-    // paused_limit is from before the turn limit was removed: such a chat simply resumes on its next use.
+  }
+
+  /** Refuse only a chat an owner stopped; a closed chat is not a pause, and a pre-removal paused_limit resumes on use. */
+  private assertNotPaused(c: any) {
     if (c.status === "paused_limit") this.resumeConversation(c, "platform", { reason: "turn_limit_removed" });
-    else assert(["open", "awaiting_approval"].includes(c.status), 409, "conversation_paused", `conversation is ${c.status}`);
+    else assert(!["paused_loop", "paused_stop"].includes(c.status), 409, "conversation_paused", `conversation is ${c.status}`);
+  }
+
+  private assertConvActive(c: any) {
+    this.materializeExpiry(c);
+    assert(c.status !== "closed", 409, "conversation_closed", `conversation is closed (${c.outcome})`);
+    this.assertNotPaused(c);
   }
 
   private policyDecision(actor: string, convId: string | null, owners: string[], action: string, decision: string, reasons: string[], extra: Record<string, unknown> = {}) {
@@ -2438,7 +2463,16 @@ export class Platform {
     assert(["agreed", "declined", "abandoned"].includes(outcome), 400, "invalid_request", "outcome must be agreed|declined|abandoned");
     assert(c.status !== "closed", 409, "conversation_closed");
     this.run("UPDATE conversations SET status = 'closed', outcome = ?, summary = ?, updated_at = ? WHERE id = ?", outcome, summary, nowIso(), convId);
-    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed");
+    // The invitee's decision about this chat's booking outlives the chat, so that one draft is kept; the subquery is
+    // narrowed to this same conversation so an accept drafted in another chat is never exempted. Everything else is
+    // cancelled, and each cancellation is announced to the Bot that owned the card.
+    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", {
+      keep: {
+        where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE conversation_id = ? AND action_type = 'calendar.accept_invite'))",
+        args: [convId],
+      },
+      notify: true,
+    });
     this.audit.append(actor, "conversation.closed", convId, owners, { outcome, summary });
     // The summary was written by the Bot (or the owner) that closed the chat, so for the other side it is peer
     // content: it travels inside `untrusted_content` under `trust: "peer_untrusted"`, like every other peer text
@@ -2499,15 +2533,27 @@ export class Platform {
     const peerB = this.bot(peer);
     const owners = [ownerId, peerB.owner_id];
     this.activeRelationship(botId, peer);
-    this.assertConvActive(c);
     const pl: any = env.payload ?? {};
     const def = ACTIONS[pl.action_type];
+    const isAccept = pl.action_type === "calendar.accept_invite";
     const intent = J(c.intent);
-    if (!def || !intent.allowed_capabilities.includes(def.capability)) {
+    const params = pl.params ?? {};
+    let acceptInvite: any = null;
+    if (isAccept) {
+      // A booked invitation outlives the chat it was made in: an agreed or expired conversation may still accept it,
+      // and the initiator's allowed_capabilities list is not the invitee's veto. The booking is looked up first so a
+      // missing invite stays the 404 it always was, and only a paused chat refuses the draft.
+      acceptInvite = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, ownerId);
+      assert(acceptInvite, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
+      this.materializeExpiry(c);
+      this.assertNotPaused(c);
+    } else {
+      this.assertConvActive(c);
+    }
+    if (!def || (!isAccept && !intent.allowed_capabilities.includes(def.capability))) {
       this.policyDecision(botId, convId, owners, "action.draft", "deny", ["intent_scope_violation"], { action_type: pl.action_type });
       throw new ApiError(403, "intent_scope_violation", `action ${pl.action_type} not allowed in ${intent.type} conversation`);
     }
-    const params = pl.params ?? {};
     const tz = this.owner(ownerId).timezone;
     let summary: string;
     if (pl.action_type === "calendar.book") {
@@ -2518,9 +2564,7 @@ export class Platform {
       params.attendees = att;
       summary = `Book ${isoInTz(s, tz).slice(0, 16).replace("T", " ")}–${isoInTz(e, tz).slice(11, 16)} (${tz}) and invite @${peerB.handle}?`;
     } else {
-      const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, ownerId);
-      assert(inv, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
-      summary = `Accept @${peerB.handle}'s meeting invite at ${isoInTz(Date.parse(inv.start), tz).slice(0, 16).replace("T", " ")} (${tz})?`;
+      summary = `Accept @${peerB.handle}'s meeting invite at ${isoInTz(Date.parse(acceptInvite.start), tz).slice(0, 16).replace("T", " ")} (${tz})?`;
     }
     const dlpFlags = this.dlp(ownerId, { text: [params.title, pl.justification].filter(Boolean).join(" ") });
     assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "DLP blocked this action draft");
