@@ -186,3 +186,32 @@ test("presence is memory only: no events, audit rows or approvals come from it",
   const inbox = await B("list_inbox", { bot_id: coder.bot_id, peek: true });
   assert.ok(!inbox.events.some((e: any) => /presence|thinking/.test(JSON.stringify(e))));
 });
+
+test("a removed Bot is reported as revoked, not as an emergency-stopped one", async (t) => {
+  const { s, a, B, chief, coder, alice2 } = await homes(t);
+  void B;
+  const ownerTok = (await post(s.base, "/v1/auth/login", { username: a.username, password: a.generated_password })).body.owner_token as string;
+  const p = s.platform;
+  const A = { kind: "owner" as const, ownerId: a.owner_id };
+
+  // Control: the kill switch still answers as frozen on both presence routes.
+  await req(s.base, "POST", "/v1/emergency-stop", ownerTok, { bot_id: alice2.bot_id });
+  const frozenSet = await req(s.base, "PUT", "/v1/presence", ownerTok, { bot_id: alice2.bot_id, state: "thinking", to: coder.handle });
+  assert.equal(frozenSet.status, 403);
+  assert.equal(frozenSet.body.error.code, "bot_frozen");
+  const frozenList = await req(s.base, "GET", `/v1/presence?bot_id=${alice2.bot_id}`, ownerTok);
+  assert.equal(frozenList.status, 403);
+  assert.equal(frozenList.body.error.code, "bot_frozen");
+
+  // A Bot removed from its home is revoked, and presence says so instead of offering a Resume.
+  p.removeHomeMember(A, a.home.bot_id, chief.bot_id);
+  assert.equal(p.bot(chief.bot_id).status, "revoked");
+  const set = await req(s.base, "PUT", "/v1/presence", ownerTok, { bot_id: chief.bot_id, state: "thinking", to: coder.handle });
+  assert.equal(set.status, 403);
+  assert.equal(set.body.error.code, "bot_revoked");
+  assert.match(set.body.error.message, /revoked/);
+  const list = await req(s.base, "GET", `/v1/presence?bot_id=${chief.bot_id}`, ownerTok);
+  assert.equal(list.status, 403);
+  assert.equal(list.body.error.code, "bot_revoked");
+  assert.match(list.body.error.message, /revoked/);
+});
