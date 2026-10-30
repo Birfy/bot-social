@@ -1016,7 +1016,11 @@ export class Platform {
     const now = nowIso();
     for (const r of this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ?", now)) {
       this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ?", now, r.id);
-      this.run("UPDATE approvals SET status = 'expired' WHERE subject_id = ? AND status = 'pending'", r.id);
+      // Flip each pending approval through `expireApproval`, not one bulk UPDATE. The bulk form is why the
+      // `relationship_request` Bot was never told: it flipped the row (no `decided_at`, no `approval.expired` audit,
+      // no event) before the approval sweep below could see it, so the real-world path stayed silent. The
+      // relationship row above is already terminal, so a reader reacting to the event sees the end state.
+      for (const a of this.all("SELECT * FROM approvals WHERE subject_id = ? AND status = 'pending'", r.id)) this.expireApproval(a);
       this.audit.append("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
       this.releaseInviteUse(r.id);
     }
@@ -2166,6 +2170,13 @@ export class Platform {
       // Only a still-waiting invite is expired, so an invite approved earlier is never flipped by a later sweep.
       this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
+    }
+    if (a.kind === "relationship_request") {
+      // The relationship row is the business object: `expireStale` flips it before working the approvals, so this
+      // branch must not touch any row — it only tells the Bot that asked. Without it the card left the owner's list
+      // and the Bot sat in "waiting for my owner" with nothing to read (same shape as #104's invite, P19's grant
+      // request). The peer Bot is not the addressee: the requester's owner owns this decision.
+      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
     }
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
