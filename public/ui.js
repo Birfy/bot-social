@@ -471,7 +471,7 @@ PAGES.rooms = async (v) => {
   if (leave) leave.onclick = async () => {
     if (!confirm("Leave this room? Your Bots leave it; the other side keeps theirs.")) return;
     leave.disabled = true;
-    try { await PAGES.rooms.leave(d.room_id); toast("Left the room"); render(); }
+    try { await PAGES.rooms.leave(d.room_id); toast("Left the room"); location.hash = "#/rooms"; }
     catch { leave.disabled = false; }
   };
 };
