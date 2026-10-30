@@ -13,7 +13,7 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { ianaTimezone, isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerDisplayName, sanitizePeerName,
+  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerBotName, peerDisplayName, peerOwnerName, sanitizePeerName,
 } from "./face-rooms.js";
 import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
@@ -203,7 +203,7 @@ export class Platform {
    *  an over-long name or an empty string. */
   private publicBot(b: any, look = false) {
     const o = this.owner(b.owner_id);
-    return { bot_id: b.id, handle: "@" + b.handle, display_name: peerDisplayName(b.display_name, sanitizePeerName(b.handle)), owner_display_name: peerDisplayName(o.display_name, o.username), owner_verified: true, ...(look ? lookOf(b) : {}) };
+    return { bot_id: b.id, handle: "@" + b.handle, display_name: peerBotName(b), owner_display_name: peerOwnerName(o), owner_verified: true, ...(look ? lookOf(b) : {}) };
   }
   private requireOwner(p: Principal): string {
     if (p.kind !== "owner") throw new ApiError(403, "owner_only", "this operation can only be performed by the owner");
@@ -2048,7 +2048,7 @@ export class Platform {
     else bots = this.all("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at", p.ownerId);
     const selected = botId ? bots.find((b) => b.id === botId) ?? pickByHandle(bots, botId) : bots[0];
     if (botId && !selected) throw new ApiError(403, "forbidden", "not your bot");
-    const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: b.display_name, ...lookOf(b), status: b.status }));
+    const list = bots.map((b) => ({ bot_id: b.id, handle: "@" + b.handle, display_name: peerBotName(b), ...lookOf(b), status: b.status }));
     if (!selected) return { bots: list, bot: null, friends: [], pending_incoming: [], pending_outgoing: [], others: [] };
     this.expireStale();
     const rows = this.all("SELECT * FROM relationships WHERE (requester_bot = ? OR target_bot = ?) AND status != 'room' ORDER BY updated_at DESC", selected.id, selected.id);
@@ -2075,7 +2075,7 @@ export class Platform {
       };
     });
     return {
-      bots: list, bot: { bot_id: selected.id, handle: "@" + selected.handle, display_name: selected.display_name, ...lookOf(selected), status: selected.status, owner_display_name: this.owner(selected.owner_id).display_name },
+      bots: list, bot: { bot_id: selected.id, handle: "@" + selected.handle, display_name: peerBotName(selected), ...lookOf(selected), status: selected.status, owner_display_name: peerOwnerName(this.owner(selected.owner_id)) },
       friends: items.filter((i) => i.status === "active"),
       pending_incoming: items.filter((i) => i.direction === "incoming" && ["pending_target", "pending_requester_owner"].includes(i.status)),
       pending_outgoing: items.filter((i) => i.direction === "outgoing" && ["pending_target", "pending_requester_owner"].includes(i.status)),
@@ -2929,8 +2929,10 @@ export class Platform {
   /** `look` adds the Bot's current avatar/color. Only used for the member list of a room the viewer belongs to;
    *  events (persisted, replayed and delivered as inbox items) never carry the avatar. */
   private faceMemberPublic(m: any, look = false) {
-    const display_name = sanitizePeerName(m.display_name, "Bot");
-    const owner_name = sanitizePeerName(m.owner_name, "Owner");
+    // The member row holds the names as they were when it joined; a row written before #106 may hold controls,
+    // U+2028, a leading @ or more than 60 code points, so clean it on read by the same rule as `publicBot`.
+    const display_name = peerDisplayName(m.display_name, "Bot");
+    const owner_name = peerDisplayName(m.owner_name, "Owner");
     return {
       handle: m.handle, display_name, owner_name,
       label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
@@ -2940,8 +2942,8 @@ export class Platform {
   }
   private faceSnapshot(b: any) {
     const o = this.owner(b.owner_id);
-    const display_name = sanitizePeerName(b.display_name, sanitizePeerName(String(b.handle).replace(/^@/, ""), "Bot"));
-    const owner_name = sanitizePeerName(o.display_name, sanitizePeerName(o.username, "Owner"));
+    const display_name = peerBotName(b, "Bot");
+    const owner_name = peerOwnerName(o, "Owner");
     return {
       bot_id: b.id, handle: "@" + String(b.handle).replace(/^@/, ""), display_name, owner_name,
       label: memberLabel(display_name, owner_name),
@@ -3234,7 +3236,7 @@ export class Platform {
     const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
     return {
       room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at, closed_at: room.closed_at,
-      created_by: creatorOwner ? { owner_name: sanitizePeerName(creatorOwner.display_name, sanitizePeerName(creatorOwner.username, "Owner")) } : null,
+      created_by: creatorOwner ? { owner_name: peerOwnerName(creatorOwner, "Owner") } : null,
       created_by_me: Boolean(creator && viewer.ownerId === creator),
       ...this.faceLeadFields(roomId),
       members, event_cursor: events.length ? events[events.length - 1].event_cursor : after, events,
@@ -3407,7 +3409,10 @@ export class Platform {
     this.faceRecordAttempt(null, ip, "invite", refusal ? refusal.code : "preview");
     if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite!.room_id);
-    const lead = this.faceLeadOf(room).effective;
+    const leadRow = this.faceLeadOf(room).effective;
+    // The preview answers with exactly the three keys it has always returned; only the two labels are cleaned,
+    // the same way `publicBot` cleans them. A read-side name fix, not a change to the response shape.
+    const lead = leadRow ? { ...leadRow, display_name: peerDisplayName(leadRow.display_name, "Bot"), owner_name: peerDisplayName(leadRow.owner_name, "Owner") } : null;
     const memberCount = this.get("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL", room.id).n as number;
     return {
       room_id: room.id,
@@ -3776,7 +3781,7 @@ export class Platform {
       rooms: rows.map((r: any) => ({
         room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
         my_bots: this.all("SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND (m.owner_id = ? OR m.added_by_owner_id = ?) AND m.left_at IS NULL", r.id, ownerId, ownerId)
-          .map((m: any) => ({ handle: m.handle, display_name: m.display_name, ...lookOf(m) })),
+          .map((m: any) => ({ handle: m.handle, display_name: peerDisplayName(m.display_name, "Bot"), ...lookOf(m) })),
       })),
     };
   }

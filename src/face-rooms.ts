@@ -109,6 +109,20 @@ export function peerDisplayName(value: unknown, fallback = "", max = FACE_ROOM_N
   return [...cleaned].slice(0, max).join("") || fallback;
 }
 
+/**
+ * The label a Bot is shown by on every read surface: its own name, else the fallback, else the cleaned handle.
+ * One function so a row written before #106 is cleaned by the same rule wherever a reader meets it — a name is a
+ * single-line label and is **not** fenced (fencing would change how every consumer reads it).
+ */
+export function peerBotName(b: { display_name?: unknown; handle?: unknown } | null | undefined, fallback = ""): string {
+  return peerDisplayName(b?.display_name, sanitizePeerName(b?.handle, fallback));
+}
+
+/** The owner label that travels next to a Bot (a friend card, a face-room seat), cleaned by the same rule. */
+export function peerOwnerName(o: { display_name?: unknown; username?: unknown } | null | undefined, fallback = ""): string {
+  return peerDisplayName(o?.display_name, sanitizePeerName(o?.username, fallback));
+}
+
 /** Six decimal digits, nothing else. Does not look up a room (no leak). */
 export function parseFaceCode(raw: unknown): string {
   const s = String(raw ?? "").trim();
