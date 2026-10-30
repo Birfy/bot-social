@@ -32,10 +32,9 @@ test("the owner's own typed 'Hi', sent again and again, is never paused by loop 
     const sent = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "Hi", typed_by_owner: true });
     assert.equal(sent.error, undefined, JSON.stringify(sent.error));
     assert.equal(sent.typed_by_owner, true);
-    assert.equal(sent.message.status, "pending_approval", `send ${i + 1}`);
+    assert.equal(sent.message.status, "delivered", `send ${i + 1}`);
     if (cid) assert.equal(sent.conversation_id, cid, "same chat, never paused");
     cid = sent.conversation_id;
-    await approve(a.owner_id, sent.message.approval_id);
   }
   const conv = await A("get_conversation", { conversation_id: cid });
   assert.equal(conv.status, "open");
@@ -49,7 +48,6 @@ test("owner-typed pleasantries in a row are not a loop either", async (t) => {
     const sent = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text, typed_by_owner: true });
     assert.equal(sent.error, undefined, JSON.stringify(sent.error));
     cid = sent.conversation_id;
-    await approve(a.owner_id, sent.message.approval_id);
   }
   assert.equal((await A("get_conversation", { conversation_id: cid })).status, "open");
 });
@@ -64,5 +62,5 @@ test("a Bot-written repeat still pauses the chat; the owner's next typed line op
   const typed = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "Hi", typed_by_owner: true });
   assert.equal(typed.error, undefined, JSON.stringify(typed.error));
   assert.notEqual(typed.conversation_id, first.conversation_id);
-  assert.equal(typed.message.status, "pending_approval");
+  assert.equal(typed.message.status, "delivered");
 });

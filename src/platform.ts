@@ -2354,12 +2354,32 @@ export class Platform {
     // #49: one field says why this line is held; a client never has to read `reasons`.
     // The delivery path asks the same question over the same input (text + `structured`); a draft must not answer
     // "nothing found" for content the recipient will receive marked `security.injection_suspected`.
-    const injectionSuspected = detectInjection([pl.text, pl.structured ? JSON.stringify(pl.structured) : ""].join("\n")).suspected;
+    const injection = detectInjection([pl.text, pl.structured ? JSON.stringify(pl.structured) : ""].join("\n"));
+    const injectionSuspected = injection.suspected;
     const holdReason = holdReasonOf({ riskFlags: flags, attachments: refs, injectionSuspected });
     const files = refs.length ? ` [${refs.length} file${refs.length > 1 ? "s" : ""}: ${refs.map((r) => `${r.name} (${humanSize(r.size)})`).join(", ")}]` : "";
     // Only the two ends of this conversation can be mentioned in it.
     const ends = ["@" + String(this.bot(botId).handle).replace(/^@/, "").toLowerCase(), "@" + String(peerB.handle).replace(/^@/, "").toLowerCase()];
     const kept = mentions.filter((h) => ends.includes(h));
+    // #139: a line the owner typed themselves does not wait for that same owner again. Four things must hold at
+    // once: the owner attestation, a clean DLP scan, no attachments and no suspected injection. Anything else keeps
+    // today's card: this narrows `mvp.all_outbound_requires_approval` to Bot-drafted outbound, it never lifts a
+    // finding. Room-context sends keep their existing door/auto path (#45/#57), hence `roomContext === null` here.
+    if (typedByOwner && roomContext === null && flags.length === 0 && refs.length === 0 && !injectionSuspected) {
+      const payload = { kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false };
+      const row = { id, conversation_id: convId, sender_bot: botId, recipient_bot: peer, envelope: JSON.stringify(env), typed_by_owner: 1, mentions: kept.length ? JSON.stringify(kept) : null };
+      const delivered = this.deliveredEvent(row, c, payload, injection);
+      this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, delivered_payload, status, risk_flags, injection, expects_reply, approval_id, created_at, created_ms, delivered_at, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        id, convId, botId, peer, row.envelope, JSON.stringify(payload), JSON.stringify(payload), "delivered", "[]", JSON.stringify(injection), payload.expects_reply ? 1 : 0, null, String(delivered.delivered_at), Date.now(), String(delivered.delivered_at), 1, row.mentions);
+      this.run("UPDATE conversations SET turn_count = ?, updated_at = ? WHERE id = ?", c.turn_count + 1, nowIso(), convId);
+      this.emit(peer, "message.received", delivered);
+      this.policyDecision(botId, convId, owners, "message.draft", "allow", ["owner.typed_by_owner", "dlp.clean"], { message_id: id, typed_by_owner: true });
+      // The owner's audit page shows why this line needed no approval: the owner wrote it. Actor is the owner, not
+      // the Bot (`message.drafted` stays `bot:<id>` for every card).
+      this.audit.append(`owner:${ownerId}`, "owner_typed_message_delivered", id, owners, { conversation_id: convId, recipient_bot: peer, dlp_version: POLICY_VERSION, text_length: pl.text.length });
+      this.audit.append("platform", "message.delivered", id, owners, { conversation_id: convId, turn: c.turn_count + 1, edited: false, injection_suspected: false, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig, typed_by_owner: true });
+      return { message_id: id, status: "delivered", approval_id: undefined, typed_by_owner: true, ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.typed_by_owner", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
+    }
     const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs, undefined, holdReason);
     this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
@@ -2428,6 +2448,30 @@ export class Platform {
     return { message_id: m.id, status: "not_delivered", reason };
   }
 
+  /**
+   * The one description of a delivered message. An approved card and an owner-typed direct send (#139) must produce
+   * the same recipient event, countersignature included, so the shape lives here and nowhere else.
+   */
+  private deliveredEvent(m: any, c: any, payload: any, inj: { suspected: boolean; matches: string[] }, edited = false) {
+    const sender = this.bot(m.sender_bot);
+    const env = J(m.envelope);
+    const intent = J(c.intent);
+    const delivered: Record<string, unknown> = {
+      message_id: m.id, conversation_id: c.id, intent: { type: intent.type, summary: intent.summary },
+      from: this.publicBot(sender), trust: "peer_untrusted",
+      untrusted_content: { text: payload.text, structured: payload.structured ?? null },
+      ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
+      expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
+      ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
+      ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}),
+      security: { injection_suspected: inj.suspected }, turn: { count: c.turn_count + 1, max: null },
+      sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
+      platform_kid: this.platformKid, delivered_at: nowIso(),
+    };
+    delivered.platform_countersig = this.countersign(delivered);
+    return delivered;
+  }
+
   private deliverMessage(a: any, body: any) {
     const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
     const c = this.conv(m.conversation_id);
@@ -2462,21 +2506,7 @@ export class Platform {
     }
     const inj = detectInjection([payload.text, payload.structured ? JSON.stringify(payload.structured) : ""].join("\n"));
     const turn = c.turn_count + 1;
-    const env = J(m.envelope);
-    const intent = J(c.intent);
-    const delivered: Record<string, unknown> = {
-      message_id: m.id, conversation_id: c.id, intent: { type: intent.type, summary: intent.summary },
-      from: this.publicBot(sender), trust: "peer_untrusted",
-      untrusted_content: { text: payload.text, structured: payload.structured ?? null },
-      ...(Array.isArray(payload.attachments) && payload.attachments.length ? { attachments: payload.attachments } : {}),
-      expects_reply: payload.expects_reply !== false, approved_by_owner: true, edited_by_owner: !!edited,
-      ...(m.typed_by_owner ? { typed_by_owner: true } : {}),
-      ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}),
-      security: { injection_suspected: inj.suspected }, turn: { count: turn, max: null },
-      sender_envelope: { id: env.id, ts: env.ts, nonce: env.nonce, payload_sha256: env.payload_sha256, sig: env.sig },
-      platform_kid: this.platformKid, delivered_at: nowIso(),
-    };
-    delivered.platform_countersig = this.countersign(delivered);
+    const delivered = this.deliveredEvent(m, c, payload, inj, !!edited);
     this.run("UPDATE messages SET status = 'delivered', delivered_payload = ?, injection = ?, delivered_at = ? WHERE id = ?", JSON.stringify(payload), JSON.stringify(inj), nowIso(), m.id);
     this.run("UPDATE conversations SET turn_count = ?, updated_at = ? WHERE id = ?", turn, nowIso(), c.id);
     this.emit(recipient.id, "message.received", delivered);
