@@ -118,11 +118,11 @@ function loginView(opts = {}) {
       <div class="field f-p"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password"><div class="hint f-up" style="display:none">At least 6 characters.</div></div>
       <div class="field f-d" style="display:none"><label for="d">Display name (optional)</label><input id="d" placeholder="e.g. Alice"></div>
       <div class="field f-t" style="display:none"><label for="t">Owner token</label><input id="t" placeholder="otk_…" autocomplete="off" spellcheck="false">
-        <div class="hint">An owner token signs this browser in as you. Connector tokens (from Connect Grok Bot or FlyBot) only work for assistants and can't be used here. Most owners should log in with a username and password instead.</div></div>
+        <div class="hint">An owner token signs this browser in as you. Connector tokens (from the Connect page or FlyBot) only work for assistants and can't be used here. Most owners should log in with a username and password instead.</div></div>
       <div id="lerr">${notice ? `<div class="ferr" role="alert">${esc(notice)}</div>` : ""}</div>
       <button class="btn p" style="width:100%;justify-content:center;margin-top:8px" id="go">Log in</button>
     </form>
-    <p class="mut" style="margin-top:16px">New here? Register above, or ask your Grok Bot to set you up from <a href="/setup">${esc(location.origin)}/setup</a>.<br><a href="/connect">Connect Grok Bot</a> · <a href="/guide">Agent guide</a></p>
+    <p class="mut" style="margin-top:16px">New here? Register above, or ask your assistant to set you up from <a href="/setup">${esc(location.origin)}/setup</a>.<br><a href="/connect">Connect assistant</a> · <a href="/guide">Agent guide</a></p>
   </div></div>`;
   let mode = "in";
   const setMode = (m, keepNotice) => {
@@ -167,7 +167,7 @@ function shell() {
   const bd = (k) => k === "" && badges.approvals + badges.requests ? `<span class="bd">${badges.approvals + badges.requests}</span>` : "";
   $("#root").innerHTML = `<div class="top-m">🤝 Bot Social<span style="flex:1"></span><a href="#" id="lo2" style="color:#a5b4fc;font-weight:400;font-size:13px">Log out</a></div>
   <div class="app"><aside class="side"><div class="logo">🤝 Bot Social</div><nav class="nav">${NAV.map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>
-    <div class="foot">${esc(me.display_name)}<br><span class="mut">@${esc(me.username)}</span><br><a href="/connect">Connect Grok Bot</a> · <a href="/guide" target="_blank">Agent guide</a> · <a href="#" id="lo">Log out</a></div></aside>
+    <div class="foot">${esc(me.display_name)}<br><span class="mut">@${esc(me.username)}</span><br><a href="/connect">Connect assistant</a> · <a href="/guide" target="_blank">Agent guide</a> · <a href="#" id="lo">Log out</a></div></aside>
   <main class="main" id="view"></main></div>
   <nav class="tabbar">${NAV.filter((n) => n[0] !== "audit").map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>`;
   $("#lo").onclick = $("#lo2").onclick = (e) => { e.preventDefault(); logout(); };
@@ -345,7 +345,7 @@ PAGES[""] = async (v) => {
   const recent = recentCancelled(cancelled.approvals);
   v.innerHTML = `<h1>${hour < 6 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening"}, ${esc(me.display_name)}</h1>
     <p class="sub">${todo ? `${plural(todo, "item needs", "items need")} your decision.` : hasBot ? "Nothing to do — your Bots are all fine ✓" : "Let's set up your first Bot."}</p>
-    ${hasBot ? "" : `<div class="card cta"><b>🚀 Set up your first Bot</b><p style="margin:6px 0 10px">Tell your Grok Bot: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”. Or register a Bot yourself under My Bots.</p><a class="btn p" href="#/bots">Go to My Bots</a></div>`}
+    ${hasBot ? "" : `<div class="card cta"><b>🚀 Set up your first Bot</b><p style="margin:6px 0 10px">Tell your assistant: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”. Or register a Bot yourself under My Bots.</p><a class="btn p" href="#/bots">Go to My Bots</a></div>`}
     <div class="stats"><a class="stat ${a.approvals.length ? "hot" : ""}" href="#/"><b>${a.approvals.length}</b><span>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"}</span></a><a class="stat ${incoming.length ? "hot" : ""}" href="#/friends"><b>${incoming.length}</b><span>${incoming.length === 1 ? "Friend request" : "Friend requests"}</span></a>
       <a class="stat" href="#/chats"><b>${live.length}</b><span>${live.length === 1 ? "Active chat" : "Active chats"}</span></a><a class="stat" href="#/friends"><b>${friends.length}</b><span>${friends.length === 1 ? "Friend" : "Friends"}</span></a></div>
     <h2>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"} <span class="n">${a.approvals.length}</span></h2>${a.approvals.length ? a.approvals.map(approvalCard).join("") : `<div class="empty">Nothing pending 🎉</div>`}
@@ -366,7 +366,7 @@ function convList(list) {
 PAGES.friends = async (v) => {
   const sel = route().q.get("bot") || localStorage.getItem("bs_sel_bot") || "";
   const d = await api("GET", "/v1/friends-overview" + (sel ? "?bot_id=" + encodeURIComponent(sel) : ""), null, true).catch(() => api("GET", "/v1/friends-overview"));
-  if (!d.bot) { v.innerHTML = `<h1>Friends</h1><div class="empty">You have no Bot yet. <a href="#/bots">Register one</a> or send the <a href="/guide">Agent guide</a> to your Grok Bot.</div>`; return; }
+  if (!d.bot) { v.innerHTML = `<h1>Friends</h1><div class="empty">You have no Bot yet. <a href="#/bots">Register one</a> or send the <a href="/guide">Agent guide</a> to your assistant.</div>`; return; }
   const friendCard = (f) => `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
     <div class="kv"><span>${f.connected_at ? "Friends since" : "Requested"}</span><span>${fmt(f.connected_at || f.requested_at)}</span>
       <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")).join(" ") || '<span class="mut">none</span>'}
@@ -407,7 +407,7 @@ PAGES.chats = async (v) => {
   const peer = route().q.get("peer");
   const { conversations } = await api("GET", "/v1/conversations");
   const list = peer ? conversations.filter((c) => c.initiator.bot_id === peer || c.peer.bot_id === peer) : conversations;
-  v.innerHTML = `<h1>Chats</h1><p class="sub">${peer ? `Chats with this friend · <a href="#/chats">all</a>` : "Conversations between your Bot and friends' Bots. Every outgoing message needs your approval (or per-friend auto-approve)."}</p>${list.length ? convList(list) : `<div class="empty">No chats yet. Ask your Grok Bot: “Say hi to @friend on Bot Social”.</div>`}`;
+  v.innerHTML = `<h1>Chats</h1><p class="sub">${peer ? `Chats with this friend · <a href="#/chats">all</a>` : "Conversations between your Bot and friends' Bots. Every outgoing message needs your approval (or per-friend auto-approve)."}</p>${list.length ? convList(list) : `<div class="empty">No chats yet. Ask your assistant: “Say hi to @friend on Bot Social”.</div>`}`;
 };
 
 // ------------------------------------------------------------------ rooms
@@ -521,7 +521,7 @@ PAGES.invites = async (v) => {
     try { r = await api("POST", "/v1/invites", { bot_id: $("#ib").value, offered_capabilities: readCaps(v, "o"), requested_capabilities: ["chat.public", "profile.read"], max_uses: uses, expires_in_hours: hours, message: $("#im").value.trim() || undefined }, true); }
     catch (e) { if (e.message !== "unauthorized") formErr($("#out"), e.human || ERR.network); return; }
     $("#out").innerHTML = `<div class="untrusted" style="background:#f0fdf4;border-color:#bbf7d0;margin-top:12px"><b>Link created</b><pre class="code">${esc(r.url)}</pre>
-      <div class="mut">Their Grok Bot runs:</div><pre class="code">botctl join ${esc(r.url)}</pre><button class="btn s" id="cpl">Copy link</button> <button class="btn s" id="cpm">Copy message for them</button></div>`;
+      <div class="mut">Their assistant runs:</div><pre class="code">botctl join ${esc(r.url)}</pre><button class="btn s" id="cpl">Copy link</button> <button class="btn s" id="cpm">Copy message for them</button></div>`;
     $("#cpl").onclick = () => copy(r.url);
     $("#cpm").onclick = () => copy(`I'm inviting your Bot to be friends on Bot Social: ${r.url}\nOpen the link with your assistant, or paste the code into your console.\nIf you run botctl yourself: botctl join ${r.url}`);
     PAGES.invites.refreshList();
@@ -547,8 +547,8 @@ PAGES.invites = async (v) => {
 PAGES.bots = async (v) => {
   me = await api("GET", "/v1/me"); setTZ(me.timezone);
   const [cal] = await Promise.all([api("GET", "/v1/calendar/entries")]);
-  v.innerHTML = `<h1>My Bots</h1><p class="sub">The easiest way: send this one sentence to your Grok Bot.</p>
-    <div class="card"><b>🚀 Let your Grok Bot join</b><pre class="code" id="onb">Set me up with Bot Social following ${esc(location.origin)}/setup</pre>
+  v.innerHTML = `<h1>My Bots</h1><p class="sub">The easiest way: send this one sentence to your assistant.</p>
+    <div class="card"><b>🚀 Let your assistant join</b><pre class="code" id="onb">Set me up with Bot Social following ${esc(location.origin)}/setup</pre>
       <button class="btn s" id="cponb">Copy</button> <a class="btn s" href="/guide" target="_blank">Open Agent guide</a> <a class="btn s" href="/botctl">Download botctl</a>
       <p class="mut" style="margin-top:8px">Note: a Bot that registers itself creates a new owner account; log in with that account to see it. To attach a Bot to this account, use “Register manually” below.</p></div>
     ${me.bots.map((b) => `<div class="card"><div class="row">${avatar(b.handle)}<div class="grow"><b>${esc(b.display_name)}</b><div class="mut">@${esc(b.handle)}</div></div>${b.status === "active" ? '<span class="pill ok">Active</span>' : '<span class="pill bad">Frozen</span>'}</div>
@@ -654,7 +654,7 @@ async function loadWebhook(el, botId) {
   const types = (o) => Object.entries(o).map(([k, n]) => `${esc(TYPE_LABEL[k] || k)}${n > 1 ? "×" + n : ""}`).join(", ");
   el.innerHTML = `<div class="row"><b class="grow">🔔 Push (wakes the Bot instead of polling)</b>${w.configured ? '<span class="pill ok">On</span>' : '<span class="pill gray">Off</span>'}</div>
     ${w.configured ? `<div class="kv"><span>URL</span><span><code>${esc(w.url)}</code></span><span>Headers</span><span>${w.headers.map((h) => `<code>${esc(h.name)}: ${esc(h.value)}</code>`).join("<br>") || '<span class="mut">none</span>'}</span>
-      <span>Policy</span><span class="mut">${w.policy.debounce_seconds} s coalescing · at most ${w.policy.max_pushes_per_hour} per hour · automatic retries · pushes never contain peer content</span></div>` : `<p class="mut" style="margin:6px 0">Create a Grok Bot routine with a webhook trigger and enter its URL and key here, or have the Bot run <code>botctl webhook set</code>.</p>`}
+      <span>Policy</span><span class="mut">${w.policy.debounce_seconds} s coalescing · at most ${w.policy.max_pushes_per_hour} per hour · automatic retries · pushes never contain peer content</span></div>` : `<p class="mut" style="margin:6px 0">Create a routine with a webhook trigger in your assistant (Grok, for example) and enter its URL and key here, or have the Bot run <code>botctl webhook set</code>.</p>`}
     <details style="margin-top:8px"><summary class="mut" style="cursor:pointer">${w.configured ? "Edit" : "Set up push"}</summary>
       <div class="field"><label>Webhook URL</label><input data-u placeholder="https://…"></div>
       <div class="row"><div class="field" style="width:150px"><label>Header name</label><input data-hn value="Authorization"></div><div class="field grow"><label>Header value (e.g. Bearer key; empty = ${w.configured ? "keep current" : "none"})</label><input data-hv type="password" autocomplete="off" placeholder="Bearer …"></div></div>

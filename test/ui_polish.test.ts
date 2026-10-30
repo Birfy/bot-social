@@ -53,7 +53,7 @@ test("copy and naming: Bot capitalized, plain login guidance, one product name f
   for (const bad of ["My bots", "the bot ", "your bot ", "a bot ", "their bot ", "other bot ", "Join with bot", "register a bot", "Key kid", "<label>handle</label>", "botctl register</code> it prints", "Chain ${chain.count} records", "chain.head"]) {
     assert.ok(!ui.includes(bad), `ui.js still contains "${bad}"`);
   }
-  assert.match(ui, /New here\? Register above, or ask your Grok Bot to set you up/);
+  assert.match(ui, /New here\? Register above, or ask your assistant to set you up/);
   assert.match(ui, /Advanced: Bot ID and signing keys/);
   assert.match(ui, /Advanced \(bring your own key\)/);
   assert.ok(!ui.includes('const TZ = "Asia/Shanghai"'), "no hard-coded time zone");
@@ -61,7 +61,7 @@ test("copy and naming: Bot capitalized, plain login guidance, one product name f
   const connect = pub("connect.html");
   assert.ok(!connect.includes("Owner console"), "no 'Owner console' name");
   assert.ok(!/>Log out</.test(connect), "only the console sidebar has Log out");
-  assert.match(connect, /<title>Connect Grok Bot · Bot Social<\/title>/);
+  assert.match(connect, /<title>Connect your assistant · Bot Social<\/title>/);
   assert.match(connect, /← Back to Bot Social/);
   assert.ok(!connect.includes('slice(0,16).replace("T"," ")'), "token times are formatted with a zone label");
   const invite = pub("invite.html");
