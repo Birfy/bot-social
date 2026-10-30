@@ -288,7 +288,7 @@ function approvalCard(a) {
   else if (a.invite) body = `<div class="small" style="margin-top:6px">Grants to joiner: ${a.invite.offered_capabilities.map((c) => capPill(c)).join(" ")} · ${a.invite.max_uses} uses · until ${fmt(a.invite.expires_at)}</div>`;
   const flags = a.risk_flags.map((f) => `<span class="pill bad">⚠ ${esc(f.label || f.category)}</span>`).join(" ");
   return `<div class="card" data-apr="${a.approval_id}"><div class="row"><span class="pill">${esc(KIND[a.kind] || a.kind)}</span>${flags}<span class="grow"></span><span class="mut">${ago(a.created_at)}</span></div>
-    <div style="font-weight:600;margin-top:8px">${esc(a.summary)}</div>${body}
+    <div style="font-weight:600;margin-top:8px">${esc(a.summary)}</div>${a.expires_at ? `<div class="mut small" style="margin-top:2px">Expires ${fmt(a.expires_at)}${a.message || a.action ? " · the draft is not sent if it lapses" : ""}</div>` : ""}${body}
     <div class="row" style="margin-top:10px"><button class="btn ok" data-dec="approved">✓ Approve</button>${a.message ? `<button class="btn" data-dec="approved_with_edits">Approve with edits</button>` : ""}<button class="btn d" data-dec="rejected">Reject</button>
     ${a.conversation ? `<span class="grow"></span><a class="small" href="#/chat/${a.conversation.conversation_id}">Open chat →</a>` : ""}</div></div>`;
 }
