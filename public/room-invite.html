@@ -34,6 +34,14 @@ const ERR={
 const stop=(title,msg,hint)=>{document.getElementById("c").innerHTML=`<h2>${esc(title)}</h2><p class="err">${esc(msg)}</p><p class="m">${esc(hint||"")}</p>`};
 const when=iso=>new Intl.DateTimeFormat("en-GB",{hour12:false,month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",timeZoneName:"short"}).format(new Date(iso));
 const getJson=url=>fetch(url).then(r=>r.json().catch(()=>({error:{code:"server_error"}})).then(body=>({status:r.status,body})));
+// One-tap copy of this link (#128), the same idea as /connect and /guide: the page is usually opened from a
+// phone camera scan, where selecting a wrapped URL by hand is how people lose a character. If the clipboard
+// is refused (http, an older browser), fall back to selecting the link so the person can copy it themselves.
+function copyInvite(btn){
+  const ok=()=>{btn.textContent="Copied \u2713"};
+  const select=()=>{try{const p=document.getElementById("invite-link");const r=document.createRange();r.selectNodeContents(p);const s=typeof getSelection==="function"?getSelection():null;if(s){s.removeAllRanges();s.addRange(r)}}catch{}ok()};
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(location.href).then(ok,select);else select();
+}
 const fail=(status,p)=>{
   // An unknown ticket on a server that has the endpoint answers invite_not_found; a server that does not
   // have it yet answers Fastify's own 404 with no invite code. Those are different facts and get different
@@ -64,7 +72,8 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
     <p>Host: <b>${host}</b>${knock}<br><span class="m">A local room on someone's FlyBot. The room is open while they keep it open.</span></p>
     ${valid}${edited}
     <p><b>Join with your Bot:</b> copy this link and paste it back into your own FlyBot. It shows a preview, and Join brings one of your Bots into the room.</p>
-    <pre>${esc(location.href)}</pre>
+    <pre id="invite-link">${esc(location.href)}</pre>
+    <button onclick="copyInvite(this)">Copy</button>
     <p class="m">Anyone you give this link to can join with their Bot until the owner withdraws it, so share it only with people you want in the room. A phone camera scan lands on this page; the join happens in your own FlyBot.</p>`;
     return;
   }
@@ -73,6 +82,8 @@ else getJson((local?"/v1/local-room-invites/":"/v1/face-rooms/invites/")+encodeU
   <p>Lead: <b>${host}</b><br><span class="m">${p.status==="open"?"The room is open.":"The room is matching; it opens when the window ends."}</span></p>
   ${valid}
   <p><b>Join with your Bot:</b> open this link in the FlyBot app. It joins this room directly.</p>
+  <pre id="invite-link">${esc(location.href)}</pre>
+  <button onclick="copyInvite(this)">Copy</button>
   <p class="m">A Bot client can also POST {"ticket":"&lt;ticket&gt;","bots":["@your.bot"]} to /v1/face-rooms/join-invite, with the ticket from this link.
   Keep the link private while it is valid; anyone holding it can use it.</p>`;
 }).catch(()=>stop("Can't load this invite",ERR.network));
