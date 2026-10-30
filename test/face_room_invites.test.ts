@@ -230,3 +230,55 @@ test("the ticket reaches neither the audit log nor the attempt rows, and clients
   const info = await req(s.base, "GET", "/v1/platform");
   assert.ok(info.body.features.includes("face_room_invites"), "a client can tell the invite endpoints exist");
 });
+
+test("a ticket minted by a revoked home member previews as revoked and seats nobody (#183)", async (t) => {
+  const s = await startServer({ faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 200 } });
+  t.after(s.stop);
+  const onboard = await req(s.base, "POST", "/v1/onboard/flybot", undefined, { display_name: "Dana" });
+  assert.equal(onboard.status, 201);
+  const login = await req(s.base, "POST", "/v1/auth/login", undefined, { username: onboard.body.username, password: onboard.body.generated_password });
+  assert.equal(login.status, 200);
+  const token = login.body.owner_token as string;
+  const homeId = onboard.body.home.bot_id as string;
+  const added = await req(s.base, "POST", `/v1/homes/${homeId}/members`, token, { name: "writer", display_name: "Writer" });
+  assert.equal(added.status, 201);
+  const writerId = added.body.bot_id as string;
+  const mintedToken = await req(s.base, "POST", `/v1/bots/${writerId}/token`, token);
+  assert.equal(mintedToken.status, 200);
+  const writerToken = mintedToken.body.bot_token as string;
+
+  const room = await req(s.base, "POST", "/v1/face-rooms/join", token, { code: "414141", bots: [writerId] });
+  assert.equal(room.status, 200);
+  const roomId = room.body.room_id as string;
+
+  // The Bot minted one ticket; the owner minted another on the same room, so the revocation has to tell them apart.
+  const botTicket = (await req(s.base, "POST", `/v1/face-rooms/${roomId}/invites`, writerToken)).body.ticket as string;
+  const ownerTicket = (await req(s.base, "POST", `/v1/face-rooms/${roomId}/invites`, token)).body.ticket as string;
+  assert.notEqual(botTicket, ownerTicket);
+  const B = await ownerWithBot(s.base, "ben");
+  assert.equal((await joinInvite(s.base, B, botTicket)).status, 200, "the Bot's link works while it lives");
+
+  // A second owner joined the same room, so the room survives losing its lead.
+  const removed = await req(s.base, "DELETE", `/v1/homes/${homeId}/members/${writerId}`, token);
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.status, "revoked");
+
+  const previewBot = await preview(s.base, botTicket);
+  assert.equal(previewBot.status, 410);
+  assert.equal(previewBot.body.error.code, "revoked");
+  const C = await ownerWithBot(s.base, "cat");
+  const joinBot = await joinInvite(s.base, C, botTicket);
+  assert.equal(joinBot.status, 410);
+  assert.equal(joinBot.body.error.code, "revoked");
+
+  // Owner-minted tickets are not this identity's reach and keep working.
+  const previewOwner = await preview(s.base, ownerTicket);
+  assert.equal(previewOwner.status, 200);
+  assert.equal((await joinInvite(s.base, C, ownerTicket)).status, 200);
+
+  // The audit entry counts the withdrawn face-room tickets next to the other counts.
+  const audit = s.platform.auditEvents({ kind: "owner", ownerId: onboard.body.owner_id } as any, { limit: 500 });
+  const revoked: any = audit.events.find((e: any) => e.action === "home.member_revoked");
+  assert.ok(revoked);
+  assert.equal(revoked.data.revoked_face_invites, 1);
+});

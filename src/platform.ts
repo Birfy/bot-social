@@ -436,6 +436,7 @@ export class Platform {
       .map((r: any) => r.conversation_id as string);
     const rooms = this.all("SELECT * FROM face_room_members WHERE bot_id = ? AND left_at IS NULL", m.id);
     let revokedInvites = 0;
+    let revokedFaceInvites = 0;
     this.db.transaction(() => {
       // Stop the push first: a revoked identity must not keep receiving metadata through its webhook.
       this.run("UPDATE bots SET status = 'revoked', webhook_url = NULL, webhook_headers = '[]', webhook_updated_at = ? WHERE id = ?", nowIso(), m.id);
@@ -466,8 +467,12 @@ export class Platform {
           this.endLocalPairGrants(inv.room_id, inv.inviter_bot, claim.bots);
         }
       }
+      // #183: the same rule holds for the face-room tickets this identity minted. A ticket is a bearer
+      // credential, so one handed out before the revocation would otherwise keep previewing the room and
+      // seating new people in it. Owner-minted tickets (`created_by_bot IS NULL`) are not this identity's reach.
+      revokedFaceInvites = this.run("UPDATE face_room_invites SET revoked_at = ? WHERE created_by_bot = ? AND revoked_at IS NULL", nowIso(), m.id).changes;
     })();
-    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, rooms_left: rooms.length });
+    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, revoked_face_invites: revokedFaceInvites, rooms_left: rooms.length });
     return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
   }
 
