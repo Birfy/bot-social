@@ -996,6 +996,10 @@ export class Platform {
   rotateBotToken(p: Principal, botId: string) {
     const ownerId = this.requireOwner(p);
     const b = this.ownBot(ownerId, botId);
+    // A revoked identity is final: removeHomeMember already revoked its tokens and cleared its webhook, invites,
+    // drafts and rooms, and rotating would hand it a working token again without restoring any of them. Re-adding
+    // the handle through the home is the supported way back.
+    assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
     const token = this.issueToken("bot", b.id);
     this.audit.append(`owner:${ownerId}`, "bot.token_rotated", b.id, [ownerId], {});
@@ -1014,7 +1018,10 @@ export class Platform {
     if (env.type !== expectedType) reject(400, "invalid_envelope", `envelope type must be ${expectedType}`);
     if (env.from !== botId) reject(401, "invalid_signature", "envelope.from does not match the authenticated bot");
     const b = this.bot(botId);
-    if (b.status !== "active") throw new ApiError(403, "bot_frozen", "bot is frozen (emergency stop)");
+    if (b.status !== "active") {
+      const frozen = b.status === "frozen";
+      reject(403, frozen ? "bot_frozen" : "bot_revoked", frozen ? "bot is frozen (emergency stop)" : "this bot identity was revoked");
+    }
     const key = this.get("SELECT * FROM bot_keys WHERE bot_id = ? AND kid = ? AND status = 'active'", botId, env.sig.kid);
     if (!key || (key.expires_at && Date.parse(key.expires_at) < Date.now())) reject(401, "invalid_signature", "unknown, revoked or expired kid");
     if (env.payload_sha256 !== payloadDigest(env.payload)) reject(401, "invalid_signature", "payload digest mismatch");
@@ -2972,6 +2979,10 @@ export class Platform {
   // ================================================================ events & audit
   listEvents(p: Principal, since = 0, limit = 100) {
     const { botId } = this.requireBot(p);
+    // Defense in depth (#177 ③): rotateBotToken no longer mints a token for a revoked identity, but a token row
+    // that outlives the revocation must not read the pre-revocation queue either. frozen may still read: the
+    // kill switch stops reach, not the owner's own view.
+    assert(this.bot(botId).status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.expireStale();
     const rows = this.all("SELECT * FROM events WHERE bot_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?", botId, since, limit);
     return { events: rows.map((r) => ({ cursor: r.seq, event_id: r.id, event_type: r.type, created_at: r.created_at, ...J(r.data) })), next_cursor: rows.length ? rows[rows.length - 1].seq : since };
