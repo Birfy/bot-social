@@ -4017,13 +4017,23 @@ export class Platform {
     return { message_id: id, status: "pending_approval", approval_id: aprId, hold_reason: holdReason, ...(typed ? { typed_by_owner: true } : {}), ...(kept.length ? { mentions: kept } : {}), from: snap };
   }
 
+  /** What an owner's edit may set on a held face-room line: its text, parsed and bounded before anything is written. */
+  private static faceRoomEdit(ep: any): { text: string } {
+    assert(ep && typeof ep === "object" && !Array.isArray(ep), 400, "invalid_request", "edited_payload must be an object");
+    assert(typeof ep.text === "string" && ep.text.length >= 1 && ep.text.length <= 4000, 400, "invalid_request", "edited_payload.text (1-4000 chars) required");
+    return { text: ep.text };
+  }
+
   private deliverFaceRoomMessage(a: any, body: any) {
     const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", d.room_id);
     assert(room && room.status !== "closed", 409, "room_closed", "this room is closed");
     let payload = J(d.payload);
     if (body.decision === "approved_with_edits" && body.edited_payload) {
-      payload = { ...payload, ...body.edited_payload };
+      // A draft's payload is `{ text }`: an edit replaces it, it is never folded in. Spreading the request let a
+      // non-string or a 5000-character line reach `untrusted_content.text`, and a bare string spread into "0","1",…
+      // The draft door already holds this window (1-4000); the edit door must not widen it.
+      payload = Platform.faceRoomEdit(body.edited_payload);
       const blocked = this.dlp(this.bot(d.sender_bot).owner_id, payload).filter((f) => f.action === "block");
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
