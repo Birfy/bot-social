@@ -770,13 +770,13 @@ export class Platform {
       // #44: `home` is the owner's FlyBot home Bot in the "@handle" spelling used by event.from / item.peer, so a
       // connector never has to parse connector_identity or reconcile the two spellings. `bots[].handle` stays bare.
       const home = this.get("SELECT handle, display_name FROM bots WHERE owner_id = ? AND integration_type = 'flybot-home' ORDER BY created_at LIMIT 1", p.ownerId);
-      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
+      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, notify_bot_id: o.notify_bot_id ?? null, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
     return { kind: "bot", ...this.publicBot(b, true), status: b.status };
   }
 
-  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean }) {
+  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean; notify_bot_id?: string | null }) {
     const ownerId = this.requireOwner(p);
     // A refused field must not leave the other fields of the same request written: validate first.
     let displayName: string | undefined;
@@ -785,12 +785,25 @@ export class Platform {
       displayName = peerDisplayName(body.display_name, "");
       assert(displayName.length >= 1, 400, "invalid_request", "display_name: 1-60 chars");
     }
+    // #139 ② C: the outlet is one of the owner's own Bots, chosen here rather than through a new route. `null` clears it.
+    // The refusal never says whether the id exists, so it cannot be used to probe another owner's Bots.
+    let notifyBotId: string | null | undefined;
+    if (body?.notify_bot_id !== undefined) {
+      if (body.notify_bot_id === null) notifyBotId = null;
+      else {
+        assert(typeof body.notify_bot_id === "string" && body.notify_bot_id.length > 0, 400, "invalid_request", "notify_bot_id must be a Bot id or null");
+        const outlet = this.get("SELECT id, owner_id FROM bots WHERE id = ?", body.notify_bot_id);
+        assert(outlet && outlet.owner_id === ownerId, 400, "invalid_request", "notify_bot_id must name one of your own Bots");
+        notifyBotId = outlet.id;
+      }
+    }
     // Validate before any write, so a bad zone cannot leave the rest of the patch behind it half-applied.
     const timezone = body.timezone ? this.validateTimezone(body.timezone) : undefined;
     if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms.map(String)), ownerId);
     if (timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId);
     if (displayName !== undefined) this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId);
     if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
+    if (notifyBotId !== undefined) this.run("UPDATE owners SET notify_bot_id = ? WHERE id = ?", notifyBotId, ownerId);
     this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], { fields: Object.keys(body) });
     return this.me(p);
   }
@@ -2018,7 +2031,26 @@ export class Platform {
     const id = newId("apr");
     this.run("INSERT INTO approvals (id, owner_id, kind, subject_id, bot_id, conversation_id, summary, reasons, risk_flags, hold_reason, created_at, expires_at, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, ownerId, kind, subjectId, botId, convId, summary, JSON.stringify(reasons), JSON.stringify(riskFlags), holdReason, nowIso(), new Date(Date.now() + ttlMs).toISOString(), extra ? JSON.stringify(extra) : null);
+    // #139 ② C: a card that waits only in the database is invisible until someone opens a page. Tell the owner
+    // through the Bot they designated, at the one place every card is created.
+    this.notifyOwnerOfApproval(id);
     return id;
+  }
+
+  /**
+   * #139 ② C: announce one waiting card to the owner's designated Bot. Delivery is that Bot's existing webhook,
+   * so the owner needs no page open and the platform needs no mail or push service. The event carries no text: the
+   * card id, its kind, how many cards wait and when this one expires. One ledger row per card makes a second
+   * announcement (a retried or replayed path) a no-op.
+   */
+  notifyOwnerOfApproval(approvalId: string): boolean {
+    const a = this.get("SELECT a.id, a.owner_id, a.kind, a.expires_at, o.notify_bot_id FROM approvals a JOIN owners o ON o.id = a.owner_id WHERE a.id = ?", approvalId);
+    if (!a?.notify_bot_id) return false;
+    const ins = this.run("INSERT OR IGNORE INTO approval_notifications (approval_id, owner_id, bot_id, created_at) VALUES (?,?,?,?)", a.id, a.owner_id, a.notify_bot_id, nowIso());
+    if (!ins.changes) return false;
+    const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", a.owner_id).n;
+    this.emit(a.notify_bot_id, "approval.created", { approval_id: a.id, kind: a.kind, pending_count, expires_at: a.expires_at });
+    return true;
   }
 
   private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean } = {}) {
