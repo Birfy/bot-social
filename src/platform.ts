@@ -970,6 +970,10 @@ export class Platform {
   emergencyStop(p: Principal, body: { bot_id: string }) {
     const ownerId = this.requireOwner(p);
     const b = this.ownBot(ownerId, body?.bot_id);
+    // A removed home member is `revoked`, not `frozen`: freezing it would put the identity in the one state
+    // resumeBot accepts, handing the owner a working token for an identity whose invites, drafts, rooms and
+    // seats were already torn down. Re-adding the handle through the home is the supported way back.
+    assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.db.transaction(() => {
       this.run("UPDATE bots SET status = 'frozen' WHERE id = ?", b.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
