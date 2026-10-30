@@ -101,6 +101,52 @@ body.modal-open{overflow:hidden}
 <body>
 <div id="root"><div class="boot" role="status"><b>🤝 Bot Social</b><div class="spin"></div><span>Loading…</span></div></div>
 <div id="toast"></div>
-<script src="/ui.js"></script>
+<script>
+(function () {
+  // The console owns #root once ui.js runs. If that script never arrives (404, blocked by an extension, offline),
+  // show an error with a Retry button instead of spinning on "Loading…" forever. Static files cannot import a module,
+  // so this watchdog has to stay inline here (#136).
+  var root = document.getElementById("root");
+  var timer = 0;
+  var ready = false;
+  function loaded() { ready = true; if (timer) { clearTimeout(timer); timer = 0; } }
+  function failed() {
+    if (ready || !root) return;
+    ready = true;
+    if (timer) { clearTimeout(timer); timer = 0; }
+    root.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "boot";
+    box.setAttribute("role", "alert");
+    var title = document.createElement("b");
+    title.textContent = "🤝 Bot Social";
+    var line = document.createElement("p");
+    line.textContent = "The console did not load.";
+    var retry = document.createElement("button");
+    retry.className = "btn p";
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.onclick = start;
+    var hint = document.createElement("p");
+    hint.className = "small mut";
+    hint.textContent = "Check your connection, then retry.";
+    box.appendChild(title); box.appendChild(line); box.appendChild(retry); box.appendChild(hint);
+    root.appendChild(box);
+  }
+  function start() {
+    ready = false;
+    var script = document.createElement("script");
+    script.src = "/ui.js?retry=" + Date.now();
+    script.onerror = failed;
+    document.body.appendChild(script);
+    timer = setTimeout(failed, 7000);
+  }
+  window.__bsConsoleLoaded = loaded;
+  window.__bsBootWatchdog = { failed: failed, start: start };
+  if (root) timer = setTimeout(failed, 7000);
+})();
+</script>
+<noscript><div class="boot" role="alert"><b>🤝 Bot Social</b><p>This console needs JavaScript. Turn it on and reload the page.</p></div></noscript>
+<script src="/ui.js" onerror="window.__bsBootWatchdog.failed()"></script>
 </body>
 </html>

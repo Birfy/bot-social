@@ -1,4 +1,6 @@
 "use strict";
+// Tell the boot watchdog in index.html that this file arrived, so it stands down instead of showing an error (#136).
+if (window.__bsConsoleLoaded) window.__bsConsoleLoaded();
 // Bot Social owner console. No framework; hash routing. All bot/peer text is escaped via esc().
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const $ = (s, el = document) => el.querySelector(s);
