@@ -1610,8 +1610,8 @@ export class Platform {
       const rooms = this.activeGrantRooms(g.id);
       const scope = g.room_id || J(g.scope, {}).kind === "room" ? "room" : (rooms.length ? "group" : "person");
       const item = {
-        bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted),
-        owner_display_name: this.owner(granted.owner_id).display_name,
+        bot_id: granted.id, handle: "@" + granted.handle, display_name: peerBotName(granted), ...lookOf(granted),
+        owner_display_name: peerOwnerName(this.owner(granted.owner_id)),
         grant_id: g.id, scope, room: g.room_id ? this.grantRoomPublic(g.room_id) : rooms[0] ?? null, rooms,
         via: "@" + this.bot(g.grantee_bot).handle, created_at: g.created_at, expires_at: g.expires_at,
         relationship_id: g.rel_status === "room" ? null : g.relationship_id, side: this.sideOf(g, ownerId),
@@ -1621,12 +1621,12 @@ export class Platform {
       const peerHome = this.bot(this.homeOf(granted.id));
       const entry = byHome.get(peerHome.id) ?? {
         relationship_id: item.relationship_id, relationship_ids: [] as string[], side: item.side, relationship_sides: {} as Record<string, "joiner" | "inviter" | null>,
-        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerHome.display_name, ...lookOf(peerHome), owner_display_name: this.owner(peerHome.owner_id).display_name },
+        home: { bot_id: peerHome.id, handle: "@" + peerHome.handle, display_name: peerBotName(peerHome), ...lookOf(peerHome), owner_display_name: peerOwnerName(this.owner(peerHome.owner_id)) },
         bots: [] as any[], scope: "member", via: [] as string[],
       };
       if (item.relationship_id && !entry.relationship_ids.includes(item.relationship_id)) { entry.relationship_ids.push(item.relationship_id); entry.relationship_sides[item.relationship_id] = item.side; }
       if (!entry.bots.some((x: any) => x.bot_id === granted.id)) {
-        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: granted.display_name, ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at, relationship_id: item.relationship_id, side: item.side, reply_only: item.reply_only });
+        entry.bots.push({ bot_id: granted.id, handle: "@" + granted.handle, display_name: peerBotName(granted), ...lookOf(granted), grant_id: g.id, scope, room: item.room, rooms, created_at: g.created_at, expires_at: g.expires_at, relationship_id: item.relationship_id, side: item.side, reply_only: item.reply_only });
       }
       if (!entry.via.includes(item.via)) entry.via.push(item.via);
       byHome.set(peerHome.id, entry);
