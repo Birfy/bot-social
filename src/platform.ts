@@ -2096,7 +2096,7 @@ export class Platform {
         relationship_id: r.id, status: r.status, direction: outgoing ? "outgoing" : "incoming", side: outgoing ? "joiner" : "inviter",
         peer: this.publicBot(this.bot(peerId), r.status === "active"),
         connected_at: r.status === "active" || r.status === "revoked" || r.status === "blocked" ? r.updated_at : null,
-        requested_at: r.created_at, expires_at: r.expires_at, message: r.message, settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,
+        requested_at: r.created_at, expires_at: r.expires_at, message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []), settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,
         capabilities: {
           granted_to_peer: grants.filter((g) => g.grantee_bot === peerId).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at })),
           granted_to_me: grants.filter((g) => g.grantee_bot === selected.id).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at })),
