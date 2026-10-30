@@ -128,3 +128,32 @@ test("a frozen Bot's owner can still rotate the token and read its events, then 
   const resumed = await A.owner.req("POST", `/v1/bots/${A.bot.id}/resume`);
   assert.equal(resumed.status, "active");
 });
+
+test("the kill switch refuses a removed Bot instead of making it resumable again", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { ownerToken, botId } = await revokedBot(s, "unrevivable", true);
+
+  // #181: `emergency-stop` used to write `status = 'frozen'` without looking at the current status, and
+  // `resumeBot` accepts `frozen` — so stopping a revoked identity handed back a working token for one whose
+  // invites, drafts, rooms and seats were already torn down.
+  const stopped = await req(s.base, "POST", "/v1/emergency-stop", ownerToken, { bot_id: botId });
+  assert.equal(stopped.status, 403, `stopping a revoked Bot must be refused, got ${stopped.status} ${JSON.stringify(stopped.body)}`);
+  assert.equal(stopped.body.error.code, "bot_revoked");
+  assert.equal(stopped.body.status, undefined, "no frozen status is reported");
+
+  const me = await req(s.base, "GET", "/v1/me", ownerToken);
+  assert.equal(me.body.bots.find((b: any) => b.id === botId).status, "revoked", "the identity stays revoked, not frozen");
+
+  // Nothing the kill switch does to a frozen Bot happened to this one.
+  const paused = (s.platform as any).get("SELECT COUNT(*) n FROM conversations WHERE (initiator_bot = ? OR peer_bot = ?) AND status = 'paused_stop'", botId, botId).n as number;
+  assert.equal(paused, 0, "no conversation is paused");
+  const audit = await req(s.base, "GET", `/v1/audit-events?subject=${botId}`, ownerToken);
+  assert.equal(audit.body.events.some((e: any) => e.action === "bot.emergency_stop"), false, "no bot.emergency_stop audit is written");
+
+  // And the door stays shut: the resume guard still refuses the identity, minting no token.
+  const resumed = await req(s.base, "POST", `/v1/bots/${botId}/resume`, ownerToken);
+  assert.equal(resumed.status, 403, `resuming a revoked Bot must still be refused, got ${resumed.status} ${JSON.stringify(resumed.body)}`);
+  assert.equal(resumed.body.error.code, "bot_revoked");
+  assert.equal("bot_token" in resumed.body, false, "no fresh token is minted");
+});
