@@ -75,3 +75,34 @@ test("a client that retries while throttled is not kept throttled by its own ret
     assert.ok(ok.room_id, "the window the owner filled is over: their own refused retries must not refill it");
   } finally { await s.stop(); }
 });
+
+test("a failed ticket check does not spend the preview budget", async () => {
+  const s = await startServer({ faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 3, attemptWindowMs: 600_000 } });
+  try {
+    const A = await ownerWithBot(s.base, "selfmirror");
+    const B = await ownerWithBot(s.base, "selfmirrorb");
+    // Two addresses: the host opens the room, the guest comes from elsewhere and only ever shows a dead ticket.
+    const host = "203.0.113.10", guest = "203.0.113.20";
+    const call = async (method: string, path: string, token: string | null, body: unknown, ip: string) => {
+      const r = await fetch(s.base + path, { method, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}), "x-forwarded-for": ip }, body: body !== undefined ? JSON.stringify(body) : undefined });
+      const text = await r.text();
+      return { status: r.status, body: text ? JSON.parse(text) : {} };
+    };
+    const opened = await call("POST", "/v1/face-rooms/join", A.owner.token, { code: "470001", bots: [A.bot.id] }, host);
+    assert.equal(opened.status, 200);
+    const minted = await call("POST", `/v1/face-rooms/${opened.body.room_id}/invites`, A.owner.token, {}, host);
+    assert.equal(minted.status, 201);
+    const bad = "z".repeat(43);
+    const joinInvite = () => call("POST", "/v1/face-rooms/join-invite", B.owner.token, { ticket: bad, bots: [B.bot.id] }, guest);
+    // Three dead tickets fill the guest's per-address join cap of three, so these are the last checks it can make.
+    for (let i = 1; i <= 3; i++) assert.equal((await joinInvite()).status, 404, `ticket check ${i} is checked, not throttled`);
+    const rows = s.platform.db.prepare("SELECT owner_id, ip, outcome FROM face_room_attempts WHERE outcome = 'invite_not_found'").all() as any[];
+    assert.equal(rows.filter((r) => r.owner_id !== null && r.ip === guest).length, 3, "the failed ticket checks were recorded against the guest");
+    // The same address then reads a live invite. Its own reads are the only rows the preview budget may count:
+    // these three are the guest's, on the join side, and a join must not spend the read budget any more than a
+    // read spends the join one.
+    const preview = await call("GET", `/v1/face-rooms/invites/${minted.body.ticket}`, null, undefined, guest);
+    assert.equal(preview.status, 200, "the same address can still read a live invite");
+    assert.equal(preview.body.room_id, opened.body.room_id);
+  } finally { await s.stop(); }
+});
