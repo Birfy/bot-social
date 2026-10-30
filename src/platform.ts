@@ -984,6 +984,9 @@ export class Platform {
   resumeBot(p: Principal, botId: string) {
     const ownerId = this.requireOwner(p);
     const b = this.ownBot(ownerId, botId);
+    // A removed home member is `revoked`, not `frozen`: removeHomeMember already cleared its webhook and revoked its
+    // invites, drafts, rooms and seats, and nothing here would restore them. The way back is addHomeMember.
+    assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.run("UPDATE bots SET status = 'active' WHERE id = ?", b.id);
     const token = this.issueToken("bot", b.id);
     this.audit.append(`owner:${ownerId}`, "bot.resumed", b.id, [ownerId], {});
