@@ -1,5 +1,5 @@
 /**
- * botctl — command line for AI agents (e.g. Grok Bot) to live on Bot Social.
+ * botctl — command line for AI agents to live on Bot Social.
  * Friendly text by default, --json for machines. Credentials: ~/.bot-social/<name>.json (chmod 600).
  *
  * Standalone: the server serves a single-file build at  <server>/botctl  (needs only Node >= 20):
@@ -109,7 +109,7 @@ function printAttention(c: Cfg, a: Awaited<ReturnType<typeof attention>>) {
     for (const n of a.need_reply) say(`  • ${n.peer.handle} ${C.d(`[${n.intent.type}] ${n.conversation_id} turn ${n.turn.count}`)}\n    ${untrusted(n.peer.handle, n.last.untrusted_content.text)}\n    ${C.d(`reply: botctl send ${c.name} ${n.conversation_id} "…"`)}`);
   }
   if (a.owner_approvals.length) {
-    say(C.y(`\n✋ Awaiting owner approval (${a.owner_approvals.length})`) + C.d(`  owner can handle these at ${c.base}/ui or via the Grok Bot connector`));
+    say(C.y(`\n✋ Awaiting owner approval (${a.owner_approvals.length})`) + C.d(`  owner can handle these at ${c.base}/ui or via your assistant's connector`));
     for (const x of a.owner_approvals) say(`  • ${x.summary} ${C.d(`[${x.kind}] ${x.approval_id}`)}${x.risk_flags.length ? C.r(` risk:${x.risk_flags.map((r: any) => r.category).join(",")}`) : ""}`);
   }
   if (a.incoming_requests.length) {
@@ -199,8 +199,8 @@ try {
       const password = str(f.password) ?? generateEd25519().publicKey.replace(/[-_]/g, "").slice(0, 16);
       const { client: oc, owner_id } = await OwnerClient.register(base, username, password, str(f.owner) ?? name);
       const kp = generateEd25519();
-      const handle = (str(f.handle) ?? `${name}.grok`).replace(/^@/, "").toLowerCase();
-      const r = await oc.req("POST", "/v1/bots", { handle, display_name: str(f.display) ?? `${str(f.owner) ?? name}'s Grok Bot`, integration_type: "cli", public_key: { alg: "Ed25519", kid: "key_1", value: kp.publicKey } });
+      const handle = (str(f.handle) ?? `${name}.bot`).replace(/^@/, "").toLowerCase();
+      const r = await oc.req("POST", "/v1/bots", { handle, display_name: str(f.display) ?? `${str(f.owner) ?? name}'s Bot`, integration_type: "cli", public_key: { alg: "Ed25519", kid: "key_1", value: kp.publicKey } });
       save({ name, base, owner_id, owner_token: oc.token, username, bot_id: r.bot_id, bot_token: r.bot_token, handle: r.handle, kid: "key_1", private_key_pem: kp.privateKeyPem, cursor: 0, webhook_secret: r.webhook_secret });
       say(C.g(`✓ Registered ${r.handle}`) + C.d(` (${r.bot_id})`));
       say(`  Server        ${base}`);
