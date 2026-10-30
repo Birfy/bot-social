@@ -65,6 +65,13 @@ export function holdReasonOf(found: { riskFlags?: readonly unknown[]; attachment
 const nowIso = () => new Date().toISOString();
 /** Why a home could not hand a delivered message to its Bot (reportNotDelivered). A fixed list: the sender is shown a fixed line. */
 const NOT_DELIVERED_REASONS = ["not_shared_yet"];
+/** A join budget counts real door checks only, both the 6-digit code and the invite ticket. A request refused
+ *  for being over budget is not another check, so counting it cannot keep the budget full by itself. */
+const FACE_JOIN_OUTCOMES = ["invalid_code", "room_full", "code_void", "created", "joined", "rejoined",
+  "invited", "already_member", "invite_not_found", "ended", "revoked", "expired",
+  "claimed", "already_claimed", "bot_revoked"];
+/** Invite previews are reads: they get their own per-address budget and never spend the join one. */
+const FACE_PREVIEW_OUTCOMES = ["preview", "invite_not_found", "ended", "revoked", "expired"];
 const J = (s: string | null | undefined, d: any = null) => (s ? JSON.parse(s) : d);
 const ms = (iso: string) => {
   const t = Date.parse(iso);
@@ -3049,9 +3056,12 @@ export class Platform {
   /** 6-digit (and invite-join) attempts. A successful invite mint is not one of them: it has its own budget (#69). */
   private faceAttemptRateLimit(ownerId: string, ip: string | null) {
     const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
-    if (this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome != 'minted'", ownerId, since).n >= this.faceRoomLimits.attemptsPerAccount)
+    const marks = FACE_JOIN_OUTCOMES.map(() => "?").join(",");
+    if (this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE owner_id = ? AND created_at > ? AND outcome IN (${marks})`, ownerId, since, ...FACE_JOIN_OUTCOMES).n >= this.faceRoomLimits.attemptsPerAccount)
       return this.faceRateFail("too many code attempts from this account", "account", this.faceRoomLimits.attemptWindowMs);
-    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome != 'minted'", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+    // `ended` / `revoked` / `expired` / `invite_not_found` are also preview refusal codes, and a preview row has
+    // no owner (`owner_id IS NULL`). Only this owner-bound filter keeps a read out of the per-address join budget.
+    if (ip && this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND owner_id IS NOT NULL AND created_at > ? AND outcome IN (${marks})`, ip, since, ...FACE_JOIN_OUTCOMES).n >= this.faceRoomLimits.attemptsPerIp)
       return this.faceRateFail("too many code attempts from this address", "ip", this.faceRoomLimits.attemptWindowMs);
     return null;
   }
@@ -3328,7 +3338,9 @@ export class Platform {
         return { ok: false, status: 429, code: "locked_out", message: "too many failed code attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
       }
       const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
-      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, code || String(rawCode ?? ""), "rate_limited"); return { ...attemptBlock }; }
+      // Refused for being over budget is not an attempt: it writes no row, or the client's own retries would
+      // keep the window full. A lockout hit still writes one: that is a separate, older judgement.
+      if (attemptBlock) return { ...attemptBlock };
       if (!codeOk) {
         this.faceRecordAttempt(ownerId, ip, String(rawCode ?? ""), "invalid_code");
         return { ok: false, status: 400, code: "invalid_code", message: "code must be exactly 6 digits", lockout: this.faceMaybeLockout(ownerId, ip) };
@@ -3336,7 +3348,7 @@ export class Platform {
       const mapping = this.get("SELECT * FROM face_room_codes WHERE code = ?", code);
       if (!mapping) {
         const createBlock = this.faceCreateRateLimit(ownerId, ip);
-        if (createBlock) { this.faceRecordAttempt(ownerId, ip, code, "rate_limited"); return { ...createBlock }; }
+        if (createBlock) return { ...createBlock };
         if (bots.length > this.faceRoomLimits.maxMembers) {
           this.faceRecordAttempt(ownerId, ip, code, "room_full");
           return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots); no second room is opened`, lockout: this.faceMaybeLockout(ownerId, ip) };
@@ -3424,8 +3436,10 @@ export class Platform {
 
   private faceIpRateLimit(ip: string | null, message: string, scope: string) {
     const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
-    // Previews share the per-address join budget. A mint does not: `minted` is the invite-link budget (#69).
-    if (ip && this.get("SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome != 'minted'", ip, since).n >= this.faceRoomLimits.attemptsPerIp)
+    // Previews have their own per-address budget: a read never spends the join budget, so a client browsing
+    // its own links cannot lock itself out of joining. A mint is the invite-link budget (#69).
+    const marks = FACE_PREVIEW_OUTCOMES.map(() => "?").join(",");
+    if (ip && this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome IN (${marks})`, ip, since, ...FACE_PREVIEW_OUTCOMES).n >= this.faceRoomLimits.attemptsPerIp)
       return this.faceRateFail(message, scope, this.faceRoomLimits.attemptWindowMs);
     return null;
   }
@@ -3513,7 +3527,7 @@ export class Platform {
         return { ok: false, status: 429, code: "locked_out", message: "too many failed invite attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
       }
       const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
-      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "invite", "rate_limited"); return { ...attemptBlock } as Fail; }
+      if (attemptBlock) return { ...attemptBlock } as Fail;
       // BEGIN IMMEDIATE: a revoke that commits first is seen here, so the join is refused whole.
       const invite = this.faceInviteOf(ticket);
       const refusal = this.faceInviteRefusal(invite);
@@ -3709,7 +3723,7 @@ export class Platform {
         return { ok: false, status: 429, code: "locked_out", message: "too many failed invite attempts; try again later", extra: { retry_after: Math.max(1, Math.ceil((Date.parse(locked) - this.nowMs()) / 1000)) } };
       }
       const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
-      if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "local", "rate_limited"); return { ...attemptBlock } as Fail; }
+      if (attemptBlock) return { ...attemptBlock } as Fail;
       const invite = this.localInviteOf(ticketRaw);
       // #111: a block ends this pair's room doors, so a local-room ticket must not become the way back in — not by
       // claiming it again after a release, and not by re-sending a claim the block already withdrew. Already
