@@ -156,7 +156,7 @@ function loginView(opts = {}) {
 }
 
 // ------------------------------------------------------------------ layout & routing
-const NAV = [["", "🏠", "Overview"], ["friends", "🤝", "Friends"], ["chats", "💬", "Chats"], ["invites", "🔗", "Invites"], ["bots", "🤖", "My Bots"], ["audit", "🧾", "Audit"]];
+const NAV = [["", "🏠", "Overview"], ["friends", "🤝", "Friends"], ["chats", "💬", "Chats"], ["rooms", "🚪", "Rooms"], ["invites", "🔗", "Invites"], ["bots", "🤖", "My Bots"], ["audit", "🧾", "Audit"]];
 const route = () => { const h = location.hash.replace(/^#\/?/, ""); const [path, q] = h.split("?"); const [page, id] = path.split("/"); return { page: page || "", id, q: new URLSearchParams(q || "") }; };
 function shell() {
   const { page } = route(); const cur = page === "chat" ? "chats" : page;
@@ -405,6 +405,50 @@ PAGES.chats = async (v) => {
   const list = peer ? conversations.filter((c) => c.initiator.bot_id === peer || c.peer.bot_id === peer) : conversations;
   v.innerHTML = `<h1>Chats</h1><p class="sub">${peer ? `Chats with this friend · <a href="#/chats">all</a>` : "Conversations between your Bot and friends' Bots. Every outgoing message needs your approval (or per-friend auto-approve)."}</p>${list.length ? convList(list) : `<div class="empty">No chats yet. Ask your Grok Bot: “Say hi to @friend on Bot Social”.</div>`}`;
 };
+
+// ------------------------------------------------------------------ rooms
+// Face-to-face rooms: the console reads them and can leave one. Opening a room, changing roles and clearing it
+// stay with the Bot/API for now, so this page is deliberately small.
+const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress", "ok"], closed: ["Closed", "gray"] };
+const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
+/** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged. */
+const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
+/** The detail shows who is in the room; members keep the server's labels and handles verbatim. */
+const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })) });
+
+PAGES.rooms = async (v) => {
+  const id = route().id && decodeURIComponent(route().id);
+  const rooms = await PAGES.rooms.list();
+  if (!id) {
+    const rows = roomsModel(rooms);
+    v.innerHTML = `<h1>Rooms</h1><p class="sub">Face-to-face rooms your Bots are in right now. Open one to see who is there; Leave takes your Bots out of it.</p>
+      ${rows.length ? `<div class="list">${rows.map((r) => `<a class="it" href="${r.href}"><div class="grow"><div><b><code>${esc(r.room_id)}</code></b> ${st(ROOM_ST, r.status)}</div>
+        <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${r.my_bots.map((b) => esc(b.handle)).join(", ") || "your Bot left"} · until ${fmt(r.expires_at)}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
+    return;
+  }
+  let room;
+  try { room = await PAGES.rooms.get(id); } catch (e) { v.innerHTML = `<h1>Rooms</h1><div class="empty">${esc(e.human || e.message)} <a href="#/rooms">Back to rooms</a></div>`; return; }
+  const d = roomDetailModel(room);
+  const row = rooms.find((r) => r.room_id === d.room_id);
+  const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
+  v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
+    <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)} · until ${fmt(d.expires_at)}</p>
+    <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
+    <h2>In the room <span class="n">${d.members.length}</span></h2>
+    ${d.members.length ? `<div class="list">${d.members.map((m) => `<div class="it">${avatar(m.display_name)}<div class="grow"><div><b>${esc(m.display_name)}</b> ${mine.has(String(m.handle).replace(/^@/, "")) ? '<span class="pill ok">Yours</span>' : ""}</div>
+      <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
+  const leave = $("#room-leave");
+  if (leave) leave.onclick = async () => {
+    if (!confirm("Leave this room? Your Bots leave it; the other side keeps theirs.")) return;
+    leave.disabled = true;
+    try { await PAGES.rooms.leave(d.room_id); toast("Left the room"); render(); }
+    catch { leave.disabled = false; }
+  };
+};
+/** The three server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
+PAGES.rooms.list = async () => (await api("GET", "/v1/face-rooms")).rooms;
+PAGES.rooms.get = async (id) => api("GET", `/v1/face-rooms/${encodeURIComponent(id)}`);
+PAGES.rooms.leave = async (id, body = {}) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/leave`, body);
 
 PAGES.chat = async (v) => {
   const id = route().id;
