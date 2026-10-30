@@ -1295,6 +1295,10 @@ export class Platform {
    * (syncFaceRoomAccess) or when a room ticket is claimed (#43). It is what lets a send name a room context.
    */
   private findRoomGrant(grantorOwner: string, granteeBot: string, cap: string, grantedBot: string, roomId: string): any {
+    // A block is a decision about the pair, and a room door is still a door between the same two Bots: a grant
+    // that outlived the block (a row blocked before this rule existed, or one the block could not reach) must not
+    // answer for them. Checked here, at the single lookup every room door goes through.
+    if (this.pairRelationships(grantedBot, granteeBot).some((r: any) => r.status === "blocked")) return null;
     const rows = this.all("SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner FROM grants g JOIN relationships r ON r.id = g.relationship_id WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.capability = ? AND g.status = 'active' AND g.room_id = ? AND r.status = 'room'", grantorOwner, granteeBot, cap, roomId);
     for (const g of rows) {
       if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
@@ -1795,7 +1799,12 @@ export class Platform {
       for (const row of rows) if (row.status !== "blocked") this.endRelationship(ownerId, row, "blocked");
       return { relationship_id: rows[0].id, status: "blocked" };
     }
-    this.endRelationship(ownerId, r, "blocked");
+    // The Block button (`public/ui.js`, `scripts/botctl.ts`) sends the friendship's `relationship_id`, and the
+    // room row written when the pair shared a face room is a door between the same two Bots. Ending only the row
+    // the caller named left that room open (P23), so both doors now end the whole pair.
+    for (const row of this.pairRelationships(r.requester_bot, r.target_bot)) {
+      if (row.status !== "blocked") this.endRelationship(ownerId, row, "blocked");
+    }
     return { relationship_id: r.id, status: "blocked" };
   }
 
@@ -3141,6 +3150,9 @@ export class Platform {
     }
   }
   private ensurePairRoomGrant(roomId: string, a: any, b: any, actorOwnerId: string) {
+    // Layer 2 of #111: the join doors already refuse a blocked pair, so this is the backstop for any path that
+    // still arrives here (a seat sync, a claim). A block outlives the room it was made in; never rebuild its door.
+    if (this.pairRelationships(a.id, b.id).some((r: any) => r.status === "blocked")) return;
     const hit = this.get(`SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
       WHERE g.room_id = ? AND g.status = 'active' AND r.status = 'room'
       AND ((r.requester_bot = ? AND r.target_bot = ?) OR (r.requester_bot = ? AND r.target_bot = ?))`, roomId, a.id, b.id, b.id, a.id);
@@ -3238,6 +3250,16 @@ export class Platform {
     if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
     return { ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
   }
+
+  /**
+   * #111: a block is a decision about a Bot pair, so seating the pair in a room again must not hand back the room
+   * door the block closed. Asked for the Bots about to take a seat against the ones already in the room.
+   */
+  private facePairBlocked(newcomers: any[], active: any[]): boolean {
+    return newcomers.some((n: any) => active.some((m: any) =>
+      m.bot_id !== n.id && this.pairRelationships(n.id, m.bot_id).some((r: any) => r.status === "blocked")));
+  }
+
   /** Who made the room: stored at creation; for a room from before that, the owner whose Bot joined first. */
   private faceCreatorOf(room: any): string | null {
     if (room.created_by_owner_id) return room.created_by_owner_id;
@@ -3340,6 +3362,14 @@ export class Platform {
       if (active.length + newcomers.length > this.faceRoomLimits.maxMembers) {
         this.faceRecordAttempt(ownerId, ip, code, "room_full");
         return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots); no second room is opened`, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      if (newcomers.length && this.facePairBlocked(newcomers, active)) {
+        // #111: a block closes this pair's room door, so re-entering the same number must not seat them again.
+        // Refused whole, before a seat is written, in the answer this door already gives for a number that has
+        // just died: a valid number is not refused this way, so the caller reads it as the room ending, not as a
+        // block. The attempt is counted as the same kind of failure, so the lockout bookkeeping is unchanged.
+        this.faceRecordAttempt(ownerId, ip, code, "code_void");
+        return { ok: false, status: 409, code: "code_void", message: "this number is no longer valid", lockout: this.faceMaybeLockout(ownerId, ip) };
       }
       if (newcomers.length) {
         this.faceAddMembers(room.id, newcomers, ownerId);
@@ -3502,6 +3532,13 @@ export class Platform {
       if (active.length + newcomers.length > this.faceRoomLimits.maxMembers) {
         this.faceRecordAttempt(ownerId, ip, "invite", "room_full");
         return { ok: false, status: 409, code: "room_full", message: `this room is full (max ${this.faceRoomLimits.maxMembers} bots)`, lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
+      if (this.facePairBlocked(newcomers, active)) {
+        // #111: the same rule as the code door — a block ends this pair's room doors, so the ticket must not be
+        // the way back in. This door refuses a ticket that is not there for the caller with a 404, and the block
+        // gets exactly that answer, word for word and counted as the same failure.
+        this.faceRecordAttempt(ownerId, ip, "invite", "invite_not_found");
+        return { ok: false, status: 404, code: "invite_not_found", message: "this invite link is not valid", lockout: this.faceMaybeLockout(ownerId, ip) };
       }
       this.faceAddMembers(room.id, newcomers, ownerId);
       this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
@@ -3674,6 +3711,14 @@ export class Platform {
       const attemptBlock = this.faceAttemptRateLimit(ownerId, ip);
       if (attemptBlock) { this.faceRecordAttempt(ownerId, ip, "local", "rate_limited"); return { ...attemptBlock } as Fail; }
       const invite = this.localInviteOf(ticketRaw);
+      // #111: a block ends this pair's room doors, so a local-room ticket must not become the way back in — not by
+      // claiming it again after a release, and not by re-sending a claim the block already withdrew. Already
+      // answered like a link that is not there for this caller; the attempt is counted as that same refusal.
+      const inviterBot = invite ? this.get("SELECT * FROM bots WHERE id = ?", invite.inviter_bot) : null;
+      if (inviterBot && bots.some((b) => this.pairRelationships(b.id, inviterBot.id).some((r: any) => r.status === "blocked"))) {
+        this.faceRecordAttempt(ownerId, ip, "local", "invite_not_found");
+        return { ok: false, status: 404, code: "invite_not_found", message: "this invite link is not valid" };
+      }
       const mine = this.localInviteClaimOf(invite, ownerId);
       // The same home with the same Bots again is the usual retry (the answer was lost): it succeeds, even past an
       // older ticket's deadline, because the claim landed before it.
@@ -3763,6 +3808,8 @@ export class Platform {
   }
 
   private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actorOwnerId: string) {
+    // Layer 2 of #111, the local-room twin of `ensurePairRoomGrant`: never rebuild a blocked pair's door.
+    if (this.pairRelationships(guest.id, inviter.id).some((r: any) => r.status === "blocked")) return;
     const hit = this.get(`SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
       WHERE g.room_id = ? AND g.status = 'active' AND r.status = 'room'
       AND ((r.requester_bot = ? AND r.target_bot = ?) OR (r.requester_bot = ? AND r.target_bot = ?))`, roomId, inviter.id, guest.id, guest.id, inviter.id);
