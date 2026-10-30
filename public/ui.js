@@ -28,7 +28,7 @@ const capPill = (c, extra = "") => `<span class="pill" title="${esc(c)}">${esc(C
 const REL_ST = { active: ["Friends", "ok"], pending_target: ["Waiting for their owner", "warn"], pending_requester_owner: ["Waiting for your approval", "warn"], blocked: ["Blocked", "bad"], revoked: ["Removed", "gray"], declined: ["Rejected", "gray"], expired: ["Expired", "gray"], cancelled: ["Cancelled", "gray"] };
 const CONV_ST = { open: ["Active", "ok"], awaiting_approval: ["Pending approval", "warn"], paused_limit: ["Paused (old turn limit)", "warn"], paused_loop: ["Loop suspected", "bad"], paused_stop: ["Emergency-stopped", "bad"], closed: ["Closed", "gray"] };
 const OUTCOME = { agreed: "Agreed", declined: "Rejected", abandoned: "Abandoned", expired: "Expired", revoked: "Unfriended" };
-const KIND = { outbound_message: "Outbound message", action: "Sensitive action", relationship_request: "Friend request", grant_request: "Capability request", invite: "Invite link" };
+const KIND = { outbound_message: "Outbound message", action: "Sensitive action", relationship_request: "Friend request", grant_request: "Capability request", invite: "Invite link", face_room_message: "Room message" };
 const MSG_ST = { pending_approval: "Awaiting your approval", delivered: "Delivered", rejected: "Rejected", cancelled: "Voided", expired: "Expired" };
 const st = (map, k) => { const [t, c] = map[k] || [k, "gray"]; return `<span class="pill ${c}">${esc(t)}</span>`; };
 
@@ -285,6 +285,8 @@ function approvalCard(a) {
   else if (a.action) body = `<div class="struct">${esc(a.action.action_type)}\n${esc(JSON.stringify(a.action.params, null, 1))}</div>${a.action.justification ? `<div class="mut small">Bot's reason: ${esc(a.action.justification)}</div>` : ""}`;
   else if (a.relationship) body = `<div class="small" style="margin-top:6px">Target: <b>${esc(a.relationship.target.display_name)}</b> ${esc(a.relationship.target.handle)}(owner ${esc(a.relationship.target.owner_display_name)})<br>You will grant: ${a.relationship.offered_capabilities.map((c) => capPill(c)).join(" ")}</div>`;
   else if (a.grant_request) body = `<div class="small" style="margin-top:6px"><b>${esc(a.grant_request.from.display_name)}</b> requests ${capPill(a.grant_request.capability)}</div>${a.grant_request.reason ? `<div class="untrusted" style="margin-top:6px"><div class="lbl">Their reason (untrusted content)</div>${esc(a.grant_request.reason)}</div>` : ""}`;
+  else if (a.face_room) body = `<div class="mut small" style="margin:6px 0 4px">In room ${esc(a.face_room.room_id)}</div>
+    <div class="small" style="margin-top:4px">${esc(a.face_room.payload.text)}</div>${(a.face_room.mentions || []).length ? `<div class="row small" style="margin-top:6px;flex-wrap:wrap"><span class="mut">To:</span>${a.face_room.mentions.map((h) => `<span class="pill">${esc(h)}</span>`).join(" ")}</div>` : ""}`;
   else if (a.invite) body = `<div class="small" style="margin-top:6px">Grants to joiner: ${a.invite.offered_capabilities.map((c) => capPill(c)).join(" ")} · ${a.invite.max_uses} uses · until ${fmt(a.invite.expires_at)}</div>`;
   const flags = a.risk_flags.map((f) => `<span class="pill bad">⚠ ${esc(f.label || f.category)}</span>`).join(" ");
   return `<div class="card" data-apr="${a.approval_id}"><div class="row"><span class="pill">${esc(KIND[a.kind] || a.kind)}</span>${flags}<span class="grow"></span><span class="mut">${ago(a.created_at)}</span></div>
