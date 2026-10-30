@@ -3451,9 +3451,13 @@ export class Platform {
   private faceIpRateLimit(ip: string | null, message: string, scope: string) {
     const since = new Date(this.nowMs() - this.faceRoomLimits.attemptWindowMs).toISOString();
     // Previews have their own per-address budget: a read never spends the join budget, so a client browsing
-    // its own links cannot lock itself out of joining. A mint is the invite-link budget (#69).
+    // its own links cannot lock itself out of joining. The two sides are isolated both ways: `preview` rows are
+    // written with no owner, while a join that fails on a ticket records the same refusal codes against its
+    // owner (`invite_not_found`, `expired`, `revoked`, `ended`). Counting only owner-less rows here keeps those
+    // failed door checks out of the read budget, exactly as the join budget's per-IP query keeps previews out
+    // of its own. A mint is the invite-link budget (#69).
     const marks = FACE_PREVIEW_OUTCOMES.map(() => "?").join(",");
-    if (ip && this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND created_at > ? AND outcome IN (${marks})`, ip, since, ...FACE_PREVIEW_OUTCOMES).n >= this.faceRoomLimits.attemptsPerIp)
+    if (ip && this.get(`SELECT COUNT(*) n FROM face_room_attempts WHERE ip = ? AND owner_id IS NULL AND created_at > ? AND outcome IN (${marks})`, ip, since, ...FACE_PREVIEW_OUTCOMES).n >= this.faceRoomLimits.attemptsPerIp)
       return this.faceRateFail(message, scope, this.faceRoomLimits.attemptWindowMs);
     return null;
   }
