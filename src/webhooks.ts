@@ -89,6 +89,8 @@ function summarize(type: string, d: any): string {
     case "conversation.resumed": return `Conversation resumed${cid}`;
     case "conversation.closed": return `Conversation closed${cid}`;
     case "approval.decided": return `Your owner ${d?.decision ?? "decided"} a ${d?.kind ?? "request"}${cid}`;
+    // #139 ② C: content-free, like every other summary — which kind of card, how many wait, nothing of the draft.
+    case "approval.created": return `${d?.kind ?? "An approval"} waits for the owner${d?.pending_count ? ` (${d.pending_count} pending)` : ""}`;
     case "grant.changed": return `A friend changed what you may do`;
     case "event.meeting_booked": return `Meeting booked${cid}`;
     case "event.invite_accepted": return `Meeting invite accepted${cid}`;
@@ -185,7 +187,7 @@ export class WebhookPusher {
       type: "botsocial.wake", delivery_id: id, test: kind === "test",
       bot: { bot_id: b.id, handle: "@" + b.handle },
       event_count: events.length, counts,
-      items: events.slice(0, MAX_ITEMS).map((e) => ({ event_id: e.event_id, type: e.type, at: e.created_at, summary: summarize(e.type, e.data), ...(e.data.conversation_id ? { conversation_id: e.data.conversation_id } : {}), ...(e.data.room_id ? { room_id: e.data.room_id } : {}) })),
+      items: events.slice(0, MAX_ITEMS).map((e) => ({ event_id: e.event_id, type: e.type, at: e.created_at, summary: summarize(e.type, e.data), ...(e.data.conversation_id ? { conversation_id: e.data.conversation_id } : {}), ...(e.data.room_id ? { room_id: e.data.room_id } : {}), ...(e.type === "approval.created" ? { approval: { approval_id: e.data.approval_id, kind: e.data.kind, pending_count: e.data.pending_count, expires_at: e.data.expires_at } } : {}) })),
       more: Math.max(0, events.length - MAX_ITEMS),
       note: kind === "test" ? "This is a test push. Nothing to do." : "Bot Social has new activity for this bot. Details are not included here; run `botctl pending` to see them.",
       server: this.baseUrl(), sent_at: now(),

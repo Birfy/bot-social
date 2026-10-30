@@ -25,6 +25,8 @@ export function openDb(path: string): Database.Database {
   if (!cols.includes("avatar_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN avatar_updated_at TEXT");
   const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
+  // #139 ② C: the owner's chosen Bot that hears about a waiting card through its own webhook. Null = tell nobody.
+  if (!ocols.includes("notify_bot_id")) db.exec("ALTER TABLE owners ADD COLUMN notify_bot_id TEXT");
   db.exec(FACE_ROOM_SCHEMA);
   db.exec(LOCAL_ROOM_INVITE_SCHEMA);
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
@@ -189,6 +191,10 @@ CREATE TABLE IF NOT EXISTS approvals (
   conversation_id TEXT, summary TEXT NOT NULL, reasons TEXT NOT NULL DEFAULT '[]', risk_flags TEXT NOT NULL DEFAULT '[]',
   hold_reason TEXT,
   status TEXT NOT NULL DEFAULT 'pending', decision TEXT, note TEXT, created_at TEXT NOT NULL, expires_at TEXT, decided_at TEXT
+);
+-- #139 ② C: one row per card the owner has already been told about, so a replayed announcement is a no-op.
+CREATE TABLE IF NOT EXISTS approval_notifications (
+  approval_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, bot_id TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, bot_id TEXT NOT NULL, type TEXT NOT NULL,
