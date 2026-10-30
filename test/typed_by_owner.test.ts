@@ -35,7 +35,8 @@ test("direct chat: typed_by_owner is stamped on delivery, inbox, conversation vi
   const typed = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "typed by Danyang", typed_by_owner: true });
   assert.equal(typed.typed_by_owner, true);
   assert.equal(typed.message.typed_by_owner, true);
-  await approve(a.owner_id, typed.message.approval_id);
+  assert.equal(typed.message.status, "delivered", "the owner's own line needs no card");
+  assert.equal(typed.message.approval_id, undefined);
   const ev = await received(B, coder);
   assert.equal(ev.length, 2);
   const [e1, e2] = ev;
@@ -52,9 +53,9 @@ test("direct chat: typed_by_owner is stamped on delivery, inbox, conversation vi
 });
 
 test("countersignature covers typed_by_owner (flipping it breaks verification)", async (t) => {
-  const { s, a, A, chief, coder, approve } = await pair(t);
+  const { s, A, chief, coder } = await pair(t);
   const typed = await A("send_as_member", { from_bot_id: chief.bot_id, to: coder.handle, text: "hello", typed_by_owner: true });
-  await approve(a.owner_id, typed.message.approval_id);
+  assert.equal(typed.message.status, "delivered");
   const row: any = s.platform.db.prepare("SELECT data FROM events WHERE type = 'message.received' ORDER BY seq DESC LIMIT 1").get();
   const d = JSON.parse(row.data);
   assert.equal(d.typed_by_owner, true);
@@ -117,7 +118,7 @@ test("owner login session may attest over REST /v1/homes/:id/send", async (t) =>
   const sent = await post(s.base, `/v1/homes/${a.home.bot_id}/send`, { from_bot_id: chief.bot_id, to: coder.handle, text: "from console", typed_by_owner: true }, login.body.owner_token);
   assert.equal(sent.status, 202);
   assert.equal(sent.body.typed_by_owner, true);
-  await approve(a.owner_id, sent.body.message.approval_id);
+  assert.equal(sent.body.message.status, "delivered");
   assert.equal((await received(B, coder))[0].typed_by_owner, true);
 });
 

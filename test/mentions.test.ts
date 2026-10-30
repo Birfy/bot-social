@@ -37,7 +37,7 @@ test("direct chat: mentions are validated, kept to the conversation ends, delive
     mentions: [coder.handle.toUpperCase(), coder.handle.replace(/^@/, ""), "@someone.else"],
   });
   assert.deepEqual(sent.message.mentions, [coder.handle.toLowerCase()]);
-  await approve(a.owner_id, sent.message.approval_id);
+  assert.equal(sent.message.status, "delivered", "an owner-typed line goes out without a card");
   const ev = await received(B, coder);
   assert.equal(ev.length, 2);
   assert.equal("mentions" in ev[0], false);

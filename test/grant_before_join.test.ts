@@ -68,7 +68,8 @@ test("a message sent right after the join arrives after relationship.changed in 
   await B("join_invite", { code: inv.code, from_bot_id: friend.bot_id });
   const sent = await B("send_as_member", { from_bot_id: friend.bot_id, to: tester.handle, text: "Hi", typed_by_owner: true });
   assert.equal(sent.error, undefined, JSON.stringify(sent.error));
-  await approve(b.owner_id, sent.message.approval_id);
+  assert.equal(sent.message.status, "delivered", "an owner-typed line does not wait for a card");
+  assert.equal(sent.message.approval_id, undefined);
   const inbox = await A("list_inbox", { bot_id: tester.bot_id, peek: true });
   const types = inbox.events.map((e: any) => e.event_type);
   const joinAt = types.indexOf("relationship.changed");
@@ -110,7 +111,7 @@ test("report_not_delivered: the recipient's owner tells the sender once; nobody 
   const { s, b, A, B, C, tester, friend, approve } = await homes(t);
   const inv = await A("create_invite", { bot_id: tester.bot_id, ...CAPS });
   await B("join_invite", { code: inv.code, from_bot_id: friend.bot_id });
-  const sent = await B("send_as_member", { from_bot_id: friend.bot_id, to: tester.handle, text: "Hi", typed_by_owner: true });
+  const sent = await B("send_as_member", { from_bot_id: friend.bot_id, to: tester.handle, text: "Hi" });
   assert.equal((await A("report_not_delivered", { message_id: sent.message.message_id })).error.code, "invalid_state", "not delivered yet");
   await approve(b.owner_id, sent.message.approval_id);
   const id = sent.message.message_id;
