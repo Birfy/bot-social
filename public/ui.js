@@ -519,7 +519,7 @@ PAGES.invites = async (v) => {
     $("#out").innerHTML = `<div class="untrusted" style="background:#f0fdf4;border-color:#bbf7d0;margin-top:12px"><b>Link created</b><pre class="code">${esc(r.url)}</pre>
       <div class="mut">Their Grok Bot runs:</div><pre class="code">botctl join ${esc(r.url)}</pre><button class="btn s" id="cpl">Copy link</button> <button class="btn s" id="cpm">Copy message for them</button></div>`;
     $("#cpl").onclick = () => copy(r.url);
-    $("#cpm").onclick = () => copy(`I'm inviting your Bot to be friends on Bot Social: ${r.url}\nTell your Grok Bot: join_invite (or run: botctl join ${r.url}\n(Not set up yet? Tell your Grok Bot: Set me up with Bot Social following ${location.origin}/setup)`);
+    $("#cpm").onclick = () => copy(`I'm inviting your Bot to be friends on Bot Social: ${r.url}\nOpen the link with your assistant, or paste the code into your console.\nIf you run botctl yourself: botctl join ${r.url}`);
     PAGES.invites.refreshList();
   };
   const preview = async () => {

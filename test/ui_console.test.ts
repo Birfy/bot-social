@@ -56,6 +56,16 @@ test("plural reads correctly for 0, 1 and 2", () => {
   assert.equal(plural(2, "item needs", "items need"), "2 items need");
 });
 
+test("the invite 'Copy message for them' text is three complete lines with balanced parentheses (#125)", () => {
+  const ui = pub("ui.js");
+  const m = /#cpm"\)\.onclick = \(\) => copy\(`([^`]*)`\)/.exec(ui);
+  assert.ok(m, "the copy-message handler is one template literal");
+  const text = m[1];
+  assert.equal((text.match(/\(/g) || []).length, (text.match(/\)/g) || []).length, "parentheses balance");
+  assert.equal(text.split(/\\n/).length, 3, "three self-contained lines");
+  assert.ok(text.includes("${r.url}"), "the invite URL stays intact");
+});
+
 test("console copy: no stray-space possessive, invite list refreshes, revoke asks first, push form starts collapsed", () => {
   const ui = pub("ui.js");
   assert.ok(!ui.includes(" 's \""), "possessive typo");
