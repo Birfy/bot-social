@@ -281,7 +281,7 @@ function secretsPanel({ title, lead, model }) {
 function approvalCard(a) {
   let body = "";
   if (a.message) body = `<div class="mut small" style="margin:6px 0 4px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}${a.conversation ? ` · ${esc(a.conversation.intent.summary || a.conversation.intent.type)} · turn ${a.conversation.turn.count + 1}` : ""}</div>
-    <textarea data-edit="${a.approval_id}">${esc(a.message.payload.text)}</textarea>${a.message.payload.structured ? `<div class="struct">${esc(JSON.stringify(a.message.payload.structured, null, 1))}</div>` : ""}`;
+    <textarea data-edit="${a.approval_id}">${esc(a.message.payload.text)}</textarea>${a.message.payload.structured ? `<div class="struct">${esc(JSON.stringify(a.message.payload.structured, null, 1))}</div>` : ""}${(a.message.payload.attachments || []).length ? `<div class="row small" style="margin:6px 0 2px;flex-wrap:wrap"><span class="mut">Attached:</span>${a.message.payload.attachments.map((x) => `<button class="btn s" data-att="${esc(x.id)}" title="Open ${esc(x.name)}">📎 ${esc(x.name)} · ${esc(x.size_label)}</button>`).join(" ")}</div>` : ""}`;
   else if (a.action) body = `<div class="struct">${esc(a.action.action_type)}\n${esc(JSON.stringify(a.action.params, null, 1))}</div>${a.action.justification ? `<div class="mut small">Bot's reason: ${esc(a.action.justification)}</div>` : ""}`;
   else if (a.relationship) body = `<div class="small" style="margin-top:6px">Target: <b>${esc(a.relationship.target.display_name)}</b> ${esc(a.relationship.target.handle)}(owner ${esc(a.relationship.target.owner_display_name)})<br>You will grant: ${a.relationship.offered_capabilities.map((c) => capPill(c)).join(" ")}</div>`;
   else if (a.grant_request) body = `<div class="small" style="margin-top:6px"><b>${esc(a.grant_request.from.display_name)}</b> requests ${capPill(a.grant_request.capability)}</div>${a.grant_request.reason ? `<div class="untrusted" style="margin-top:6px"><div class="lbl">Their reason (untrusted content)</div>${esc(a.grant_request.reason)}</div>` : ""}`;
@@ -320,6 +320,17 @@ function expiredCard(a) {
     <div class="small" style="margin-top:6px;color:var(--mut)">expired before it was sent — nothing was delivered</div></div>`;
 }
 function bindApprovals(root, after) {
+  // A file waiting on the card is fetched with the owner's token before it is opened: the endpoint needs the
+  // Authorization header, so a plain link would land on a 401 page and look like a broken file.
+  $$("[data-att]", root).forEach((b) => (b.onclick = async () => {
+    try {
+      const r = await fetch("/v1/attachments/" + encodeURIComponent(b.dataset.att), { headers: token ? { authorization: "Bearer " + token } : {} });
+      if (!r.ok) { toast(errText(undefined, undefined, r.status)); return; }
+      const url = URL.createObjectURL(await r.blob());
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch { toast(ERR.network); }
+  }));
   $$("[data-apr]", root).forEach((card) => $$("[data-dec]", card).forEach((b) => (b.onclick = async () => {
     const id = card.dataset.apr, d = b.dataset.dec, body = { decision: d };
     if (d === "approved_with_edits") body.edited_payload = { text: $(`[data-edit="${id}"]`, card).value };
