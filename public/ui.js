@@ -395,8 +395,12 @@ PAGES.friends = async (v) => {
   const sel = route().q.get("bot") || localStorage.getItem("bs_sel_bot") || "";
   const d = await api("GET", "/v1/friends-overview" + (sel ? "?bot_id=" + encodeURIComponent(sel) : ""), null, true).catch(() => api("GET", "/v1/friends-overview"));
   if (!d.bot) { v.innerHTML = `<h1>Friends</h1><div class="empty">You have no Bot yet. <a href="#/bots">Register one</a> or send the <a href="/guide">Agent guide</a> to your assistant.</div>`; return; }
-  const friendCard = (f) => `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
-    <div class="kv"><span>${f.connected_at ? "Friends since" : "Requested"}</span><span>${fmt(f.connected_at || f.requested_at)}</span>
+  const friendCard = (f) => {
+    // On a removed or blocked row `connected_at` is the moment it ended (the server takes it from `updated_at`), so
+    // the History card names that moment instead of claiming the friendship started there.
+    const [when, at] = f.status === "active" ? ["Friends since", f.connected_at] : f.status === "blocked" ? ["Blocked", f.connected_at] : f.status === "revoked" ? ["Removed", f.connected_at] : ["Requested", f.requested_at];
+    return `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
+    <div class="kv"><span>${when}</span><span>${fmt(at)}</span>
       <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")).join(" ") || '<span class="mut">none</span>'}
         ${f.status === "active" ? `<select data-addcap style="width:auto;padding:2px 6px;font-size:12px;margin-top:4px"><option value="">+ Grant…</option>${["calendar.freebusy.read", "calendar.book", "chat.public", "profile.read"].filter((c) => !f.capabilities.granted_to_peer.some((g) => g.capability === c)).map((c) => `<option value="${c}">${esc(CAP_LABEL[c])}</option>`).join("")}</select>` : ""}</span>
       <span>They grant me</span><span>${f.capabilities.granted_to_me.map((g) => capPill(g.capability)).join(" ") || '<span class="mut">none</span>'}</span>
@@ -406,6 +410,7 @@ PAGES.friends = async (v) => {
       <div class="grow small">Auto-approve low-risk chat<div class="mut">messages with sensitive info still need your approval</div></div></div>
       <div class="row" style="margin-top:10px">${f.conversation_count ? `<a class="btn s" href="#/chats?peer=${encodeURIComponent(f.peer.bot_id)}">Chats (${f.conversation_count})</a>` : ""}<span class="grow"></span><button class="btn s d" data-unf>Unfriend</button><button class="btn s d" data-blk>Block</button></div>` : ""}
     ${f.status === "blocked" && f.blocked_by_me ? "" : ""}</div>`;
+  };
   const pendOut = (f) => `<div class="card"><div class="row">${avatar(f.peer.display_name, 34)}<div class="grow"><b>${esc(f.peer.display_name)}</b> <span class="mut">${esc(f.peer.handle)}</span></div>${st(REL_ST, f.status)}</div><div class="mut" style="margin-top:6px">Sent ${fmt(f.requested_at)} · expires ${fmt(f.expires_at)}</div></div>`;
   const incoming = d.pending_incoming.filter((x) => x.status === "pending_target");
   v.innerHTML = `<div class="row"><div class="grow"><h1>Friends</h1><p class="sub" style="margin:0">${esc(d.bot.display_name)} · ${esc(d.bot.handle)}</p></div>
