@@ -624,13 +624,14 @@ PAGES.chat = async (v) => {
   const e = $("#ext"); if (e) e.onclick = async () => { await api("POST", `/v1/conversations/${id}/extend`, { extra_turns: 4 }); toast("Resumed"); render(); };
   const k = $("#cls"); if (k) k.onclick = async () => { if (confirm("Close this conversation?")) { await api("POST", `/v1/conversations/${id}/close`, { outcome: "abandoned" }); render(); } };
   // The 202 only says the line was accepted; what the owner ends up reading comes from a fresh conversation read, so a
-  // line held for approval shows as held and a refused one leaves no bubble behind (api() toasts the reason).
+  // line held for approval shows as held and a refused one leaves no bubble behind (api() toasts the reason). The body
+  // names the conversation on screen: the send route otherwise reuses the pair's newest thread, which is not this one.
   const box = $("#composer-text"), send = $("#send-line");
   if (box && send) send.onclick = async () => {
     const text = String(box.value || "").trim();
     if (!text) { toast("Type a message first."); return; }
     send.disabled = true;
-    try { await api("POST", `/v1/homes/${encodeURIComponent(me.home || self.bot_id)}/send`, { from_bot_id: self.bot_id, to: peer.bot_id, text, typed_by_owner: true }); render(); }
+    try { await api("POST", `/v1/homes/${encodeURIComponent(me.home || self.bot_id)}/send`, { from_bot_id: self.bot_id, to: peer.bot_id, text, typed_by_owner: true, conversation_id: id }); render(); }
     catch { send.disabled = false; }
   };
   const m = $(".msgs"); if (m) m.lastElementChild?.scrollIntoView({ block: "nearest" });

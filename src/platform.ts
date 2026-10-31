@@ -588,12 +588,12 @@ export class Platform {
   }
 
   /** A signed message from one of my home's members to any bot of a friend home; reuses the pair's active conversation. */
-  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string; idempotency_key?: string }) {
+  sendAsMember(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string; conversation_id?: string; idempotency_key?: string }) {
     const { idempotency_key: key, ...rest } = body as any;
     return this.idempotent(p, "send_as_member", key, rest, () => this.sendAsMemberOnce(p, rest));
   }
 
-  private sendAsMemberOnce(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string }) {
+  private sendAsMemberOnce(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string; conversation_id?: string }) {
     const ownerId = this.requireOwner(p);
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
@@ -613,13 +613,37 @@ export class Platform {
     // friendship and without a fresh conversation elsewhere.
     const roomRel = roomId === null ? null : this.roomReach(cb.botId, to.id, roomId);
     if (roomId !== null) assert(roomRel, 403, "no_relationship", "no room reach to that Bot in this room", { suggestion: "join the room with the invite link first" });
-    const rel = roomRel ?? this.activeRelationship(cb.botId, to.id);
-    // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
-    // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
-    // The door is part of the lookup: a pair can share several rooms, and reusing the conversation opened in
-    // another room would judge this room by that room's relationship (and, once it is gone, fail mid-draft).
-    const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) AND relationship_id = ? ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId, rel.id);
-    const conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId) as any).conversation_id;
+    // The console reads one chat and names it when the owner writes, so the line lands in the thread on screen
+    // instead of the pair's newest one. An explicit target must already be a conversation between these two Bots
+    // that can still take a line: nothing is created and nothing falls back to another thread. The same answer is
+    // given for a conversation that does not exist and for one of another pair, so ids cannot be probed.
+    const rawTarget = body?.conversation_id;
+    assert(rawTarget === undefined || rawTarget === null || typeof rawTarget === "string", 400, "invalid_request", "conversation_id must be a string");
+    const explicit = rawTarget === undefined || rawTarget === null ? null : String(rawTarget).trim();
+    assert(explicit === null || explicit.length > 0, 400, "invalid_request", "conversation_id must be a non-empty string");
+    let conversationId: string;
+    if (explicit !== null) {
+      const named = this.get("SELECT id, initiator_bot, peer_bot, relationship_id, status, outcome FROM conversations WHERE id = ?", explicit);
+      const mine = named && ((named.initiator_bot === cb.botId && named.peer_bot === to.id) || (named.initiator_bot === to.id && named.peer_bot === cb.botId));
+      assert(mine, 404, "conversation_not_found", "no such conversation between these Bots");
+      assert(named.status === "open" || named.status === "awaiting_approval", 409, named.status === "closed" ? "conversation_closed" : "conversation_paused", `conversation is ${named.status}${named.outcome ? ` (${named.outcome})` : ""}`);
+      // Naming a conversation must not hop the door this call is judged by: the thread has to be the one opened
+      // through that same relationship. Without this, a send naming room R1 could write into the conversation of
+      // another room R2 the pair also shares — R2's reach is never resolved here, so a closed room would still take
+      // the line — and the 1:1 route could write into a room's thread on nothing but a friendship and a non-room
+      // grant. A conversation off that door answers exactly like one that does not exist, so ids cannot be probed.
+      const doorId = roomRel?.id ?? this.findActiveRelationship(cb.botId, to.id)?.id ?? null;
+      assert(named.relationship_id === doorId, 404, "conversation_not_found", "no such conversation between these Bots");
+      conversationId = named.id;
+    } else {
+      const rel = roomRel ?? this.activeRelationship(cb.botId, to.id);
+      // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
+      // so every send opened a new conversation and hit newConversationsPerPairPerDay (then 5).
+      // The door is part of the lookup: a pair can share several rooms, and reusing the conversation opened in
+      // another room would judge this room by that room's relationship (and, once it is gone, fail mid-draft).
+      const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) AND relationship_id = ? ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId, rel.id);
+      conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId) as any).conversation_id;
+    }
     const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions, roomId);
     return { conversation_id: conversationId, message, typed_by_owner: typed, ...(roomId !== null ? { room_id: roomId } : {}) };
   }
