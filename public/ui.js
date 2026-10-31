@@ -45,6 +45,21 @@ let me = null;
 let badges = { approvals: 0, requests: 0 };
 
 function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 3200); }
+// A signing key is usable only while it is active and inside its expiry: addKey stamps `expires_at` on the keys
+// already there and leaves their status `active` (platform.ts), so a status count alone misses exactly the case
+// the console has to warn about.
+const keyCanSign = (k) => k?.status === "active" && (!k.expires_at || Date.parse(k.expires_at) > Date.now());
+/** The lowest free `<prefix><n>` slot among the Bot's keys (k1 → k2, key_1 → key_2), so the prefilled kid cannot collide. */
+function nextKid(keys) {
+  const fams = (keys || []).map((k) => /^(.*?)(\d+)$/.exec(String(k.kid))).filter(Boolean);
+  if (!fams.length) return "key_1";
+  const prefix = fams[0][1];
+  const taken = new Set(fams.filter((m) => m[1] === prefix).map((m) => Number(m[2])));
+  let n = 1; while (taken.has(n)) n++;
+  return prefix + n;
+}
+/** Said instead of the generic sentence when the click would leave the Bot without a key that can sign. */
+const lastKeyWarning = (handle, kid) => `Revoke key ${kid}? It is the last key @${handle} can sign with, so every signed request is rejected (401 invalid_signature) until you add a key.`;
 // Human sentences for server error codes. Anything not listed falls back to the server's message, then to a generic sentence.
 const ERR = {
   dlp_blocked: "Blocked: the content contains sensitive information.", no_relationship: "You are no longer friends.", invalid_credentials: "Wrong username or password.",
@@ -54,6 +69,7 @@ const ERR = {
   unauthorized: "You were signed out. Please sign in again.", owner_only: "Only the owner can do this.", forbidden: "You don't have permission to do that.",
   rate_limited: "Too many requests. Please wait a moment and try again.", payload_too_large: "That is too large to send.", not_found: "That item no longer exists.",
   bot_not_found: "That Bot was not found.", invalid_public_key: "That public key is not valid. Paste a raw 32-byte Ed25519 key in base64url, or leave it empty.",
+  kid_exists: "That key ID is already used by this Bot. Pick another one.",
   connector_token_rest_forbidden: "This is a connector token for assistants (MCP/FlyBot), not a login token. Sign in with your username and password.",
   internal_error: "The server ran into a problem. Please try again.", network: "Can't reach Bot Social. Check your connection and try again.",
   approval_not_found: "This approval was already handled or withdrawn. Refresh the page.",
@@ -714,7 +730,9 @@ PAGES.bots = async (v) => {
       <div class="row" style="margin-top:10px"><a class="btn s" href="#/friends?bot=${b.id}" onclick="localStorage.setItem('bs_sel_bot','${b.id}')">Friends</a>${b.status === "active" ? `<button class="btn s d" data-stop="${b.id}">⛔ Emergency stop</button>` : b.status === "frozen" ? `<button class="btn s" data-resume="${b.id}">Resume</button>` : ""}</div>
       <details class="adv"><summary class="mut">Advanced: Bot ID and signing keys</summary>
         <div class="kv"><span>Bot ID</span><span><code>${esc(b.id)}</code></span><span>Integration</span><span>${esc(b.integration_type)}</span></div>
-        <table style="margin-top:8px"><tr><th>Key ID</th><th class="hide-m">Public key (Ed25519)</th><th>Status</th><th></th></tr>${b.keys.map((k) => `<tr><td><code>${esc(k.kid)}</code></td><td class="hide-m"><code>${esc(k.public_key.slice(0, 22))}…</code></td><td>${esc(k.status)}${k.expires_at ? `<div class="mut">until ${fmt(k.expires_at)}</div>` : ""}</td><td>${k.status === "active" ? `<button class="btn s d" data-rk="${b.id}|${esc(k.kid)}">Revoke</button>` : ""}</td></tr>`).join("")}</table></details></div>`).join("")}
+        <table style="margin-top:8px"><tr><th>Key ID</th><th class="hide-m">Public key (Ed25519)</th><th>Status</th><th></th></tr>${b.keys.map((k) => `<tr><td><code>${esc(k.kid)}</code></td><td class="hide-m"><code>${esc(k.public_key.slice(0, 22))}…</code></td><td>${esc(k.status)}${k.expires_at ? `<div class="mut">until ${fmt(k.expires_at)}</div>` : ""}</td><td>${k.status === "active" ? `<button class="btn s d" data-rk="${b.id}|${esc(k.kid)}">Revoke</button>` : ""}</td></tr>`).join("")}</table>
+        <div class="row" style="margin-top:8px"><div class="field grow"><label for="akid-${b.id}">Key ID</label><input id="akid-${b.id}" value="${esc(nextKid(b.keys))}" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="akv-${b.id}">Ed25519 public key (base64url, 32 bytes)</label><input id="akv-${b.id}" placeholder="Paste the raw public key" autocomplete="off" spellcheck="false"></div></div>
+        <button class="btn s" data-ak="${b.id}">Add key</button><div class="hint">The keys this Bot has now keep working for 7 days after you add a new one, then they expire.</div><div id="akerr-${b.id}"></div></details></div>`).join("")}
     <details class="card"><summary style="cursor:pointer"><b>Register a Bot manually (under this account)</b></summary>
       <div class="row" style="margin-top:10px"><div class="field grow"><label for="bh">Handle</label><input id="bh" placeholder="alice.grok" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="bd">Display name</label><input id="bd" placeholder="Alice's assistant"></div></div>
       <details class="adv" style="margin:0 0 10px"><summary class="mut">Advanced (bring your own key)</summary>
@@ -753,7 +771,22 @@ PAGES.bots = async (v) => {
     secretsPanel({ title: "Bot resumed: new Bot token", lead: "Give the Bot this new token so it can update its config. The previous token no longer works.", model: secretsModel(r, location.origin, bot?.handle) });
     render();
   }));
-  $$("[data-rk]", v).forEach((b) => (b.onclick = async () => { const [bid, k] = b.dataset.rk.split("|"); if (confirm("Revoke this key? Requests signed with it will be rejected.")) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); } }));
+  $$("[data-rk]", v).forEach((b) => (b.onclick = async () => {
+    const [bid, k] = b.dataset.rk.split("|");
+    // Count usable keys now, not when the card was drawn: the list can be stale, and the sentence has to match
+    // what this click actually takes away.
+    const bot = me.bots.find((x) => x.id === bid);
+    const mine = (bot?.keys || []).find((x) => x.kid === k);
+    const signers = (bot?.keys || []).filter(keyCanSign);
+    const msg = mine && keyCanSign(mine) && signers.length === 1 ? lastKeyWarning(bot.handle, k) : "Revoke this key? Requests signed with it will be rejected.";
+    if (confirm(msg)) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); }
+  }));
+  $$("[data-ak]", v).forEach((btn) => (btn.onclick = async () => {
+    const bid = btn.dataset.ak, kid = $("#akid-" + bid), value = $("#akv-" + bid), out = $("#akerr-" + bid);
+    btn.disabled = true; formErr(out, "");
+    try { await api("POST", `/v1/bots/${bid}/keys`, { kid: kid.value, value: value.value }); toast(`${kid.value} can now sign requests`); render(); }
+    catch (e) { btn.disabled = false; if (e.message !== "unauthorized") formErr(out, e.human || ERR.network); }
+  }));
   const addcal = $("#addcal"); if (addcal) addcal.onclick = async () => {
     const gap = [calGapError($("#cs").value), calGapError($("#ce").value)];
     const err = calRangeError($("#cs").value, $("#ce").value) || gap.find(Boolean); formErr($("#calerr"), err);
