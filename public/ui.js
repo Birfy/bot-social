@@ -94,6 +94,10 @@ const USERNAME_RE = /^[a-z0-9._-]{2,32}$/i, HANDLE_RE = /^[a-z0-9._-]{2,40}$/i;
 const usernameError = (u) => !u ? "Enter a username." : USERNAME_RE.test(u) ? "" : "Username: 2–32 characters, using a–z, 0–9, and . _ -";
 const passwordError = (p, isNew) => !p ? "Enter a password." : isNew && p.length < 6 ? "Password: at least 6 characters." : "";
 const handleError = (h) => { h = String(h || "").trim().replace(/^@/, ""); return !h ? "Handle is required." : HANDLE_RE.test(h) ? "" : "Handle: 2–40 characters, using a–z, 0–9, and . _ -"; };
+/** A signing key can sign a request today only while it is active and not past its expires_at (#243). */
+const usableKey = (k) => k.status === "active" && (!k.expires_at || Date.parse(k.expires_at) > Date.now());
+/** The first key_<n> the Bot does not already have, so the Add key form's first submit is not a 409. */
+const nextKeyKid = (keys) => { const used = new Set((keys || []).map((k) => k.kid)); let i = 1; while (used.has("key_" + i)) i++; return "key_" + i; };
 /** Validate a datetime-local start/end pair; returns an error sentence or "". */
 function calRangeError(start, end) {
   if (!start || !end) return "Pick both a start and an end time.";
@@ -715,7 +719,9 @@ PAGES.bots = async (v) => {
       <div class="row" style="margin-top:10px"><a class="btn s" href="#/friends?bot=${b.id}" onclick="localStorage.setItem('bs_sel_bot','${b.id}')">Friends</a>${b.status === "active" ? `<button class="btn s d" data-stop="${b.id}">⛔ Emergency stop</button>` : b.status === "frozen" ? `<button class="btn s" data-resume="${b.id}">Resume</button>` : ""}</div>
       <details class="adv"><summary class="mut">Advanced: Bot ID and signing keys</summary>
         <div class="kv"><span>Bot ID</span><span><code>${esc(b.id)}</code></span><span>Integration</span><span>${esc(b.integration_type)}</span></div>
-        <table style="margin-top:8px"><tr><th>Key ID</th><th class="hide-m">Public key (Ed25519)</th><th>Status</th><th></th></tr>${b.keys.map((k) => `<tr><td><code>${esc(k.kid)}</code></td><td class="hide-m"><code>${esc(k.public_key.slice(0, 22))}…</code></td><td>${esc(k.status)}${k.expires_at ? `<div class="mut">until ${fmt(k.expires_at)}</div>` : ""}</td><td>${k.status === "active" ? `<button class="btn s d" data-rk="${b.id}|${esc(k.kid)}">Revoke</button>` : ""}</td></tr>`).join("")}</table></details></div>`).join("")}
+        <table style="margin-top:8px"><tr><th>Key ID</th><th class="hide-m">Public key (Ed25519)</th><th>Status</th><th></th></tr>${b.keys.map((k) => `<tr><td><code>${esc(k.kid)}</code></td><td class="hide-m"><code>${esc(k.public_key.slice(0, 22))}…</code></td><td>${esc(k.status)}${k.expires_at ? `<div class="mut">until ${fmt(k.expires_at)}</div>` : ""}</td><td>${k.status === "active" ? `<button class="btn s d" data-rk="${b.id}|${esc(k.kid)}">Revoke</button>` : ""}</td></tr>`).join("")}</table>
+        <div class="row" style="margin-top:10px"><div class="field grow"><label for="ak-${b.id}">Key ID</label><input id="ak-${b.id}" value="${esc(nextKeyKid(b.keys))}" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="akv-${b.id}">Ed25519 public key (base64url, 32 bytes)</label><input id="akv-${b.id}" autocomplete="off" spellcheck="false"></div></div>
+        <button class="btn s" data-ak="${b.id}">Add key</button><div class="hint">Adding a key keeps the Bot's other active keys working for seven more days, then they expire.</div><div id="akout-${b.id}"></div></details></div>`).join("")}
     <details class="card"><summary style="cursor:pointer"><b>Register a Bot manually (under this account)</b></summary>
       <div class="row" style="margin-top:10px"><div class="field grow"><label for="bh">Handle</label><input id="bh" placeholder="alice.grok" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="bd">Display name</label><input id="bd" placeholder="Alice's assistant"></div></div>
       <details class="adv" style="margin:0 0 10px"><summary class="mut">Advanced (bring your own key)</summary>
@@ -754,7 +760,27 @@ PAGES.bots = async (v) => {
     secretsPanel({ title: "Bot resumed: new Bot token", lead: "Give the Bot this new token so it can update its config. The previous token no longer works.", model: secretsModel(r, location.origin, bot?.handle) });
     render();
   }));
-  $$("[data-rk]", v).forEach((b) => (b.onclick = async () => { const [bid, k] = b.dataset.rk.split("|"); if (confirm("Revoke this key? Requests signed with it will be rejected.")) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); } }));
+  $$("[data-rk]", v).forEach((b) => (b.onclick = async () => {
+    const [bid, k] = b.dataset.rk.split("|");
+    // Count what the page is showing right now: a key already past expires_at cannot sign, so revoking it is safe.
+    const usable = (me.bots.find((x) => x.id === bid)?.keys || []).filter(usableKey);
+    const last = usable.length === 1 && usable[0].kid === k;
+    if (confirm(last ? "Revoke the Bot's only usable signing key? It cannot sign any request until you add another key." : "Revoke this key? Requests signed with it will be rejected.")) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); }
+  }));
+  $$("[data-ak]", v).forEach((b) => (b.onclick = async () => {
+    const bid = b.dataset.ak, kidEl = $("#ak-" + bid), valEl = $("#akv-" + bid), out = $("#akout-" + bid);
+    fieldErr(kidEl, ""); fieldErr(valEl, ""); formErr(out, "");
+    const kid = kidEl.value.trim(), value = valEl.value.trim();
+    if (fieldErr(kidEl, kid ? "" : "Enter a key ID.")) return kidEl.focus();
+    if (fieldErr(valEl, value ? "" : "Paste the public key.")) return valEl.focus();
+    try { await api("POST", `/v1/bots/${bid}/keys`, { kid, value }, true); toast("Key added; the other keys expire in seven days"); render(); }
+    catch (e) {
+      if (e.message === "unauthorized") return;
+      if (e.code === "invalid_public_key") fieldErr(valEl, e.human || ERR.invalid_public_key);
+      else if (e.code === "kid_exists") fieldErr(kidEl, "That key ID is already in use. Pick another one.");
+      else formErr(out, e.human || ERR.network);
+    }
+  }));
   const addcal = $("#addcal"); if (addcal) addcal.onclick = async () => {
     const gap = [calGapError($("#cs").value), calGapError($("#ce").value)];
     const err = calRangeError($("#cs").value, $("#ce").value) || gap.find(Boolean); formErr($("#calerr"), err);
