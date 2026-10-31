@@ -1491,6 +1491,7 @@ export class Platform {
     this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", nowIso(), grantId);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
     this.endGrantRooms([grantId], `owner:${ownerId}`);
+    this.settleCardsForEndedShare([g]);
     this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked" });
     return { grant_id: grantId, status: "revoked" };
@@ -1517,6 +1518,7 @@ export class Platform {
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    this.settleCardsForEndedShare(bundle);
     this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
     });
@@ -1548,13 +1550,14 @@ export class Platform {
       assert(ref && ref.id === granted, 404, "grant_not_found", "that grant is not for this bot");
     }
     // #35: never decline reply-only rows — those let this Bot answer the friend's Bot after a join.
-    const bundle = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ? AND IFNULL(reply_only, 0) = 0",
+    const bundle = this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ? AND IFNULL(reply_only, 0) = 0",
       g.relationship_id, g.grantor_owner, g.grantee_bot, g.room_id ?? "");
     assert(bundle.length > 0, 404, "grant_not_found", "that grant is reply-only; decline removes a full share only");
     const ids = bundle.map((x: any) => x.id as string);
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    this.settleCardsForEndedShare(bundle);
     this.audit.append(`owner:${ownerId}`, "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
     });
@@ -2349,6 +2352,46 @@ export class Platform {
     return true;
   }
 
+  /** Every door that ends a share settles the cards that share was holding: the lines a Bot already wrote toward the
+   *  other side, and its drafts of actions there. Only a share that carried `chat.public` held any of them, a room
+   *  thread is the room's business, and an invite acceptance keeps its draft (the peer's answer outlives the chat). */
+  private settleCardsForEndedShare(grants: any[]) {
+    for (const g of grants) {
+      if (g.capability !== "chat.public" || g.room_id) continue;
+      const granted = this.grantedBotOf(g);
+      if (!granted) continue;
+      this.cancelPendingFor(
+        `kind IN ('outbound_message', 'action') AND bot_id = ? AND conversation_id IN (
+           SELECT c.id FROM conversations c JOIN relationships cr ON cr.id = c.relationship_id
+           WHERE c.relationship_id = ? AND cr.status != 'room'
+             AND NOT EXISTS (SELECT 1 FROM grants rg WHERE rg.relationship_id = c.relationship_id AND rg.room_id IS NOT NULL)
+             AND ((c.initiator_bot = ? AND c.peer_bot = ?) OR (c.initiator_bot = ? AND c.peer_bot = ?)))`,
+        [g.grantee_bot, g.relationship_id, g.grantee_bot, granted, granted, g.grantee_bot],
+        "grant_revoked",
+        {
+          keep: { where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE action_type = 'calendar.accept_invite'))", args: [] },
+          notify: true,
+        },
+      );
+    }
+  }
+
+  /** Is this card a line held on a share that no longer exists? Read from the rows now, so a card an older build left
+   *  pending (or one held while the share ended) is judged by the same rule. */
+  private heldCardShareGone(a: any): boolean {
+    if (a.kind !== "outbound_message" || !a.conversation_id) return false;
+    const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
+    if (!m) return false;
+    const c = this.get("SELECT * FROM conversations WHERE id = ?", m.conversation_id);
+    const rel = c ? this.get("SELECT * FROM relationships WHERE id = ?", c.relationship_id) : null;
+    // A room thread is the room's business: its own door says "the room grant is gone", not this share. Read the room
+    // off the grants that made it, because the relationship stops being a room when the seat ends.
+    if (!c || rel?.status === "room") return false;
+    if (this.get("SELECT 1 FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", c.relationship_id)) return false;
+    const sender = this.bot(m.sender_bot), recipient = this.bot(m.recipient_bot);
+    return !this.findGrant(recipient.owner_id, sender.id, "chat.public", recipient.id);
+  }
+
   private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean } = {}) {
     // `keep` is one extra condition on the rows to cancel: a row it excludes (the caller spells that as a NOT) keeps
     // both its pending status and the side effect on its subject row, so the card stays decidable.
@@ -2471,8 +2514,10 @@ export class Platform {
     // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
     // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
+    const shareGoneReason = "the share this draft was waiting on was revoked; this draft can no longer be approved";
     if (a.status !== "pending") {
-      throw new ApiError(409, "invalid_state", a.status === "cancelled" && a.decision === "member_revoked" ? revokedReason : `approval is ${a.status}`);
+      const known = a.status === "cancelled" ? a.decision : null;
+      throw new ApiError(409, "invalid_state", known === "member_revoked" ? revokedReason : known === "grant_revoked" ? shareGoneReason : `approval is ${a.status}`);
     }
     // Last line of defence for a stale row an older build left pending after its sender was revoked. Cancel it
     // now (same record the revoke leaves behind) instead of delivering as a Bot that no longer exists.
@@ -2482,7 +2527,8 @@ export class Platform {
     }
     // A card that outlived its conversation is not a decision. Settle the chat first if its own clock ran out, then
     // refuse instead of delivering into a conversation that no longer exists; the invitee's accept is the one draft
-    // a closed chat keeps (#105), so it still decides.
+    // a closed chat keeps (#105), so it still decides. This runs before the share guard below: settling the chat is
+    // what closes it, and a card held in a chat that is already closed is the chat's business, not the share's.
     if (a.conversation_id) {
       const c = this.conv(a.conversation_id);
       const wasClosed = c.status === "closed";
@@ -2498,6 +2544,12 @@ export class Platform {
             : "the conversation is closed; this draft can no longer be approved");
         }
       }
+    }
+    // Same defence for the other half: a card left pending while the share that allowed the line was revoked under
+    // an older build is settled now, not delivered past a door the peer's owner already closed.
+    if (this.heldCardShareGone(a)) {
+      this.cancelPendingFor("id = ?", [a.id], "grant_revoked", { notify: true });
+      throw new ApiError(409, "invalid_state", shareGoneReason);
     }
     const decision = body?.decision;
     assert(["approved", "approved_with_edits", "rejected"].includes(decision), 400, "invalid_request", "decision must be approved|approved_with_edits|rejected");
@@ -2852,7 +2904,8 @@ export class Platform {
     const recipient = this.bot(m.recipient_bot);
     // #43: a conversation opened from a claimed room delivers on that room's grant, and stops once it is gone.
     const cRel = this.pairRelationships(sender.id, recipient.id).find((r) => r.id === c.relationship_id);
-    if (cRel && cRel.status === "room") {
+    const roomThread = !!cRel && cRel.status === "room";
+    if (roomThread) {
       const roomGrant = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NOT NULL LIMIT 1", cRel.id);
       assert(roomGrant && roomGrant.room_id, 403, "no_relationship", "the room grant is gone");
       assert(this.findRoomGrant(recipient.owner_id, sender.id, "chat.public", recipient.id, roomGrant.room_id), 403, "no_relationship", "the room grant is gone");
@@ -2865,6 +2918,13 @@ export class Platform {
       const convRoom = this.get("SELECT room_id FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", c.relationship_id);
       if (convRoom?.room_id) throw new ApiError(403, "no_relationship", "the room grant is gone");
       this.activeRelationship(sender.id, recipient.id);
+    }
+    // The friendship is not the share: a conversation outlives the grant that let this Bot write into it, so a held
+    // line is checked against the same share its draft needed, before anything is written for the peer. A room
+    // thread is judged by the room door above, never by a friendship grant the room does not use.
+    if (!roomThread) {
+      assert(this.findGrant(recipient.owner_id, sender.id, "chat.public", recipient.id), 403, "capability_not_granted",
+        "the peer's owner no longer shares this Bot, so this line cannot be delivered");
     }
     // A frozen recipient holds the card: the kill switch must not let a line written before the freeze land
     // inside it. Nothing is written here -- not the message, not the approval -- and the card stays pending,
