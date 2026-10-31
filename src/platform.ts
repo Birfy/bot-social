@@ -1313,15 +1313,40 @@ export class Platform {
     return id;
   }
 
-  grantsFor(relId: string) {
+  /** The relationship-level grants of one relationship, as `/v1/relationships` lists them.
+   *
+   *  A row whose expiry has passed is written back to `expired` and left out: this is the read the reach checks share
+   *  the shape of, and a lapsed grant must never look live. `includeExpired` is for the owner's own overview only
+   *  (#218's expired + Renew has nothing to renew on a cold page): it does the same lazy write-back, then returns the
+   *  `expired` rows too, each carrying its `status`, so the card can say the grant ended and offer to renew it.
+   *  Nothing about access changes here — `findGrant`, `listBotGrants`, `sendAsMember` and room reach keep dropping a
+   *  lapsed row on their own. */
+  grantsFor(relId: string, opts: { includeExpired?: boolean } = {}) {
     const out: any[] = [];
-    for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'", relId)) {
+    const rows = this.all(
+      opts.includeExpired
+        ? "SELECT * FROM grants WHERE relationship_id = ? AND status IN ('active','expired') ORDER BY created_at, id"
+        : "SELECT * FROM grants WHERE relationship_id = ? AND status = 'active'",
+      relId,
+    );
+    for (const g of rows) {
       // The lazy expiry `findGrant` and `listBotGrants` already do: a row whose expiry has passed must not be listed
       // by `/v1/relationships` while `/v1/bots/:id/grants` hides it.
-      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) { this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id); continue; }
-      out.push({ ...g, scope: J(g.scope, {}) });
+      const lapsed = g.status === "expired" || (!!g.expires_at && Date.parse(g.expires_at) < Date.now());
+      if (lapsed && g.status !== "expired") this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id);
+      if (lapsed && !opts.includeExpired) continue;
+      out.push({ ...g, status: lapsed ? "expired" : "active", scope: J(g.scope, {}) });
     }
-    return out;
+    if (!opts.includeExpired) return out;
+    // A capability that lapsed and was granted again has two rows: the ended one and the live one. The card shows one
+    // chip per capability, so keep the live row; with nothing live, the most recently created ended row.
+    const one = new Map<string, any>();
+    for (const g of out) {
+      const key = `${g.grantee_bot}:${g.capability}`;
+      const cur = one.get(key);
+      if (!cur || (cur.status === "expired" && (g.status === "active" || (g.status === "expired" && g.created_at > cur.created_at)))) one.set(key, g);
+    }
+    return [...one.values()];
   }
 
   /** An active relationship-level grant; a full grant wins over a reply-only one (#23), so check `reply_only` on the result. */
@@ -2175,7 +2200,9 @@ export class Platform {
     const items = rows.map((r) => {
       const outgoing = r.requester_bot === selected.id;
       const peerId = outgoing ? r.target_bot : r.requester_bot;
-      const grants = this.grantsFor(r.id);
+      // The overview is the one read that keeps a lapsed grant: the owner must see it ended and be able to renew it
+      // from the card. `/v1/relationships` (and every reach check) keeps the default read, which drops it.
+      const grants = this.grantsFor(r.id, { includeExpired: true });
       const convs = this.all("SELECT id, status, outcome, intent, turn_count, max_turns, created_at, updated_at FROM conversations WHERE relationship_id = ? ORDER BY updated_at DESC", r.id);
       const lastMsg = this.get("SELECT MAX(COALESCE(delivered_at, created_at)) t FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?)", r.id)?.t ?? null;
       const last = convs[0];
@@ -2186,8 +2213,8 @@ export class Platform {
         connected_at: r.status === "active" || r.status === "revoked" || r.status === "blocked" ? r.updated_at : null,
         requested_at: r.created_at, expires_at: r.expires_at, message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []), settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,
         capabilities: {
-          granted_to_peer: grants.filter((g) => g.grantee_bot === peerId).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at })),
-          granted_to_me: grants.filter((g) => g.grantee_bot === selected.id).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at })),
+          granted_to_peer: grants.filter((g) => g.grantee_bot === peerId).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at, status: g.status })),
+          granted_to_me: grants.filter((g) => g.grantee_bot === selected.id).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at, status: g.status })),
         },
         conversation_count: convs.length,
         last_conversation: last ? { conversation_id: last.id, status: last.status, outcome: last.outcome, intent: J(last.intent).type, summary: J(last.intent).summary, turn: { count: last.turn_count, max: null }, updated_at: last.updated_at } : null,
