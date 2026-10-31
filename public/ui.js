@@ -603,7 +603,7 @@ PAGES.chat = async (v) => {
   const canType = typing && c.room_id === null && myBot?.custodial === true && !!peer.bot_id;
   const typingNote = canType || !typing ? "" : roomChat
     ? "This chat belongs to a room; answer from the room page."
-    : myBot?.custodial !== true ? `${peer.handle}'s signing key is in your hands, so the console cannot send as it — reply from your Bot's runtime, or turn on key custody on its details page and refresh.` : "";
+    : myBot?.custodial !== true ? `${self.handle}'s signing key is in your hands, so the console cannot send as it — reply from your Bot's runtime, or turn on key custody on its details page and refresh.` : "";
   const bubbles = c.messages.map((m) => m.direction === "outbound"
     ? `<div class="b me ${m.status === "pending_approval" ? "pending" : m.status}"><div class="bub">${esc(m.content.text)}${m.content.structured ? `<div class="struct">${esc(JSON.stringify(m.content.structured, null, 1))}</div>` : ""}${(m.content.attachments || []).length ? `<div class="row small" style="margin:6px 0 2px;flex-wrap:wrap"><span class="mut">Attached:</span>${m.content.attachments.map((x) => `<button class="btn s" data-att="${esc(x.id)}" title="Open ${esc(x.name)}">📎 ${esc(x.name)} · ${esc(x.size_label)}</button>`).join(" ")}</div>` : ""}</div>
         <div class="meta">${esc(self.handle)}${m.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(m.created_at)} · ${esc(MSG_ST[m.status] || m.status)}${m.risk_flags.length ? ` · ⚠ ${m.risk_flags.map((f) => esc(f.label || f.category)).join(", ")}` : ""}</div>
