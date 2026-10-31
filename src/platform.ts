@@ -2443,6 +2443,25 @@ export class Platform {
       this.cancelPendingFor("id = ?", [a.id], "member_revoked");
       throw new ApiError(409, "invalid_state", revokedReason);
     }
+    // A card that outlived its conversation is not a decision. Settle the chat first if its own clock ran out, then
+    // refuse instead of delivering into a conversation that no longer exists; the invitee's accept is the one draft
+    // a closed chat keeps (#105), so it still decides.
+    if (a.conversation_id) {
+      const c = this.conv(a.conversation_id);
+      const wasClosed = c.status === "closed";
+      this.materializeExpiry(c);
+      if (c.status === "closed") {
+        const keepsInvite = a.kind === "action" && this.get("SELECT 1 FROM actions WHERE id = ? AND action_type = 'calendar.accept_invite'", a.subject_id);
+        if (!keepsInvite) {
+          // A chat already closed before this line (a row an older build left pending) is settled here, once. When
+          // the clock just ran out, `materializeExpiry` above is what cancelled the card: nothing to repeat.
+          if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed");
+          throw new ApiError(409, "invalid_state", c.outcome === "expired"
+            ? "the conversation expired; this draft can no longer be approved"
+            : "the conversation is closed; this draft can no longer be approved");
+        }
+      }
+    }
     const decision = body?.decision;
     assert(["approved", "approved_with_edits", "rejected"].includes(decision), 400, "invalid_request", "decision must be approved|approved_with_edits|rejected");
     const approve = decision !== "rejected";
@@ -2500,14 +2519,30 @@ export class Platform {
     return { c, peer: c.initiator_bot === botId ? c.peer_bot : c.initiator_bot };
   }
 
+  /** The one card a closed chat keeps: the invitee's decision about a booking made in it (#105). The subquery is
+   *  narrowed to this conversation, so an accept drafted in another chat is never exempted. */
+  private acceptInviteCardOf(convId: string) {
+    return { where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE conversation_id = ? AND action_type = 'calendar.accept_invite'))", args: [convId] };
+  }
+
   /** Close a conversation whose own clock ran out: the same write the assert used to do inline, without throwing.
-   *  Callers that may still act on a closed conversation (an invite acceptance) read the closed state off the row. */
+   *  Callers that may still act on a closed conversation (an invite acceptance) read the closed state off the row.
+   *  The clock is a close like any other, so it settles what a manual close settles: the cards hanging off the chat
+   *  are cancelled (except the invitee's accept, #105), the audit gets one entry and both Bots are told. All of it
+   *  runs only on the open -> closed transition; `c` is updated in place, so a caller coming back through this door
+   *  sees `closed` and does nothing. */
   private materializeExpiry(c: any) {
-    if (c.expires_at && Date.parse(c.expires_at) < Date.now() && c.status !== "closed") {
-      this.run("UPDATE conversations SET status = 'closed', outcome = 'expired', updated_at = ? WHERE id = ?", nowIso(), c.id);
-      c.status = "closed";
-      c.outcome = "expired";
-    }
+    if (!(c.expires_at && Date.parse(c.expires_at) < Date.now() && c.status !== "closed")) return;
+    const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
+    this.run("UPDATE conversations SET status = 'closed', outcome = 'expired', updated_at = ? WHERE id = ?", nowIso(), c.id);
+    c.status = "closed";
+    c.outcome = "expired";
+    // A card the clock cancelled carries its own reason (`conversation_expired`, next to the manual close's
+    // `conversation_closed`), and `notify` tells the Bot that owned it why it died.
+    this.cancelPendingFor("conversation_id = ?", [c.id], "conversation_expired", { keep: this.acceptInviteCardOf(c.id), notify: true });
+    this.audit.append("platform", "conversation.closed", c.id, owners, { outcome: "expired" });
+    // No peer wrote anything on this path, so the line is the platform's own and carries no untrusted_content.
+    for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: c.id, outcome: "expired", trust: "platform", summary: null });
   }
 
   /** Refuse only a chat an owner stopped; a closed chat is not a pause, and a pre-removal paused_limit resumes on use. */
@@ -2860,13 +2895,7 @@ export class Platform {
     // The invitee's decision about this chat's booking outlives the chat, so that one draft is kept; the subquery is
     // narrowed to this same conversation so an accept drafted in another chat is never exempted. Everything else is
     // cancelled, and each cancellation is announced to the Bot that owned the card.
-    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", {
-      keep: {
-        where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE conversation_id = ? AND action_type = 'calendar.accept_invite'))",
-        args: [convId],
-      },
-      notify: true,
-    });
+    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", { keep: this.acceptInviteCardOf(convId), notify: true });
     this.audit.append(actor, "conversation.closed", convId, owners, { outcome, summary });
     // The summary was written by the Bot (or the owner) that closed the chat, so for the other side it is peer
     // content: it travels inside `untrusted_content` under `trust: "peer_untrusted"`, like every other peer text
