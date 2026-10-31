@@ -291,6 +291,27 @@ const grantScope = (r) => {
   const keys = Object.keys(s).filter((k) => s[k] !== undefined && s[k] !== null);
   return keys.length ? ` · ${keys.map((k) => `${esc(k)}=${esc(String(s[k]))}`).join(" · ")}` : "";
 };
+// A grant's expiry is an absolute instant: `insertGrant` writes `Date.now() + days` (`src/platform.ts:1302`, inserted at
+// `:1307`), so the console compares instants and never formats a date — no time zone can turn "3 days left" into 2 or 4.
+// `grantsFor` (`:1314`) drops a row the moment it lapses, so "expired" covers the window between that response and this
+// render (and a browser clock ahead of the server): the card still names the grant as lapsed instead of keeping it live.
+const grantExpiry = (g) => {
+  const at = Date.parse(g && g.expires_at);
+  if (!Number.isFinite(at)) return null;
+  const ms = at - Date.now();
+  if (ms <= 0) return { label: "expired", expired: true, soon: true };
+  const days = Math.max(1, Math.ceil(ms / 86400e3));
+  return { label: `${days} ${days === 1 ? "day" : "days"} left`, expired: false, soon: days <= 7 };
+};
+// One grant as the card shows it: the capability pill, the scope it was given with, its expiry, and — for a grant that
+// lapsed or lapses within a week — a Renew that writes the same capability with the same scope and a fresh 30 days
+// (`POST /v1/relationships/:id/grants` -> `addGrant` -> `insertGrant`, which supersedes the old row at `:1303`).
+const grantPill = (g, active, renew) => {
+  const x = grantExpiry(g);
+  return `${capPill(g.capability, active ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")}${grantScope(g)}`
+    + `${x ? ` <span class="pill ${x.expired ? "bad" : x.soon ? "warn" : "gray"}" data-expiry>${esc(x.label)}</span>` : ""}`
+    + `${renew && active && x && x.soon ? ` <button class="btn s" data-renew="${esc(g.capability)}">Renew</button>` : ""}`;
+};
 function approvalCard(a) {
   let body = "";
   if (a.message) body = `<div class="mut small" style="margin:6px 0 4px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}${a.conversation ? ` · ${esc(a.conversation.intent.summary || a.conversation.intent.type)} · turn ${a.conversation.turn.count + 1}` : ""}</div>
@@ -414,9 +435,9 @@ PAGES.friends = async (v) => {
     const [when, at] = f.status === "active" ? ["Friends since", f.connected_at] : f.status === "blocked" ? ["Blocked", f.connected_at] : f.status === "revoked" ? ["Removed", f.connected_at] : ["Requested", f.requested_at];
     return `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
     <div class="kv"><span>${when}</span><span>${fmt(at)}</span>
-      <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "") + grantScope(g)).join(" ") || '<span class="mut">none</span>'}
+      <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => grantPill(g, f.status === "active", true)).join(" ") || '<span class="mut">none</span>'}
         ${f.status === "active" ? `<select data-addcap style="width:auto;padding:2px 6px;font-size:12px;margin-top:4px"><option value="">+ Grant…</option>${["calendar.freebusy.read", "calendar.book", "chat.public", "profile.read"].filter((c) => !f.capabilities.granted_to_peer.some((g) => g.capability === c)).map((c) => `<option value="${c}">${esc(CAP_LABEL[c])}</option>`).join("")}</select>` : ""}</span>
-      <span>They grant me</span><span>${f.capabilities.granted_to_me.map((g) => capPill(g.capability) + grantScope(g)).join(" ") || '<span class="mut">none</span>'}</span>
+      <span>They grant me</span><span>${f.capabilities.granted_to_me.map((g) => grantPill(g, false, false)).join(" ") || '<span class="mut">none</span>'}</span>
       <span>Recent chats</span><span>${f.last_conversation ? `<a href="#/chat/${f.last_conversation.conversation_id}">${esc(f.last_conversation.summary || f.last_conversation.intent)}</a> ${st(CONV_ST, f.last_conversation.status)}` : '<span class="mut">none</span>'}</span>
       <span>Recent activity</span><span>${fmt(f.last_activity_at)} <span class="mut">${ago(f.last_activity_at)}</span></span></div>
     ${f.status === "active" ? `<div class="row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><label class="switch"><input type="checkbox" data-auto ${f.settings?.auto_approve_chat ? "checked" : ""}><span></span></label>
@@ -442,6 +463,14 @@ PAGES.friends = async (v) => {
       const f = d.friends.find((x) => x.relationship_id === rel); const rels = await api("GET", "/v1/relationships");
       const r = rels.relationships.find((x) => x.relationship_id === rel); const g = r.capabilities.peer_on_me.find((x) => x.capability === b.dataset.revoke);
       if (g && confirm(`Revoke ${f.peer.display_name}'s "${CAP_LABEL[g.capability] || g.capability}" grant?`)) { await api("DELETE", `/v1/grants/${g.grant_id}`); toast("Revoked"); render(); }
+    }));
+    $$("[data-renew]", card).forEach((b) => (b.onclick = async () => {
+      const f = d.friends.find((x) => x.relationship_id === rel);
+      const g = f?.capabilities.granted_to_peer.find((x) => x.capability === b.dataset.renew);
+      if (!g) return;
+      // Same capability, same scope it was given with (only free/busy stores one, `assertScope` refuses the rest), fresh 30 days.
+      await api("POST", `/v1/relationships/${rel}/grants`, { capability: g.capability, scope: g.capability === "calendar.freebusy.read" ? g.scope || {} : {}, expires_in_days: 30 });
+      toast("Renewed for 30 days"); render();
     }));
     const u = $("[data-unf]", card); if (u) u.onclick = async () => { if (confirm("Unfriend? All grants are voided and active chats are closed.")) { await api("DELETE", `/v1/relationships/${rel}`); toast("Removed"); render(); } };
     const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? This ends the friendship, voids all grants between you, and closes the room doors you share. You cannot undo a block from the console.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
