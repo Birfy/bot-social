@@ -291,10 +291,11 @@ const grantScope = (r) => {
   const keys = Object.keys(s).filter((k) => s[k] !== undefined && s[k] !== null);
   return keys.length ? ` · ${keys.map((k) => `${esc(k)}=${esc(String(s[k]))}`).join(" · ")}` : "";
 };
-// A grant's expiry is an absolute instant: `insertGrant` writes `Date.now() + days` (`src/platform.ts:1302`, inserted at
-// `:1307`), so the console compares instants and never formats a date — no time zone can turn "3 days left" into 2 or 4.
-// `grantsFor` (`:1314`) drops a row the moment it lapses, so "expired" covers the window between that response and this
-// render (and a browser clock ahead of the server): the card still names the grant as lapsed instead of keeping it live.
+// A grant's expiry is an absolute instant: `insertGrant` writes `Date.now() + days` (`src/platform.ts:1301`, inserted at
+// `:1309`), so the console compares instants and never formats a date — no time zone can turn "3 days left" into 2 or 4.
+// `PAGES.friends` reads `/v1/friends-overview`, which is the one place a lapsed grant is still listed (`grantsFor`
+// `:1324` with `includeExpired`, one chip per capability): the card says "expired" on a cold page and offers a Renew,
+// while every reach check keeps dropping the row. Comparing instants also covers a browser clock ahead of the server.
 const grantExpiry = (g) => {
   const at = Date.parse(g && g.expires_at);
   if (!Number.isFinite(at)) return null;
@@ -305,10 +306,14 @@ const grantExpiry = (g) => {
 };
 // One grant as the card shows it: the capability pill, the scope it was given with, its expiry, and — for a grant that
 // lapsed or lapses within a week — a Renew that writes the same capability with the same scope and a fresh 30 days
-// (`POST /v1/relationships/:id/grants` -> `addGrant` -> `insertGrant`, which supersedes the old row at `:1303`).
+// (`POST /v1/relationships/:id/grants` -> `addGrant` -> `insertGrant`, which supersedes the old row at `:1305`).
+// The × belongs to a live grant only: the revoke handler finds the grant in `/v1/relationships`, whose default read
+// drops a lapsed row (`:1941`), so a × on an expired chip would be a button that silently does nothing. An ended grant
+// has nothing to revoke; the Renew next to it is the control that brings the capability back.
 const grantPill = (g, active, renew) => {
   const x = grantExpiry(g);
-  return `${capPill(g.capability, active ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")}${grantScope(g)}`
+  const live = active && !(x && x.expired);
+  return `${capPill(g.capability, live ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")}${grantScope(g)}`
     + `${x ? ` <span class="pill ${x.expired ? "bad" : x.soon ? "warn" : "gray"}" data-expiry>${esc(x.label)}</span>` : ""}`
     + `${renew && active && x && x.soon ? ` <button class="btn s" data-renew="${esc(g.capability)}">Renew</button>` : ""}`;
 };
