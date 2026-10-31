@@ -622,6 +622,9 @@ export class Platform {
     const explicit = rawTarget === undefined || rawTarget === null ? null : String(rawTarget).trim();
     assert(explicit === null || explicit.length > 0, 400, "invalid_request", "conversation_id must be a non-empty string");
     let conversationId: string;
+    let message: any;
+    /** The draft envelope names the thread the line belongs to, so it is built once that id is known. */
+    const draftEnv = (id: string) => cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: id });
     if (explicit !== null) {
       const named = this.get("SELECT id, initiator_bot, peer_bot, relationship_id, status, outcome FROM conversations WHERE id = ?", explicit);
       const mine = named && ((named.initiator_bot === cb.botId && named.peer_bot === to.id) || (named.initiator_bot === to.id && named.peer_bot === cb.botId));
@@ -635,6 +638,7 @@ export class Platform {
       const doorId = roomRel?.id ?? this.findActiveRelationship(cb.botId, to.id)?.id ?? null;
       assert(named.relationship_id === doorId, 404, "conversation_not_found", "no such conversation between these Bots");
       conversationId = named.id;
+      message = this.draftMessage(cb.bp, conversationId, draftEnv(conversationId), typed, mentions, roomId);
     } else {
       const rel = roomRel ?? this.activeRelationship(cb.botId, to.id);
       // Conversation statuses are open / awaiting_approval / closed; 'active' never matches,
@@ -642,9 +646,24 @@ export class Platform {
       // The door is part of the lookup: a pair can share several rooms, and reusing the conversation opened in
       // another room would judge this room by that room's relationship (and, once it is gone, fail mid-draft).
       const conv = this.get("SELECT id FROM conversations WHERE status IN ('open', 'awaiting_approval') AND (expires_at IS NULL OR expires_at > ?) AND ((initiator_bot = ? AND peer_bot = ?) OR (initiator_bot = ? AND peer_bot = ?)) AND relationship_id = ? ORDER BY updated_at DESC LIMIT 1", nowIso(), cb.botId, to.id, to.id, cb.botId, rel.id);
-      conversationId = conv?.id ?? (this.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId) as any).conversation_id;
+      if (conv) {
+        conversationId = conv.id;
+        message = this.draftMessage(cb.bp, conversationId, draftEnv(conversationId), typed, mentions, roomId);
+      } else {
+        // This line opens the thread, so the row and its first draft are one decision: a draft the policy layer
+        // refuses must leave no empty conversation for either side to read, no `conversation.started` event for the
+        // peer, and no new conversation counted against the relationship's daily quota. The row and the draft commit
+        // together; the trail and the event are written only once that commit is durable.
+        const opened = this.db.transaction(() => {
+          const made = this.openConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId);
+          const drafted = this.draftMessage(cb.bp, made.conversation.conversation_id, draftEnv(made.conversation.conversation_id), typed, mentions, roomId);
+          return { made, drafted };
+        }).immediate();
+        conversationId = opened.made.conversation.conversation_id;
+        message = opened.drafted;
+        opened.made.announce();
+      }
     }
-    const message = this.draftMessage(cb.bp, conversationId, cb.sign("message.draft", { text: body.text, ...(body.attachments?.length ? { attachments: body.attachments } : {}) }, { conversation_id: conversationId }), typed, mentions, roomId);
     return { conversation_id: conversationId, message, typed_by_owner: typed, ...(roomId !== null ? { room_id: roomId } : {}) };
   }
 
@@ -2518,7 +2537,17 @@ export class Platform {
     this.audit.append(`bot:${actor}`, "policy.decision", convId, owners, { action, decision, reasons, policy_version: POLICY_VERSION, ...extra });
   }
 
+  /** Opens a direct conversation, stores it and announces it to the peer. */
   createConversation(p: Principal, env: Envelope, roomId: string | null = null) {
+    const opened = this.openConversation(p, env, roomId);
+    opened.announce();
+    return opened.conversation;
+  }
+
+  /** The write half of `createConversation`: the conversation row plus the one way to announce it. The trail and the
+   *  peer's event are not written here, because a caller may hold the row in a transaction and roll it back: they go
+   *  to `announce`, which that caller runs only once the conversation is really stored. */
+  private openConversation(p: Principal, env: Envelope, roomId: string | null = null) {
     this.verifyEnvelope(p, env, "conversation.create");
     const { botId, ownerId } = this.requireBot(p);
     const pl: any = env.payload ?? {};
@@ -2554,14 +2583,18 @@ export class Platform {
     this.run("INSERT INTO conversations (id, type, relationship_id, initiator_bot, peer_bot, intent, status, max_turns, created_at, updated_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
       // max_turns stays in the schema (NOT NULL) but nothing reads it: conversations have no turn limit (owner decision 2026-10-19).
       id, "direct", rel.id, botId, peer.id, JSON.stringify(intent), "open", 0, nowIso(), nowIso(), expires);
-    this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", [roomRel ? "room.context" : "relationship.active", "intent.allowed"]);
-    this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
-    this.emit(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
-    return {
+    const conversation = {
       conversation_id: id, status: "open", intent,
       limits: { max_turns: null, rate_per_min: LIMITS.ratePerConversationPerMin, expires_at: expires },
       effective_capabilities: this.effectiveCaps(botId, peer.id, allowed, roomId),
     };
+    /** The allow decision, the audit entry and the peer's event, written once the conversation is really stored. */
+    const announce = () => {
+      this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", [roomRel ? "room.context" : "relationship.active", "intent.allowed"]);
+      this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
+      this.emit(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
+    };
+    return { conversation, announce };
   }
 
   private effectiveCaps(me: string, peer: string, allowed: string[], roomId: string | null = null) {
