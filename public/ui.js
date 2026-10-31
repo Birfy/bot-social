@@ -279,12 +279,17 @@ function secretsPanel({ title, lead, model }) {
 
 // ------------------------------------------------------------------ shared widgets
 // A capability request carries the scope Approve will write into the grant (`src/platform.ts:2362`), so the card has to
-// show it. Only free/busy has a readable one: a day window and the hours the peer may see. An empty scope is not the
-// console's "(14 days · working hours)" picking default — it is the unrestricted grant — so it says that instead.
+// show it, and a listed grant carries the scope that was stored for it. Free/busy reads a day window and the hours the
+// peer may see. An empty scope is not the console's "(14 days · working hours)" picking default — it is the
+// unrestricted grant — so it says that instead. Any other capability refuses a non-empty scope (#211); a row written
+// before that guard still shows what was stored, never nothing.
 const grantScope = (r) => {
-  if (r.capability !== "calendar.freebusy.read") return "";
-  const s = r.scope || {};
-  return ` · ${s.window_days ? `${esc(String(s.window_days))} days` : "no day limit"} · ${s.hours ? esc(String(s.hours)) : "any hour"}`;
+  const s = (r && r.scope) || {};
+  if (r.capability === "calendar.freebusy.read") {
+    return ` · ${s.window_days ? `${esc(String(s.window_days))} days` : "no day limit"} · ${s.hours ? esc(String(s.hours)) : "any hour"}`;
+  }
+  const keys = Object.keys(s).filter((k) => s[k] !== undefined && s[k] !== null);
+  return keys.length ? ` · ${keys.map((k) => `${esc(k)}=${esc(String(s[k]))}`).join(" · ")}` : "";
 };
 function approvalCard(a) {
   let body = "";
@@ -409,9 +414,9 @@ PAGES.friends = async (v) => {
     const [when, at] = f.status === "active" ? ["Friends since", f.connected_at] : f.status === "blocked" ? ["Blocked", f.connected_at] : f.status === "revoked" ? ["Removed", f.connected_at] : ["Requested", f.requested_at];
     return `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
     <div class="kv"><span>${when}</span><span>${fmt(at)}</span>
-      <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "")).join(" ") || '<span class="mut">none</span>'}
+      <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => capPill(g.capability, f.status === "active" ? `<button class="x" title="Revoke" data-revoke="${esc(g.capability)}">×</button>` : "") + grantScope(g)).join(" ") || '<span class="mut">none</span>'}
         ${f.status === "active" ? `<select data-addcap style="width:auto;padding:2px 6px;font-size:12px;margin-top:4px"><option value="">+ Grant…</option>${["calendar.freebusy.read", "calendar.book", "chat.public", "profile.read"].filter((c) => !f.capabilities.granted_to_peer.some((g) => g.capability === c)).map((c) => `<option value="${c}">${esc(CAP_LABEL[c])}</option>`).join("")}</select>` : ""}</span>
-      <span>They grant me</span><span>${f.capabilities.granted_to_me.map((g) => capPill(g.capability)).join(" ") || '<span class="mut">none</span>'}</span>
+      <span>They grant me</span><span>${f.capabilities.granted_to_me.map((g) => capPill(g.capability) + grantScope(g)).join(" ") || '<span class="mut">none</span>'}</span>
       <span>Recent chats</span><span>${f.last_conversation ? `<a href="#/chat/${f.last_conversation.conversation_id}">${esc(f.last_conversation.summary || f.last_conversation.intent)}</a> ${st(CONV_ST, f.last_conversation.status)}` : '<span class="mut">none</span>'}</span>
       <span>Recent activity</span><span>${fmt(f.last_activity_at)} <span class="mut">${ago(f.last_activity_at)}</span></span></div>
     ${f.status === "active" ? `<div class="row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><label class="switch"><input type="checkbox" data-auto ${f.settings?.auto_approve_chat ? "checked" : ""}><span></span></label>
