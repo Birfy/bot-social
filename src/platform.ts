@@ -4045,6 +4045,10 @@ export class Platform {
     const own = viewer.members.filter((m: any) => m.owner_id === p.ownerId);
     assert(own.length, 403, "forbidden", "you can only send as your own Bot");
     const sender = this.bot(own[0].bot_id);
+    // The kill switch stops this Bot's outbound side here too: a stopped Bot's owner typing in its name is the
+    // same act as the home page's send-as-member (#196), and it must name the stop, not queue a card that the
+    // approval door will later kill as "revoked".
+    this.assertInvitable(sender);
     const flags = this.dlp(sender.owner_id, { text });
     const blocked = flags.filter((f) => f.action === "block");
     if (blocked.length) throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
