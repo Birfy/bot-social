@@ -141,6 +141,76 @@ test("f: an invalid edit writes nothing and the same card can still be approved"
   assert.equal(h.row("SELECT mentions FROM messages WHERE id = ?", sent.message.message_id).mentions, null, "a delivered edit still drops the old mention list");
 });
 
+/** A held line from A's Bot that names B's Bot, so the draft carries a mention list an edit would clear. */
+async function heldWithMention(h: any) {
+  h.s.platform.enableCustody({ kind: "owner", ownerId: h.A.owner_id }, h.A.bot.id, { private_key_pem: h.A.kp.privateKeyPem });
+  const sent = await h.s.platform.sendAsMember(
+    { kind: "owner", ownerId: h.A.owner_id } as any,
+    { from_bot_id: h.A.bot.id, to: h.B.bot.id, text: "hello there", mentions: [h.B.handle] },
+  ) as any;
+  assert.equal(sent.message.status, "pending_approval");
+  return sent;
+}
+
+test("g: an edit the DLP refuses writes nothing, so the mention survives to a later plain approval", async (t) => {
+  const h = await pair(t);
+  const sent = await heldWithMention(h);
+  const mid = sent.message.message_id as string;
+  const mentions = [h.B.handle.toLowerCase()];
+  const list = () => h.row("SELECT mentions FROM messages WHERE id = ?", mid).mentions;
+  const before = list();
+  assert.equal(before, JSON.stringify(mentions), "the held line carries the mention list");
+  const card = async () => (h.s.platform.listApprovals({ kind: "owner", ownerId: h.A.owner_id }) as any[]).find((c) => c.approval_id === sent.message.approval_id);
+  assert.deepEqual((await card()).message.mentions, mentions, "the card shows who the owner is approving");
+
+  const err = await expectApiError(
+    h.decide(sent.message.approval_id, { decision: "approved_with_edits", edited_payload: { text: "password: hunter2" } }),
+    422, "dlp_blocked",
+  );
+  assert.match(err.message, /edited payload blocked by DLP/);
+  assert.equal(list(), before, "a refused edit must not clear the mention list");
+  assert.deepEqual((await card()).message.mentions, mentions, "the card still shows who the line is addressed to");
+  assert.equal(h.messageStatus(mid), "pending_approval", "the line is still held");
+  assert.equal(h.approvalStatus(sent.message.approval_id), "pending", "the card is still pending");
+  assert.equal((await h.decided()).length, 0, "nothing was announced");
+  assert.equal((await h.received()).length, 0, "nothing reached the peer");
+
+  // The same card, approved without an edit: the line goes out as the sender wrote it, mention included.
+  await h.decide(sent.message.approval_id, { decision: "approved" });
+  const ev = (await h.received())[0];
+  assert.equal(ev.untrusted_content.text, "hello there");
+  assert.deepEqual(ev.mentions, mentions, "the refused edit did not cost the peer its mention");
+});
+
+test("h: a face-room line refused because its sender left keeps the mention list it had", async (t) => {
+  const h = await pair(t);
+  const code = "747474";
+  const joined = await h.A.owner.req("POST", "/v1/face-rooms/join", { code, bots: [h.A.bot.id] }) as any;
+  const roomId = joined.room_id as string;
+  await h.B.owner.req("POST", "/v1/face-rooms/join", { code, bots: [h.B.bot.id] });
+  const held = await h.A.owner.req("POST", `/v1/face-rooms/${roomId}/messages`, { text: "Coder, look", bot_id: h.A.bot.id, mentions: [h.A.handle, h.B.handle] }) as any;
+  assert.equal(held.status, "pending_approval");
+  const mentions = [h.A.handle.toLowerCase(), h.B.handle.toLowerCase()];
+  assert.deepEqual(held.mentions, mentions, "the held line carries both members it names");
+  const dirRow = (sql: string, ...args: unknown[]) => h.s.platform.db.prepare(sql).get(...args) as any;
+  const stored = () => dirRow("SELECT mentions FROM face_room_drafts WHERE id = ?", held.message_id).mentions;
+  const before = stored();
+  assert.ok(before, "the draft carries a stored mention list");
+
+  // The sender's seat ends while the line waits; the owner still holds the card.
+  await h.A.owner.req("POST", `/v1/face-rooms/${roomId}/leave`, { bots: [h.A.bot.id] });
+  const err = await expectApiError(
+    h.decide(held.approval_id, { decision: "approved_with_edits", edited_payload: { text: "changed" } }),
+    409, "not_a_member",
+  );
+  assert.match(err.message, /sender is no longer in the room/);
+  assert.equal(stored(), before, "a refusal must not rewrite the mention list");
+  assert.equal(dirRow("SELECT status FROM face_room_drafts WHERE id = ?", held.message_id).status, "pending_approval");
+  assert.equal(h.approvalStatus(held.approval_id), "pending");
+  const view = await h.B.owner.req("GET", `/v1/face-rooms/${roomId}`) as any;
+  assert.equal(view.events.filter((e: any) => e.type === "room.message").length, 0, "no member was told of a line");
+});
+
 test("guard: edited_payload is ignored unless the decision is approved_with_edits", async (t) => {
   const h = await pair(t);
   const d = await h.draft({ text: "plain line" });
