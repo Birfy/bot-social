@@ -544,6 +544,17 @@ PAGES.chat = async (v) => {
   const id = route().id;
   const c = await api("GET", `/v1/conversations/${id}`);
   const mine = me.bots.some((b) => b.id === c.initiator.bot_id); const peer = mine ? c.peer : c.initiator; const self = mine ? c.initiator : c.peer;
+  // Whether the owner may write here themselves. Three facts decide it, all read from the API: the platform must hold
+  // this Bot's signing key (otherwise `custodialBot` refuses the send with 409 not_custodial), this must be a 1:1 chat
+  // (a room chat answered without room_id would land in the pair's 1:1 thread instead), and the status must be one
+  // `sendAsMember` reuses — otherwise the send quietly opens a new conversation.
+  const myBot = me.bots.find((b) => b.id === self.bot_id);
+  const typing = c.status === "open" || c.status === "awaiting_approval";
+  const roomChat = c.room_id !== null && c.room_id !== undefined;
+  const canType = typing && c.room_id === null && myBot?.custodial === true && !!peer.bot_id;
+  const typingNote = canType || !typing ? "" : roomChat
+    ? "This chat belongs to a room; answer from the room page."
+    : myBot?.custodial !== true ? `${peer.handle}'s signing key is in your hands, so the console cannot send as it — reply from your Bot's runtime, or turn on key custody on its details page and refresh.` : "";
   const bubbles = c.messages.map((m) => m.direction === "outbound"
     ? `<div class="b me ${m.status === "pending_approval" ? "pending" : m.status}"><div class="bub">${esc(m.content.text)}${m.content.structured ? `<div class="struct">${esc(JSON.stringify(m.content.structured, null, 1))}</div>` : ""}${(m.content.attachments || []).length ? `<div class="row small" style="margin:6px 0 2px;flex-wrap:wrap"><span class="mut">Attached:</span>${m.content.attachments.map((x) => `<button class="btn s" data-att="${esc(x.id)}" title="Open ${esc(x.name)}">📎 ${esc(x.name)} · ${esc(x.size_label)}</button>`).join(" ")}</div>` : ""}</div>
         <div class="meta">${esc(self.handle)}${m.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(m.created_at)} · ${esc(MSG_ST[m.status] || m.status)}${m.risk_flags.length ? ` · ⚠ ${m.risk_flags.map((f) => esc(f.label || f.category)).join(", ")}` : ""}</div>
@@ -557,10 +568,22 @@ PAGES.chat = async (v) => {
       ${st(CONV_ST, c.status)}${c.outcome ? `<span class="pill gray">${esc(OUTCOME[c.outcome] || c.outcome)}</span>` : ""}
       ${c.status.startsWith("paused") ? `<button class="btn s" id="ext">Resume chat</button>` : ""}${c.status !== "closed" ? `<button class="btn s d" id="cls">Close</button>` : ""}</div>
       <div class="msgs"><div class="sys">Conversation started · ${fmt(c.messages[0]?.created_at || c.messages[0]?.delivered_at)}</div>${bubbles || '<div class="sys">No messages yet</div>'}${acts}${c.status === "closed" ? `<div class="sys">Chat closed${c.summary ? ": " + esc(c.summary) : ""}</div>` : ""}</div></div>
+    ${canType ? `<div class="card" id="composer"><div class="field"><label for="composer-text">Write as ${esc(self.handle)}</label><textarea id="composer-text" rows="2" placeholder="Type a message for ${esc(peer.handle)}…"></textarea></div>
+      <div class="row"><span class="mut grow">Sent as you, not your Bot: it carries ✍ typed by owner and still goes through the usual checks.</span><button class="btn p" id="send-line">Send</button></div></div>` : typingNote ? `<p class="mut" id="composer-note">${esc(typingNote)}</p>` : ""}
     <p class="mut" style="margin-top:10px">Yellow bubbles are written by the other Bot and shown as data only. Capabilities your Bot can use on them: ${c.effective_capabilities.me_on_peer.map((x) => capPill(x)).join(" ") || "none"}</p>`;
   bindApprovals(v, render);
   const e = $("#ext"); if (e) e.onclick = async () => { await api("POST", `/v1/conversations/${id}/extend`, { extra_turns: 4 }); toast("Resumed"); render(); };
   const k = $("#cls"); if (k) k.onclick = async () => { if (confirm("Close this conversation?")) { await api("POST", `/v1/conversations/${id}/close`, { outcome: "abandoned" }); render(); } };
+  // The 202 only says the line was accepted; what the owner ends up reading comes from a fresh conversation read, so a
+  // line held for approval shows as held and a refused one leaves no bubble behind (api() toasts the reason).
+  const box = $("#composer-text"), send = $("#send-line");
+  if (box && send) send.onclick = async () => {
+    const text = String(box.value || "").trim();
+    if (!text) { toast("Type a message first."); return; }
+    send.disabled = true;
+    try { await api("POST", `/v1/homes/${encodeURIComponent(me.home || self.bot_id)}/send`, { from_bot_id: self.bot_id, to: peer.bot_id, text, typed_by_owner: true }); render(); }
+    catch { send.disabled = false; }
+  };
   const m = $(".msgs"); if (m) m.lastElementChild?.scrollIntoView({ block: "nearest" });
 };
 
