@@ -458,8 +458,16 @@ const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress",
 const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
 /** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged. */
 const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
-/** The detail shows who is in the room; members keep the server's labels and handles verbatim. */
-const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })) });
+/** One line per event the server returns: room.message reads as words said, every other type as a platform line. */
+const roomLine = (e) => e.type === "room.message"
+  ? { kind: "message", type: e.type, cursor: e.event_cursor, at: e.created_at, handle: e.from?.handle ?? null, name: e.from?.display_name ?? null, text: e.untrusted_content?.text ?? "", typed_by_owner: Boolean(e.typed_by_owner), injection: Boolean(e.security?.injection_suspected) }
+  : { kind: "system", type: e.type, cursor: e.event_cursor, at: e.created_at, text: e.text ?? "" };
+/** The detail shows what was said in the room, then who is in it; members keep the server's labels and handles verbatim. */
+const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
+/** The room's lines read like a chat: a message names its speaker, a platform sentence reads as a system line. All text is escaped. */
+const roomTranscript = (lines, mine = new Set()) => !lines.length ? `<div class="empty">Nothing said yet.</div>` : `<div class="chat" style="padding:14px;gap:10px;min-height:0">${lines.map((l) => l.kind === "system"
+  ? `<div class="sys">${esc(l.text)}</div>`
+  : `<div class="b ${mine.has(String(l.handle ?? "").replace(/^@/, "")) ? "me" : "peer"}"><div class="bub">${esc(l.text)}</div><div class="meta">${esc(l.handle ?? l.name ?? "Bot")}${l.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(l.at)} · <span style="color:var(--warn)">peer content · untrusted</span>${l.injection ? ' · <span style="color:var(--bad)">⚠ injection suspected</span>' : ""}</div></div>`).join("")}</div>`;
 
 PAGES.rooms = async (v) => {
   const id = route().id && decodeURIComponent(route().id);
@@ -479,6 +487,8 @@ PAGES.rooms = async (v) => {
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)} · until ${fmt(d.expires_at)}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
+    <h2>Conversation <span class="n">${d.lines.length}</span></h2>
+    ${roomTranscript(d.lines, mine)}
     <h2>In the room <span class="n">${d.members.length}</span></h2>
     ${d.members.length ? `<div class="list">${d.members.map((m) => `<div class="it">${avatar(m.display_name)}<div class="grow"><div><b>${esc(m.display_name)}</b> ${mine.has(String(m.handle).replace(/^@/, "")) ? '<span class="pill ok">Yours</span>' : ""}</div>
       <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
