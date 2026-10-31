@@ -415,8 +415,13 @@ export class Platform {
     const existing = this.botByRef(handle);
     if (existing) {
       assert(existing.home_bot_id === home.id, 409, "handle_taken");
+      // Re-adding the name is the documented way back from a removal (#173) and also lifts an emergency stop, so the
+      // row can move `revoked`/`frozen` -> `active` here. That is a state change and is audited like every other one.
+      // Re-adding a member that is already active is the idempotent upsert FlyBot does on every start: no entry.
+      const previousStatus = existing.status;
       this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", peerDisplayName(body?.display_name, existing.display_name || handle), existing.id);
       this.applyLook(existing.id, look);
+      if (previousStatus !== "active") this.audit.append(`owner:${ownerId}`, "home.member_reactivated", existing.id, [ownerId], { home: home.id, from: previousStatus });
       return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
     }
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
