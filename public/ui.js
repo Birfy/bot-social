@@ -278,13 +278,21 @@ function secretsPanel({ title, lead, model }) {
 }
 
 // ------------------------------------------------------------------ shared widgets
+// A capability request carries the scope Approve will write into the grant (`src/platform.ts:2362`), so the card has to
+// show it. Only free/busy has a readable one: a day window and the hours the peer may see. An empty scope is not the
+// console's "(14 days · working hours)" picking default — it is the unrestricted grant — so it says that instead.
+const grantScope = (r) => {
+  if (r.capability !== "calendar.freebusy.read") return "";
+  const s = r.scope || {};
+  return ` · ${s.window_days ? `${esc(String(s.window_days))} days` : "no day limit"} · ${s.hours ? esc(String(s.hours)) : "any hour"}`;
+};
 function approvalCard(a) {
   let body = "";
   if (a.message) body = `<div class="mut small" style="margin:6px 0 4px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}${a.conversation ? ` · ${esc(a.conversation.intent.summary || a.conversation.intent.type)} · turn ${a.conversation.turn.count + 1}` : ""}</div>
     <textarea data-edit="${a.approval_id}">${esc(a.message.payload.text)}</textarea>${a.message.payload.structured ? `<div class="struct">${esc(JSON.stringify(a.message.payload.structured, null, 1))}</div>` : ""}${(a.message.payload.attachments || []).length ? `<div class="row small" style="margin:6px 0 2px;flex-wrap:wrap"><span class="mut">Attached:</span>${a.message.payload.attachments.map((x) => `<button class="btn s" data-att="${esc(x.id)}" title="Open ${esc(x.name)}">📎 ${esc(x.name)} · ${esc(x.size_label)}</button>`).join(" ")}</div>` : ""}`;
   else if (a.action) body = `<div class="struct">${esc(a.action.action_type)}\n${esc(JSON.stringify(a.action.params, null, 1))}</div>${a.action.justification ? `<div class="mut small">Bot's reason: ${esc(a.action.justification)}</div>` : ""}`;
   else if (a.relationship) body = `<div class="small" style="margin-top:6px">Target: <b>${esc(a.relationship.target.display_name)}</b> ${esc(a.relationship.target.handle)}(owner ${esc(a.relationship.target.owner_display_name)})<br>You will grant: ${a.relationship.offered_capabilities.map((c) => capPill(c)).join(" ")}</div>`;
-  else if (a.grant_request) body = `<div class="small" style="margin-top:6px"><b>${esc(a.grant_request.from.display_name)}</b> requests ${capPill(a.grant_request.capability)}</div>${a.grant_request.reason ? `<div class="untrusted" style="margin-top:6px"><div class="lbl">Their reason (untrusted content)</div>${esc(a.grant_request.reason)}</div>` : ""}`;
+  else if (a.grant_request) body = `<div class="small" style="margin-top:6px"><b>${esc(a.grant_request.from.display_name)}</b> requests ${capPill(a.grant_request.capability)}${grantScope(a.grant_request)}</div>${a.grant_request.reason ? `<div class="untrusted" style="margin-top:6px"><div class="lbl">Their reason (untrusted content)</div>${esc(a.grant_request.reason)}</div>` : ""}`;
   else if (a.face_room) body = `<div class="mut small" style="margin:6px 0 4px">In room ${esc(a.face_room.room_id)}</div>
     <div class="small" style="margin-top:4px">${esc(a.face_room.payload.text)}</div>${(a.face_room.mentions || []).length ? `<div class="row small" style="margin-top:6px;flex-wrap:wrap"><span class="mut">To:</span>${a.face_room.mentions.map((h) => `<span class="pill">${esc(h)}</span>`).join(" ")}</div>` : ""}`;
   else if (a.invite) body = `<div class="small" style="margin-top:6px">Grants to joiner: ${a.invite.offered_capabilities.map((c) => capPill(c)).join(" ")} · ${a.invite.max_uses} uses · until ${fmt(a.invite.expires_at)}</div>`;
