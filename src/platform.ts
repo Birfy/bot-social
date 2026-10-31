@@ -437,10 +437,14 @@ export class Platform {
     const rooms = this.all("SELECT * FROM face_room_members WHERE bot_id = ? AND left_at IS NULL", m.id);
     let revokedInvites = 0;
     let revokedFaceInvites = 0;
+    let clearedNotifyOutlet = 0;
     this.db.transaction(() => {
       // Stop the push first: a revoked identity must not keep receiving metadata through its webhook.
       this.run("UPDATE bots SET status = 'revoked', webhook_url = NULL, webhook_headers = '[]', webhook_updated_at = ? WHERE id = ?", nowIso(), m.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), m.id);
+      // An owner who made this Bot the approval outlet would otherwise keep announcing cards into a queue that
+      // this transaction just made unreadable: skip the dead outlet instead of silently dropping the cards.
+      clearedNotifyOutlet = this.run("UPDATE owners SET notify_bot_id = NULL WHERE notify_bot_id = ?", m.id).changes;
       // An invite for a Bot that no longer exists must not share it again. Pending owner approvals for those
       // invites are cancelled by the bot_id below, with the member's other drafts.
       revokedInvites = this.run("UPDATE invites SET status = 'revoked' WHERE bot_id = ? AND status IN ('active','pending_owner')", m.id).changes;
@@ -472,7 +476,7 @@ export class Platform {
       // seating new people in it. Owner-minted tickets (`created_by_bot IS NULL`) are not this identity's reach.
       revokedFaceInvites = this.run("UPDATE face_room_invites SET revoked_at = ? WHERE created_by_bot = ? AND revoked_at IS NULL", nowIso(), m.id).changes;
     })();
-    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, revoked_face_invites: revokedFaceInvites, rooms_left: rooms.length });
+    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, revoked_face_invites: revokedFaceInvites, rooms_left: rooms.length, notify_outlet_cleared: clearedNotifyOutlet > 0 });
     return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
   }
 
@@ -824,8 +828,12 @@ export class Platform {
       if (body.notify_bot_id === null) notifyBotId = null;
       else {
         assert(typeof body.notify_bot_id === "string" && body.notify_bot_id.length > 0, 400, "invalid_request", "notify_bot_id must be a Bot id or null");
-        const outlet = this.get("SELECT id, owner_id FROM bots WHERE id = ?", body.notify_bot_id);
+        const outlet = this.get("SELECT id, owner_id, status FROM bots WHERE id = ?", body.notify_bot_id);
         assert(outlet && outlet.owner_id === ownerId, 400, "invalid_request", "notify_bot_id must name one of your own Bots");
+        // A revoked identity can never read its event queue (#177 ③) nor get a token again, so a card announced to
+        // it is written and then lost. A frozen one is still a valid outlet: its queue survives the stop and is
+        // read after resume.
+        assert(outlet.status !== "revoked", 400, "invalid_request", "a revoked Bot cannot be the approval outlet");
         notifyBotId = outlet.id;
       }
     }
@@ -2172,6 +2180,11 @@ export class Platform {
   notifyOwnerOfApproval(approvalId: string): boolean {
     const a = this.get("SELECT a.id, a.owner_id, a.kind, a.expires_at, o.notify_bot_id FROM approvals a JOIN owners o ON o.id = a.owner_id WHERE a.id = ?", approvalId);
     if (!a?.notify_bot_id) return false;
+    // Defense in depth: a setting written before the revocation checks above can still name a revoked identity.
+    // Its queue is refused (#177 ③), so an announcement there would be write-only. A frozen outlet is fine: the
+    // queue is read again after resume.
+    const outlet = this.get("SELECT status FROM bots WHERE id = ?", a.notify_bot_id);
+    if (!outlet || outlet.status === "revoked") return false;
     const ins = this.run("INSERT OR IGNORE INTO approval_notifications (approval_id, owner_id, bot_id, created_at) VALUES (?,?,?,?)", a.id, a.owner_id, a.notify_bot_id, nowIso());
     if (!ins.changes) return false;
     const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", a.owner_id).n;
