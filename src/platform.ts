@@ -4127,7 +4127,8 @@ export class Platform {
       assert(b, 404, "bot_not_found", "no such bot");
       assert(b.owner_id === ownerId, 403, "forbidden", "not your bot");
     }
-    assert(b.status === "active", 403, "bot_frozen", "bot is frozen (emergency stop)");
+    assert(b.status === "active", 403, b.status === "frozen" ? "bot_frozen" : "bot_revoked",
+      b.status === "frozen" ? "bot is frozen (emergency stop)" : "this bot identity was revoked");
     return b;
   }
 
