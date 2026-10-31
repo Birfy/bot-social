@@ -126,3 +126,90 @@ test("without a conversation id the old route is unchanged: the newest open conv
     assert.equal((await lines(A, c2)).length, 2, "the newest conversation carries the original line plus this one");
   } finally { await s.stop(); }
 });
+
+/** Two FlyBot local rooms the same pair shares, each with its own room conversation — the shape of a pair that
+ *  met in two rooms: one `room` relationship and one open conversation per room. */
+async function pairWithTwoRooms(s: any) {
+  const { A, B } = await friends(s.base);
+  holdKey(s, A);
+  holdKey(s, B);
+  const rooms: { room_id: string; conversation_id: string }[] = [];
+  for (const room of ["war-thread-one", "war-thread-two"]) {
+    const invite = await A.owner.req("POST", "/v1/local-room-invites", { room_id: room, bot_id: A.bot.id });
+    await B.owner.req("POST", `/v1/local-room-invites/${invite.ticket}/claim`, { bots: [B.bot.id] });
+    const sent = await ownerSend(A, { from_bot_id: A.bot.id, to: B.bot.id, text: `the line in ${room}`, room_id: room });
+    assert.equal(sent.message.status, "delivered", `the room send in ${room} was delivered`);
+    rooms.push({ room_id: room, conversation_id: sent.conversation_id as string });
+  }
+  return { A, B, rooms };
+}
+
+test("a conversation opened in another room is refused with 404 under this room's door and nothing is written", async () => {
+  const s = await startServer();
+  try {
+    const { A, B, rooms } = await pairWithTwoRooms(s);
+    const [one, two] = rooms;
+    const beforeOne = (await lines(A, one.conversation_id)).length;
+    const beforeTwo = (await lines(A, two.conversation_id)).length;
+    const conversationsBefore = (await A.owner.req("GET", "/v1/conversations")).conversations.length;
+    const err = await expectApiError(
+      ownerSend(A, { from_bot_id: A.bot.id, to: B.bot.id, text: "this belongs to the other room", typed_by_owner: true, room_id: one.room_id, conversation_id: two.conversation_id }),
+      404,
+      "conversation_not_found",
+    );
+    assert.match(err.message, /conversation/, "the refusal reads like the one an unknown id gets");
+    assert.equal((await lines(A, two.conversation_id)).length, beforeTwo, "the other room's thread gained nothing");
+    assert.equal((await lines(A, one.conversation_id)).length, beforeOne, "this room's own thread gained nothing either");
+    assert.equal((await A.owner.req("GET", "/v1/conversations")).conversations.length, conversationsBefore,
+      "a refused send never opens a conversation");
+  } finally { await s.stop(); }
+});
+
+test("a room conversation named on the 1:1 route is refused with 404, never written through the friendship", async () => {
+  const s = await startServer();
+  try {
+    const { A, B, rooms } = await pairWithTwoRooms(s);
+    const [one] = rooms;
+    const before = (await lines(A, one.conversation_id)).length;
+    const conversationsBefore = (await A.owner.req("GET", "/v1/conversations")).conversations.length;
+    await expectApiError(
+      ownerSend(A, { from_bot_id: A.bot.id, to: B.bot.id, text: "into the room thread from the 1:1 page", typed_by_owner: true, conversation_id: one.conversation_id }),
+      404,
+      "conversation_not_found",
+    );
+    assert.equal((await lines(A, one.conversation_id)).length, before, "the room thread gained nothing");
+    assert.equal((await A.owner.req("GET", "/v1/conversations")).conversations.length, conversationsBefore,
+      "no 1:1 conversation was opened instead");
+  } finally { await s.stop(); }
+});
+
+test("a room conversation named under its own room's door still takes the line", async () => {
+  const s = await startServer();
+  try {
+    const { A, B, rooms } = await pairWithTwoRooms(s);
+    const [one] = rooms;
+    const before = (await lines(A, one.conversation_id)).length;
+    const r = await ownerSend(A, { from_bot_id: A.bot.id, to: B.bot.id, text: "the same room, still allowed", typed_by_owner: true, room_id: one.room_id, conversation_id: one.conversation_id });
+    assert.equal(r.conversation_id, one.conversation_id, "the 202 names the room's conversation");
+    const after = await lines(A, one.conversation_id);
+    assert.equal(after.length, before + 1, "the room conversation gained exactly one line");
+    const mine = after.find((m: any) => m.direction === "outbound" && m.content?.text === "the same room, still allowed");
+    assert.ok(mine, "the line is in the room conversation it named");
+    assert.equal(mine.status, "delivered", "and it was delivered");
+  } finally { await s.stop(); }
+});
+
+test("a 1:1 conversation is still written when the pair also shares a room", async () => {
+  const s = await startServer();
+  try {
+    const { A, B, rooms } = await pairWithTwoRooms(s);
+    const c = await B.bot.startConversation(A.bot.id, { type: "general_chat", summary: "The 1:1 thread" });
+    const c1 = c.conversation_id as string;
+    const before = (await lines(A, c1)).length;
+    const roomBefore = (await lines(A, rooms[0].conversation_id)).length;
+    const r = await ownerSend(A, { from_bot_id: A.bot.id, to: B.bot.id, text: "from the 1:1 page", typed_by_owner: true, conversation_id: c1 });
+    assert.equal(r.conversation_id, c1, "the 202 names the 1:1 conversation");
+    assert.equal((await lines(A, c1)).length, before + 1, "the 1:1 conversation gained exactly one line");
+    assert.equal((await lines(A, rooms[0].conversation_id)).length, roomBefore, "no room thread gained anything");
+  } finally { await s.stop(); }
+});

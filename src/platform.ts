@@ -623,10 +623,17 @@ export class Platform {
     assert(explicit === null || explicit.length > 0, 400, "invalid_request", "conversation_id must be a non-empty string");
     let conversationId: string;
     if (explicit !== null) {
-      const named = this.get("SELECT id, initiator_bot, peer_bot, status, outcome FROM conversations WHERE id = ?", explicit);
+      const named = this.get("SELECT id, initiator_bot, peer_bot, relationship_id, status, outcome FROM conversations WHERE id = ?", explicit);
       const mine = named && ((named.initiator_bot === cb.botId && named.peer_bot === to.id) || (named.initiator_bot === to.id && named.peer_bot === cb.botId));
       assert(mine, 404, "conversation_not_found", "no such conversation between these Bots");
       assert(named.status === "open" || named.status === "awaiting_approval", 409, named.status === "closed" ? "conversation_closed" : "conversation_paused", `conversation is ${named.status}${named.outcome ? ` (${named.outcome})` : ""}`);
+      // Naming a conversation must not hop the door this call is judged by: the thread has to be the one opened
+      // through that same relationship. Without this, a send naming room R1 could write into the conversation of
+      // another room R2 the pair also shares — R2's reach is never resolved here, so a closed room would still take
+      // the line — and the 1:1 route could write into a room's thread on nothing but a friendship and a non-room
+      // grant. A conversation off that door answers exactly like one that does not exist, so ids cannot be probed.
+      const doorId = roomRel?.id ?? this.findActiveRelationship(cb.botId, to.id)?.id ?? null;
+      assert(named.relationship_id === doorId, 404, "conversation_not_found", "no such conversation between these Bots");
       conversationId = named.id;
     } else {
       const rel = roomRel ?? this.activeRelationship(cb.botId, to.id);
