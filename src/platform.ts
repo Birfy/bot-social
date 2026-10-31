@@ -2421,7 +2421,8 @@ export class Platform {
       this.run("UPDATE messages SET status = 'expired' WHERE id = ?", a.subject_id);
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       if (m) {
-        this.emit(m.recipient_bot, "system.notice", { conversation_id: m.conversation_id, trust: "platform", text: "The other side has not responded (draft approval timed out)" });
+        // An expired draft is settled like a rejected one (`rejectMessage`): the peer never sees it and is not told.
+        // It never received the line, so there is nothing for it to act on, and its queue and webhook stay quiet.
         this.emit(m.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
       }
     }
