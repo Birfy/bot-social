@@ -657,7 +657,10 @@ const AUDIT_LABEL = {
   "home.member_added": "added a home member", "home.member_revoked": "removed a home member",
 };
 function auditActor(actor) {
-  const [kind, id, via] = String(actor || "").split(":");
+  // A record written through an invite keeps the invite as provenance — `owner:own_x(invite:inv_y)` — but the id must
+  // still compare to me.owner_id, or the owner who accepted is shown as somebody else. Only the parsing drops the
+  // suffix; the stored actor (hash-chained log, exports, existing rows) is untouched.
+  const [kind, id, via] = String(actor || "").replace(/\([^)]*\)/g, "").split(":");
   const tag = via === "mcp" ? " (through your assistant)" : "";
   if (kind === "owner") return (id === me.owner_id ? "You" : "Another owner") + tag;
   if (kind === "bot") { const b = me.bots.find((x) => x.id === id); return (b ? `Your Bot @${b.handle}` : "Another Bot") + tag; }
