@@ -506,10 +506,15 @@ const roomLine = (e) => e.type === "room.message"
   : { kind: "system", type: e.type, cursor: e.event_cursor, at: e.created_at, text: e.text ?? "" };
 /** The detail shows what was said in the room, then who is in it; members keep the server's labels and handles verbatim. */
 const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
-/** The room's lines read like a chat: a message names its speaker, a platform sentence reads as a system line. All text is escaped. */
-const roomTranscript = (lines, mine = new Set()) => !lines.length ? `<div class="empty">Nothing said yet.</div>` : `<div class="chat" style="padding:14px;gap:10px;min-height:0">${lines.map((l) => l.kind === "system"
-  ? `<div class="sys">${esc(l.text)}</div>`
-  : `<div class="b ${mine.has(String(l.handle ?? "").replace(/^@/, "")) ? "me" : "peer"}"><div class="bub">${esc(l.text)}</div><div class="meta">${esc(l.handle ?? l.name ?? "Bot")}${l.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(l.at)} · <span style="color:var(--warn)">peer content · untrusted</span>${l.injection ? ' · <span style="color:var(--bad)">⚠ injection suspected</span>' : ""}</div></div>`).join("")}</div>`;
+/** One spoken line: a message names its speaker; the platform's warning belongs to the other side only. All text is escaped. */
+const roomLineHtml = (l, mine) => {
+  // `mine` is the room list's own `my_bots` set, normalised exactly as the "Yours" pill does, so the side and the
+  // warning cannot disagree: an own Bot gets `class="b me"` and no "peer content · untrusted", a peer row keeps it.
+  const own = mine.has(String(l.handle ?? "").replace(/^@/, ""));
+  return `<div class="b ${own ? "me" : "peer"}"><div class="bub">${esc(l.text)}</div><div class="meta">${esc(l.handle ?? l.name ?? "Bot")}${l.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(l.at)}${own ? " · your Bot" : ' · <span style="color:var(--warn)">peer content · untrusted</span>'}${l.injection ? ' · <span style="color:var(--bad)">⚠ injection suspected</span>' : ""}</div></div>`;
+};
+/** The room's lines read like a chat: a message reads as one bubble, a platform sentence as a system line. */
+const roomTranscript = (lines, mine = new Set()) => !lines.length ? `<div class="empty">Nothing said yet.</div>` : `<div class="chat" style="padding:14px;gap:10px;min-height:0">${lines.map((l) => l.kind === "system" ? `<div class="sys">${esc(l.text)}</div>` : roomLineHtml(l, mine)).join("")}</div>`;
 
 PAGES.rooms = async (v) => {
   const id = route().id && decodeURIComponent(route().id);
