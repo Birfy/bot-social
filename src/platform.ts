@@ -1845,6 +1845,29 @@ export class Platform {
     return { relationship_id: relId, status: "revoked" };
   }
 
+  /** Undo a Block the caller wrote. The row and its pair become `revoked` (what an Unfriend leaves), `blocked_by`
+   *  is cleared, and nothing is restored: the grants stay void and the chats stay closed, so the pair can only start
+   *  again by asking. `block` ends every row the pair holds (the friendship and one row per shared room), so the undo
+   *  takes back every row this owner blocked -- the id locates the pair and decides who may undo it, nothing more. */
+  undoBlock(p: Principal, relId: string) {
+    const ownerId = this.requireOwner(p);
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
+    // A pair this owner is not part of reads exactly like an id that does not exist: an undo must not become a way
+    // to learn whether another pair is blocked (and by whom).
+    assert(r && (ownerId === r.requester_owner || ownerId === r.target_owner), 404, "relationship_not_found");
+    assert(r.status === "blocked", 409, "invalid_state", "relationship is not blocked");
+    assert(r.blocked_by === ownerId, 403, "forbidden", "only the owner who blocked can undo it");
+    const rows = this.pairRelationships(r.requester_bot, r.target_bot).filter((x) => x.status === "blocked" && x.blocked_by === ownerId);
+    // `updated_at` is left alone: on a revoked row it is the moment the friendship ended, and `connected_at`/the
+    // console's "Removed <time>" read it -- undoing the block must not move that moment to the undo.
+    this.db.transaction(() => {
+      for (const row of rows) this.run("UPDATE relationships SET status = 'revoked', blocked_by = NULL WHERE id = ?", row.id);
+    })();
+    this.audit.append(`owner:${ownerId}`, "relationship.unblocked", r.id, [r.requester_owner, r.target_owner], { relationship_ids: rows.map((x) => x.id), rows: rows.length });
+    for (const botId of new Set(rows.flatMap((x) => [x.requester_bot, x.target_bot]))) this.emit(botId as string, "relationship.changed", { relationship_id: r.id, status: "revoked" });
+    return { relationship_id: relId, status: "revoked" };
+  }
+
   block(p: Principal, body: { bot_id?: string; relationship_id?: string; my_bot_id?: string }) {
     const ownerId = this.requireOwner(p);
     let r: any;

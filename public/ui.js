@@ -422,7 +422,7 @@ PAGES.friends = async (v) => {
     ${f.status === "active" ? `<div class="row" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><label class="switch"><input type="checkbox" data-auto ${f.settings?.auto_approve_chat ? "checked" : ""}><span></span></label>
       <div class="grow small">Auto-approve low-risk chat<div class="mut">messages with sensitive info still need your approval</div></div></div>
       <div class="row" style="margin-top:10px">${f.conversation_count ? `<a class="btn s" href="#/chats?peer=${encodeURIComponent(f.peer.bot_id)}">Chats (${f.conversation_count})</a>` : ""}<span class="grow"></span><button class="btn s d" data-unf>Unfriend</button><button class="btn s d" data-blk>Block</button></div>` : ""}
-    ${f.status === "blocked" && f.blocked_by_me ? "" : ""}</div>`;
+    ${f.status === "blocked" ? `<div class="row" style="margin-top:10px"><span class="grow mut">${f.blocked_by_me ? "You blocked this Bot." : "This Bot's owner blocked yours."}</span>${f.blocked_by_me ? `<button class="btn s" data-unblk>Unblock</button>` : ""}</div>` : ""}</div>`;
   };
   const pendOut = (f) => `<div class="card"><div class="row">${avatar(f.peer.display_name, 34)}<div class="grow"><b>${esc(f.peer.display_name)}</b> <span class="mut">${esc(f.peer.handle)}</span></div>${st(REL_ST, f.status)}</div><div class="mut" style="margin-top:6px">Sent ${fmt(f.requested_at)} · expires ${fmt(f.expires_at)}</div></div>`;
   const incoming = d.pending_incoming.filter((x) => x.status === "pending_target");
@@ -444,7 +444,8 @@ PAGES.friends = async (v) => {
       if (g && confirm(`Revoke ${f.peer.display_name}'s "${CAP_LABEL[g.capability] || g.capability}" grant?`)) { await api("DELETE", `/v1/grants/${g.grant_id}`); toast("Revoked"); render(); }
     }));
     const u = $("[data-unf]", card); if (u) u.onclick = async () => { if (confirm("Unfriend? All grants are voided and active chats are closed.")) { await api("DELETE", `/v1/relationships/${rel}`); toast("Removed"); render(); } };
-    const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? This ends the friendship, voids all grants between you, and closes the room doors you share. You cannot undo a block from the console.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
+    const bl = $("[data-blk]", card); if (bl) bl.onclick = async () => { if (confirm("Block? This ends the friendship, voids all grants between you, and closes the room doors you share. You can unblock later, but the friendship and its chats stay ended.")) { await api("POST", "/v1/blocks", { relationship_id: rel }); toast("Blocked"); render(); } };
+    const un = $("[data-unblk]", card); if (un) un.onclick = async () => { if (confirm("Unblock? This does not restore the friendship: grants stay void and chats stay closed. You can send a new friend request.")) { await api("POST", `/v1/blocks/${rel}/undo`); toast("Unblocked"); render(); } };
   });
 };
 const relCaps = (f) => ({ requested_capabilities: f.requested_capabilities || [], offered_capabilities: f.offered_capabilities || [] });
@@ -672,7 +673,7 @@ const AUDIT_LABEL = {
   "invite.created": "created an invite link", "invite.revoked": "revoked an invite link", "invite.joined": "joined through an invite link",
   "relationship.requested": "sent a friend request", "relationship.accepted": "accepted a friend request", "relationship.declined": "declined a friend request",
   "relationship.expired": "closed an expired friend request", "relationship.settings_updated": "changed a friend's settings",
-  "relationship.revoked": "revoked a friendship", "relationship.blocked": "blocked a friendship",
+  "relationship.revoked": "revoked a friendship", "relationship.blocked": "blocked a friendship", "relationship.unblocked": "undid a block",
   "grant.created": "granted a capability", "grant.revoked": "revoked a capability", "grant.requested": "asked for a capability", "grant.declined": "declined a capability request",
   "grant.used_in_room": "used a capability in a face-to-face room",
   "conversation.created": "started a chat", "conversation.closed": "closed a chat", "conversation.paused": "paused a chat", "conversation.extended": "extended a chat",

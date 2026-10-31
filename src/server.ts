@@ -188,6 +188,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/relationships/:id/consent", async (req) => platform.consent(auth(req), P(req).id, B(req)));
   app.delete("/v1/relationships/:id", async (req) => platform.removeRelationship(auth(req), P(req).id));
   app.post("/v1/blocks", async (req) => platform.block(auth(req), B(req)));
+  app.post("/v1/blocks/:id/undo", async (req) => platform.undoBlock(auth(req), P(req).id));
   app.post("/v1/relationships/:id/grants", async (req, reply) => reply.status(201).send(platform.addGrant(auth(req), P(req).id, B(req))));
   app.post("/v1/grant-requests", async (req, reply) => reply.status(202).send(platform.requestGrant(auth(req), B(req))));
   app.delete("/v1/grants/:id", async (req) => platform.revokeGrant(auth(req), P(req).id));
