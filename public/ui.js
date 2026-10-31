@@ -20,6 +20,8 @@ function zonedToIso(local) {
   return new Date(wall - offset(first)).toISOString();
 }
 const fmt = (iso, o = {}) => iso ? new Intl.DateTimeFormat("en-GB", { hour12: false, timeZone: TZ, ...(o.time ? {} : { month: "numeric", day: "numeric" }), hour: "2-digit", minute: "2-digit", ...(o.zone === false ? {} : { timeZoneName: "short" }) }).format(new Date(iso)) : "—";
+/** The date an instant falls on in the owner's zone; two times are compared where they are displayed, never in UTC. */
+const localDate = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
 const ago = (iso) => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`; };
 const COLORS = ["#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
 const avatar = (name, size = 40) => { const n = String(name || "?").replace(/^@/, ""); let h = 0; for (const ch of n) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return `<div class="av" style="background:${COLORS[h % COLORS.length]};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.4)}px">${esc(n.slice(0, 1).toUpperCase())}</div>`; };
@@ -673,7 +675,7 @@ PAGES.bots = async (v) => {
       <button class="btn p" id="regbot">Register</button><div id="regout"></div></details>
     ${me.bots.length ? `<h2>Calendar <span class="n">${cal.entries.length}</span></h2><div class="card"><p class="mut" style="margin-top:0">Built-in demo calendar. Other Bots only see busy/free intervals, never titles or locations.</p>
       <div class="row"><input id="cs" type="datetime-local" style="width:auto" aria-label="Start"><input id="ce" type="datetime-local" style="width:auto" aria-label="End"><input id="ct" placeholder="Title" style="flex:1;min-width:120px" aria-label="Title"><button class="btn" id="addcal">Add</button></div><div class="hint">Times are in ${esc(zoneName())} (${esc(TZ)}).</div><div id="calerr"></div>
-      ${cal.entries.length ? `<table style="margin-top:10px">${cal.entries.map((e) => `<tr><td>${fmt(e.start, { zone: false })} – ${fmt(e.end, { time: true })}</td><td>${esc(e.title || "")}</td><td class="mut">${esc(e.status)}</td></tr>`).join("")}</table>` : ""}</div>` : ""}`;
+      ${cal.entries.length ? `<table style="margin-top:10px">${cal.entries.map((e) => `<tr><td>${fmt(e.start, { zone: false })} – ${localDate(e.start) === localDate(e.end) ? fmt(e.end, { time: true }) : fmt(e.end)}</td><td>${esc(e.title || "")}</td><td class="mut">${esc(e.status)}</td></tr>`).join("")}</table>` : ""}</div>` : ""}`;
   $("#cponb").onclick = () => copy($("#onb").innerText);
   $$("[data-wh]", v).forEach((el) => loadWebhook(el, el.dataset.wh));
   $("#regbot").onclick = async () => {
