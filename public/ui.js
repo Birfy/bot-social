@@ -391,9 +391,28 @@ function bindApprovals(root, after) {
     if (d === "approved_with_edits") body.edited_payload = { text: $(`[data-edit="${id}"]`, card).value };
     if (d === "rejected") { const n = prompt("Tell the Bot why (optional)"); if (n === null) return; body.note_to_bot = n || undefined; }
     $$("button", card).forEach((x) => (x.disabled = true));
-    try { await api("POST", `/v1/approvals/${id}/decision`, body); toast(d === "rejected" ? "Rejected" : "Approved"); card.style.opacity = ".4"; setTimeout(after, 250); refreshBadges(); } catch { $$("button", card).forEach((x) => (x.disabled = false)); }
+    try {
+      // The decision itself succeeds even when the action it approves does not: the body then carries
+      // `{status: "failed", reason}`, so "Approved" alone would tell the owner a booking happened when it did not.
+      const res = await api("POST", `/v1/approvals/${id}/decision`, body);
+      if (d === "rejected") toast("Rejected");
+      else if (res?.status === "failed") toast(`Approved, but the action ${actionFailLine(res.reason)}.`);
+      else toast("Approved");
+      card.style.opacity = ".4"; setTimeout(after, 250); refreshBadges();
+    } catch { $$("button", card).forEach((x) => (x.disabled = false)); }
   })));
 }
+// An approved action can still fail on the server, and the reason comes back as a code: in the decision body
+// (`{status: "failed", reason}`) and on the action row (`result: {error}`). A code is not something the owner can
+// act on, so each known one becomes a sentence and an unknown one is printed as it arrived — never a bare "failed".
+const ACTION_FAIL = {
+  calendar_conflict: "that time is already busy",
+  invite_not_found: "that meeting invite is no longer available",
+  unsupported_action: "the platform does not support that action",
+};
+const actionFailText = (code) => ACTION_FAIL[code] || `failed (${code || "no reason given"})`;
+/** The action line reads `failed — <sentence>`; an unknown code already says `failed`, so it is not doubled. */
+const actionFailLine = (code) => (ACTION_FAIL[code] ? `failed — ${ACTION_FAIL[code]}` : actionFailText(code));
 const capChecks = (prefix, checked = []) => `<div class="caps">${["chat.public", "profile.read", "calendar.freebusy.read", "calendar.book"].map((c) => `<label><input type="checkbox" data-${prefix}="${c}" ${checked.includes(c) ? "checked" : ""} ${["chat.public", "profile.read"].includes(c) ? "checked disabled" : ""}> ${esc(CAP_LABEL[c])}<span class="mut">${c === "calendar.freebusy.read" ? " (14 days · working hours)" : c === "calendar.book" ? " (still approved each time)" : ""}</span></label>`).join("")}</div>`;
 const readCaps = (root, prefix) => $$(`[data-${prefix}]`, root).filter((x) => x.checked).map((x) => x.dataset[prefix]);
 function requestCard(r) {
@@ -585,7 +604,7 @@ PAGES.chat = async (v) => {
         ${m.approval_id ? `<div class="row" data-apr="${m.approval_id}"><button class="btn s ok" data-dec="approved">✓ Approve & send</button><button class="btn s d" data-dec="rejected">Reject</button></div>` : ""}</div>`
     : `<div class="b peer"><div class="bub">${esc(m.untrusted_content.text)}${m.untrusted_content.structured ? `<div class="struct">${esc(JSON.stringify(m.untrusted_content.structured, null, 1))}</div>` : ""}</div>
         <div class="meta">${esc(peer.handle)}${m.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(m.delivered_at)} · <span style="color:var(--warn)">peer content · untrusted</span>${m.security?.injection_suspected ? ' · <span style="color:var(--bad)">⚠ injection suspected</span>' : ""}</div></div>`).join("");
-  const acts = c.actions.map((a) => `<div class="sys">⚙ ${esc(a.action_type === "calendar.book" ? "Book meetings" : a.action_type === "calendar.accept_invite" ? "Accept meeting invite" : a.action_type)} · ${esc(a.status)}${a.result?.start ? ` · ${fmt(a.result.start)}` : ""}</div>`).join("");
+  const acts = c.actions.map((a) => `<div class="sys">⚙ ${esc(a.action_type === "calendar.book" ? "Book meetings" : a.action_type === "calendar.accept_invite" ? "Accept meeting invite" : a.action_type)} · ${esc(a.status === "failed" ? actionFailLine(a.result?.error) : a.status)}${a.result?.start ? ` · ${fmt(a.result.start)}` : ""}</div>`).join("");
   v.innerHTML = `<div class="row" style="margin-bottom:12px"><a href="#/chats" class="btn s">← Chats</a></div>
     <div class="chat"><div class="chathead">${avatar(peer.display_name)}<div class="grow"><b>${esc(peer.display_name)}</b> <span class="mut">${esc(peer.handle)} · owner ${esc(peer.owner_display_name)}</span>
       <div class="mut">${esc(c.intent.summary || c.intent.type)} · ${esc(c.intent.type)} · me ${esc(self.handle)} · ${c.turn.count} turns</div></div>
