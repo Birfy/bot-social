@@ -953,9 +953,17 @@ export class Platform {
     this.ownBot(ownerId, botId);
     assert(body?.kid && body?.value, 400, "invalid_request", "kid and value required");
     try { publicKeyFromRaw(body.value); } catch { throw new ApiError(400, "invalid_public_key"); }
+    // `retire_others_in_days` is the caller's day count for every key already on the Bot, so it is checked as one
+    // before anything is written: whole days, 0 to 365. Taken raw, "abc" became an invalid Date and answered 500
+    // on a write path, and 0 or a negative count pulled every existing key's expiry into the past while the rows
+    // still read `active` — the Bot then silently stopped signing. 0 stays legal with its meaning: the other keys
+    // expire at once, which is what an owner replacing a lost key wants. Only the range and the whole-day rule are new.
+    const raw = (body as any)?.retire_others_in_days as unknown;
+    const days = raw === undefined || raw === null ? 7 : raw;
+    assert(typeof days === "number" && Number.isInteger(days) && days >= 0 && days <= 365, 400, "invalid_request", "retire_others_in_days must be a whole number of days from 0 to 365");
     assert(!this.get("SELECT 1 FROM bot_keys WHERE bot_id = ? AND kid = ?", botId, body.kid), 409, "kid_exists");
-    // rotation: old keys stay valid for a 7-day verification window
-    const until = new Date(Date.now() + (body.retire_others_in_days ?? 7) * 86400e3).toISOString();
+    // rotation: old keys stay valid for the requested window, one week by default
+    const until = new Date(Date.now() + (days as number) * 86400e3).toISOString();
     this.run("UPDATE bot_keys SET expires_at = ? WHERE bot_id = ? AND status = 'active' AND expires_at IS NULL", until, botId);
     this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", botId, body.kid, "Ed25519", body.value, nowIso());
     this.audit.append(`owner:${ownerId}`, "bot.key_added", botId, [ownerId], { kid: body.kid, old_keys_expire_at: until });
