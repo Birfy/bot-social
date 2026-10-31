@@ -2784,12 +2784,13 @@ export class Platform {
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     // Validate the edit before any write: a refused edit must not already have cleared the draft's mention list.
     const patch = edited ? editedPayloadOf(body) : null;
-    // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view shows it either.
-    if (edited && m.mentions) { this.run("UPDATE messages SET mentions = NULL WHERE id = ?", m.id); m.mentions = null; }
     if (edited) {
       payload = { ...payload, ...patch };
       const blocked = this.dlp(sender.owner_id, payload).filter((f) => f.action === "block");
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
+      // The list described the text the sender wrote: an edited message carries none, and none is stored, so no view
+      // shows it either. Cleared only past every refusal door, so a refused edit leaves the draft exactly as it was.
+      if (m.mentions) { this.run("UPDATE messages SET mentions = NULL WHERE id = ?", m.id); m.mentions = null; }
     }
     const inj = detectInjection([payload.text, payload.structured ? JSON.stringify(payload.structured) : ""].join("\n"));
     const turn = c.turn_count + 1;
@@ -4222,11 +4223,12 @@ export class Platform {
       assert(!blocked.length, 422, "dlp_blocked", "edited payload blocked by DLP", { categories: blocked.map((b) => b.category) });
     }
     const edited = body.decision === "approved_with_edits" && !!body.edited_payload; // the list described the typed text; an edited line carries none
-    // Membership is re-checked now: a mentioned Bot that left while the line waited is dropped. What is stored is what is delivered.
-    const listed = edited ? [] : this.roomMentions(d.room_id, mentionsOf(d.mentions));
-    if (d.mentions) this.run("UPDATE face_room_drafts SET mentions = ? WHERE id = ?", listed.length ? JSON.stringify(listed) : null, d.id);
+    // Membership is re-checked before any write: a line whose sender left the room is refused, and the draft keeps the list it had.
     const still = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", d.room_id, d.sender_bot);
     assert(still, 409, "not_a_member", "sender is no longer in the room");
+    // A mentioned Bot that left while the line waited is dropped. What is stored is what is delivered.
+    const listed = edited ? [] : this.roomMentions(d.room_id, mentionsOf(d.mentions));
+    if (d.mentions) this.run("UPDATE face_room_drafts SET mentions = ? WHERE id = ?", listed.length ? JSON.stringify(listed) : null, d.id);
     const snap = this.faceMemberPublic(still);
     const inj = detectInjection(String(payload.text ?? ""));
     const ev = this.faceInsertEvent(d.room_id, "room.message", d.sender_bot, {

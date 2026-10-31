@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { expectApiError, friends, startServer } from "./helpers.js";
+import { expectApiError, friends, ownerWithBot, startServer } from "./helpers.js";
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
@@ -150,4 +150,74 @@ test("guard: edited_payload is ignored unless the decision is approved_with_edit
   assert.equal(ev.edited_by_owner, false);
   const decided = (await h.decided())[0];
   assert.equal(decided.delivered_payload.text, "plain line");
+});
+
+test("g: an edit refused by DLP writes nothing, and the unedited approval after it still delivers the mentions", async (t) => {
+  const h = await pair(t);
+  // sendAsMember signs as the Bot, so the platform must hold that Bot's key.
+  h.s.platform.enableCustody({ kind: "owner", ownerId: h.A.owner_id }, h.A.bot.id, { private_key_pem: h.A.kp.privateKeyPem });
+  const sent = await h.s.platform.sendAsMember(
+    { kind: "owner", ownerId: h.A.owner_id } as any,
+    { from_bot_id: h.A.bot.id, to: h.B.bot.id, text: "hello there", mentions: [h.B.handle] },
+  ) as any;
+  const id = sent.message.message_id as string;
+  const apr = sent.message.approval_id as string;
+  const h2 = { ...h, card: async () => (await h.A.owner.req("GET", "/v1/approvals?status=pending") as any).approvals.find((x: any) => x.approval_id === apr) };
+  const before = h2.row("SELECT mentions FROM messages WHERE id = ?", id).mentions;
+  assert.ok(before, "the draft carries the mention list");
+  assert.deepEqual((await h2.card()).message.mentions, [h.B.handle], "the card shows the @ the owner is approving");
+
+  // The DLP door is the one refusal that used to sit after the clear: `password: …` is a secret.password block.
+  const err = await expectApiError(h2.decide(apr, { decision: "approved_with_edits", edited_payload: { text: "password: hunter2" } }), 422, "dlp_blocked");
+  assert.match(err.message, /edited payload blocked by DLP/);
+  assert.equal(h2.row("SELECT mentions FROM messages WHERE id = ?", id).mentions, before, "a DLP refusal leaves the mention list exactly as it was");
+  assert.equal(h2.messageStatus(id), "pending_approval", "the message is still held");
+  assert.equal(h2.approvalStatus(apr), "pending", "the card is still pending");
+  assert.deepEqual((await h2.card()).message.mentions, [h.B.handle], "the card still shows the @");
+  assert.equal((await h2.received()).length, 0, "nothing reached the peer");
+  assert.equal((await h2.decided()).length, 0, "nothing was announced");
+
+  // The same card, approved without an edit, now delivers the list the sender wrote.
+  await h2.decide(apr, { decision: "approved" });
+  assert.equal(h2.messageStatus(id), "delivered");
+  const ev = (await h2.received())[0];
+  assert.deepEqual(ev.mentions, [h.B.handle], "the @ reaches the peer on the line that finally goes out");
+  assert.equal(ev.edited_by_owner, false);
+
+  // A successful edit still clears the old list: today's semantics, unchanged.
+  const sent2 = await h.s.platform.sendAsMember(
+    { kind: "owner", ownerId: h.A.owner_id } as any,
+    { from_bot_id: h.A.bot.id, to: h.B.bot.id, text: "second line", mentions: [h.B.handle] },
+  ) as any;
+  await h2.decide(sent2.message.approval_id, { decision: "approved_with_edits", edited_payload: { text: "rewritten line" } });
+  assert.equal(h2.row("SELECT mentions FROM messages WHERE id = ?", sent2.message.message_id).mentions, null);
+  const editedEv = (await h2.received()).find((e: any) => e.untrusted_content.text === "rewritten line");
+  assert.ok(editedEv, "the edited line was delivered");
+  assert.equal("mentions" in editedEv, false, "an edited line carries no mentions");
+});
+
+test("h: a face-room line refused for a sender who left writes nothing, the mention list included", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "frla");
+  const B = await ownerWithBot(s.base, "frlb");
+  const joined = (await A.owner.req("POST", "/v1/face-rooms/join", { code: "525252", bots: [A.bot.id] })) as any;
+  const roomId = joined.room_id as string;
+  await B.owner.req("POST", "/v1/face-rooms/join", { code: "525252", bots: [B.bot.id] });
+  const d = (await A.owner.req("POST", `/v1/face-rooms/${roomId}/messages`, { text: "Coder, please look", bot_id: A.bot.id, mentions: [B.handle] })) as any;
+  const row = (sql: string, ...args: any[]) => s.platform.db.prepare(sql).get(...args) as any;
+  const before = row("SELECT mentions FROM face_room_drafts WHERE id = ?", d.message_id).mentions;
+  assert.ok(before, "the draft carries the mention list");
+  const cardMentions = async () => ((await A.owner.req("GET", "/v1/approvals?status=pending")) as any).approvals.find((x: any) => x.approval_id === d.approval_id).face_room.mentions;
+  assert.deepEqual(await cardMentions(), [B.handle], "the card shows the @");
+  const events = async () => ((await B.owner.req("GET", `/v1/face-rooms/${roomId}`)) as any).events.filter((e: any) => e.type === "room.message");
+
+  // The sender leaves while its line waits: the delivery door refuses it, and must not have rewritten the draft.
+  await A.owner.req("POST", `/v1/face-rooms/${roomId}/leave`, { bots: [A.bot.id] });
+  await expectApiError(A.owner.req("POST", `/v1/approvals/${d.approval_id}/decision`, { decision: "approved_with_edits", edited_payload: { text: "rewritten line" } }), 409, "not_a_member");
+  assert.equal(row("SELECT mentions FROM face_room_drafts WHERE id = ?", d.message_id).mentions, before, "a not_a_member refusal leaves the mention list exactly as it was");
+  assert.equal(row("SELECT status FROM face_room_drafts WHERE id = ?", d.message_id).status, "pending_approval", "the line is still held");
+  assert.equal(row("SELECT status FROM approvals WHERE id = ?", d.approval_id).status, "pending", "the card is still pending");
+  assert.deepEqual(await cardMentions(), [B.handle], "the card still shows the @");
+  assert.equal((await events()).length, 0, "no member was told of a line");
 });
