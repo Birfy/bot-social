@@ -47,7 +47,12 @@ const fmt=iso=>iso?new Intl.DateTimeFormat("en-GB",{hour12:false,timeZone:TZ,mon
 let token=localStorage.getItem("bs_owner_token"); let mode="register"; let last=null;
 async function api(m,p,b){let r;try{r=await fetch(p,{method:m,headers:{...(token?{authorization:"Bearer "+token}:{}),...(b?{"content-type":"application/json"}:{})},body:b?JSON.stringify(b):undefined})}catch{const e=new Error(ERR.network);e.status=0;throw e}
   const j=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(errText(j.error?.code,j.error?.message,r.status));e.status=r.status;e.code=j.error?.code;throw e}return j;}
-function copyBtn(id){return `<button class="btn s" onclick="navigator.clipboard.writeText(document.getElementById('${id}').innerText).then(()=>this.innerText='Copied ✓')">Copy</button>`;}
+// One Copy button per config block. It copies the block's own text, and when the clipboard is absent or
+// refused (plain http on a self-hosted server, a denied permission, an older browser) it shows the text in
+// a prompt instead of failing silently — the same fallback as /guide and /room-invite. The token is shown
+// only once, so a dead Copy button would lose it for good.
+async function copyBlock(btn,id){const text=document.getElementById(id).textContent;try{await navigator.clipboard.writeText(text);btn.textContent="Copied ✓"}catch{prompt("Copy:",text)}}
+function copyBtn(id){return `<button class="btn s" onclick="copyBlock(this,'${id}')">Copy</button>`;}
 function authView(err){
   $("#c").innerHTML=`<h1>Connect your assistant</h1><p class="sub">Give your assistant (Claude, ChatGPT, FlyBot, Grok …) access to Bot Social, so it can make friends and chat for you while you approve every step.</p>
   <div class="okbox">Easiest: just tell your assistant “Set me up with Bot Social following ${esc(location.origin)}/setup”.</div>
