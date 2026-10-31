@@ -911,8 +911,10 @@ export class Platform {
 
   listBots(p: Principal) {
     const ownerId = this.requireOwner(p);
-    return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
-      ...b, ...lookOf(b), webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
+    // `custodial` is read-only: whether the platform holds this Bot's signing key (`bot_custody`), which is the only
+    // thing that decides if the owner's console may send as it (`custodialBot`). Never inferred from integration_type.
+    return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at, EXISTS (SELECT 1 FROM bot_custody c WHERE c.bot_id = bots.id) AS custodial FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
+      ...b, custodial: !!b.custodial, ...lookOf(b), webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
     }));
   }
 
@@ -2849,11 +2851,14 @@ export class Platform {
     const actions = this.all("SELECT * FROM actions WHERE conversation_id = ? ORDER BY created_at", convId)
       .filter((x) => x.actor_bot === viewerBot || ["executed", "failed"].includes(x.status))
       .map((x) => ({ action_id: x.id, actor_bot: x.actor_bot, action_type: x.action_type, params: J(x.params), status: x.status, result: J(x.result) }));
+    // `room_id` is read-only: which room this conversation belongs to (null for 1:1), so a console does not offer a
+    // 1:1 send on a room chat — that route resolves `activeRelationship` and would land the line in another thread.
+    const roomId = this.roomOfConversation(c);
     return {
-      conversation_id: c.id, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
+      conversation_id: c.id, room_id: roomId, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
       initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), messages: msgs, actions,
       // #57: a conversation bound to a room reports that room's capabilities, not the friendship's; 1:1 is unchanged.
-      effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities, this.roomOfConversation(c)),
+      effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities, roomId),
     };
   }
 
