@@ -88,3 +88,34 @@ test("calendar input is read in the owner's time zone", () => {
   assert.equal(zonedToIso("2026-10-21T10:00"), "2026-10-21T10:00:00.000Z");
   assert.equal(zonedToIso(""), null);
 });
+
+// #237: the console booked a wall time the zone skips at a different hour, under a success toast.
+test("a calendar time inside the daylight-saving gap is refused, not booked at another hour", () => {
+  const { setTZ, zonedToIso, calGapError } = loadConsole(["setTZ", "zonedToIso", "calGapError"]);
+  setTZ("Europe/Berlin");
+  // The hour Berlin skips has no instant of its own, so nothing is sent for it.
+  assert.equal(zonedToIso("2026-03-29T02:00"), null);
+  assert.equal(zonedToIso("2026-03-29T02:30"), null);
+  assert.equal(calGapError("2026-03-29T02:00"), "That time does not exist in Europe/Berlin (the clocks skip it). Pick another time.");
+  // Both sides of the gap keep their meaning, so 03:00 no longer collides with 02:00.
+  assert.equal(zonedToIso("2026-03-29T01:30"), "2026-03-29T00:30:00.000Z");
+  assert.equal(zonedToIso("2026-03-29T03:00"), "2026-03-29T01:00:00.000Z");
+  assert.equal(zonedToIso("2026-03-29T03:30"), "2026-03-29T01:30:00.000Z");
+  assert.equal(calGapError("2026-03-29T01:30"), "");
+  assert.equal(calGapError("2026-03-29T03:00"), "");
+  // The gap is the zone's, not one zone's: New York skips its hour too.
+  setTZ("America/New_York");
+  assert.equal(zonedToIso("2026-03-08T02:30"), null);
+  assert.equal(calGapError("2026-03-08T02:30"), "That time does not exist in America/New_York (the clocks skip it). Pick another time.");
+  assert.equal(zonedToIso("2026-03-08T01:30"), "2026-03-08T06:30:00.000Z");
+  assert.equal(zonedToIso("2026-03-08T03:30"), "2026-03-08T07:30:00.000Z");
+  // The hour autumn repeats still resolves as it did before (unchanged behaviour).
+  setTZ("Europe/Berlin");
+  assert.equal(zonedToIso("2026-10-25T02:30"), "2026-10-25T01:30:00.000Z");
+  assert.equal(calGapError("2026-10-25T02:30"), "");
+  // Empty and unparseable input keep the range check's existing answer.
+  assert.equal(calGapError(""), "");
+  assert.equal(calGapError("not a time"), "");
+  // The submit handler asks before it posts, so a gap time never reaches the server.
+  assert.match(pub("ui.js"), /calRangeError\(\$\("#cs"\)\.value, \$\("#ce"\)\.value\) \|\| gap\.find\(Boolean\)/);
+});

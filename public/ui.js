@@ -11,14 +11,20 @@ let TZ = browserTZ();
 function setTZ(zone) { try { new Intl.DateTimeFormat("en-GB", { timeZone: zone }); TZ = zone || browserTZ(); } catch { TZ = browserTZ(); } }
 /** fmt(iso) → "19/10, 08:21 GMT+8"; { time: true } drops the date; { zone: false } drops the label. */
 const zoneName = () => { try { return new Intl.DateTimeFormat("en-GB", { timeZone: TZ, timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value || TZ; } catch { return TZ; } };
-/** Read a datetime-local value ("2026-10-21T10:00") as wall-clock time in TZ and return the ISO instant. */
+/** Read a datetime-local value ("2026-10-21T10:00") as wall-clock time in TZ and return the ISO instant; null when TZ has no such wall time (a spring-forward gap, #237). */
 function zonedToIso(local) {
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(local || ""); if (!m) return null;
   const wall = Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]);
-  const offset = (t) => { const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: TZ, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" }).formatToParts(new Date(t)).map((x) => [x.type, x.value])); return Date.UTC(+p.year, p.month - 1, +p.day, +p.hour, +p.minute) - t; };
+  const parts = (t) => Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: TZ, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" }).formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+  const offset = (t) => { const p = parts(t); return Date.UTC(+p.year, p.month - 1, +p.day, +p.hour, +p.minute) - t; };
   const first = wall - offset(wall);
-  return new Date(wall - offset(first)).toISOString();
+  const iso = new Date(wall - offset(first)).toISOString();
+  const back = parts(Date.parse(iso));
+  // Deriving the offset once can land on another hour; only accept an instant that reads back as the time typed.
+  return Date.UTC(+back.year, back.month - 1, +back.day, +back.hour, +back.minute) === wall ? iso : null;
 }
+/** The sentence for a calendar time TZ does not have — the zone is named so the owner knows what to change — else "". */
+const calGapError = (local) => (local && !zonedToIso(local) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(local) ? `That time does not exist in ${TZ} (the clocks skip it). Pick another time.` : "");
 const fmt = (iso, o = {}) => iso ? new Intl.DateTimeFormat("en-GB", { hour12: false, timeZone: TZ, ...(o.time ? {} : { month: "numeric", day: "numeric" }), hour: "2-digit", minute: "2-digit", ...(o.zone === false ? {} : { timeZoneName: "short" }) }).format(new Date(iso)) : "—";
 /** The date an instant falls on in the owner's zone; two times are compared where they are displayed, never in UTC. */
 const localDate = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
@@ -749,8 +755,9 @@ PAGES.bots = async (v) => {
   }));
   $$("[data-rk]", v).forEach((b) => (b.onclick = async () => { const [bid, k] = b.dataset.rk.split("|"); if (confirm("Revoke this key? Requests signed with it will be rejected.")) { await api("DELETE", `/v1/bots/${bid}/keys/${encodeURIComponent(k)}`); render(); } }));
   const addcal = $("#addcal"); if (addcal) addcal.onclick = async () => {
-    const err = calRangeError($("#cs").value, $("#ce").value); formErr($("#calerr"), err);
-    ["#cs", "#ce"].forEach((s) => (err ? $(s).setAttribute("aria-invalid", "true") : $(s).removeAttribute("aria-invalid")));
+    const gap = [calGapError($("#cs").value), calGapError($("#ce").value)];
+    const err = calRangeError($("#cs").value, $("#ce").value) || gap.find(Boolean); formErr($("#calerr"), err);
+    ["#cs", "#ce"].forEach((s, i) => (err && (gap[i] || !gap.some(Boolean)) ? $(s).setAttribute("aria-invalid", "true") : $(s).removeAttribute("aria-invalid")));
     if (err) return;
     try { await api("POST", "/v1/calendar/entries", { start: zonedToIso($("#cs").value), end: zonedToIso($("#ce").value), title: $("#ct").value.trim() || undefined }, true); toast("Added to calendar"); render(); }
     catch (e) { if (e.message !== "unauthorized") formErr($("#calerr"), e.human || ERR.network); }
