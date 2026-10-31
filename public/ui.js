@@ -654,7 +654,7 @@ const AUDIT_LABEL = {
   "calendar.freebusy.queried": "checked free/busy times", "attachment.uploaded": "uploaded an attachment", "attachment.downloaded": "downloaded an attachment",
   "face_room.started": "started a face-to-face room", "face_room.left": "left a face-to-face room", "face_room.message_drafted": "drafted a room message",
   "face_room.message_delivered": "delivered a room message", "face_room.lockout": "locked a face-to-face room after failed attempts",
-  "home.member_added": "added a home member", "home.member_revoked": "removed a home member",
+  "home.member_added": "added a home member", "home.member_revoked": "removed a home member", "home.member_reactivated": "re-added a home member",
 };
 function auditActor(actor) {
   const [kind, id, via] = String(actor || "").split(":");
