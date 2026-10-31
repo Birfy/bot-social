@@ -161,3 +161,37 @@ test("the console renders a cancelled card read-only: draft text, destination an
   assert.doesNotMatch(html, /Awaiting your approval/, "a cancelled card is not presented as pending");
   assert.doesNotMatch(html, /data-dec|Approve<\/button>|Reject<\/button>/, "no decision buttons on a cancelled card");
 });
+
+// A cancelled card is read-only, so its sentence is the only thing telling the owner what happened: without it a
+// draft that can no longer be approved looks like one that may still go out. `decision` is already on every card
+// (`src/platform.ts` approvalCard -> `decision`), and every way the platform cancels a draft needs its own sentence;
+// a reason this build does not know, or a card with none at all, still gets a safe one instead of a blank line.
+test("every way a draft can be cancelled says why on the card, and an unknown reason still says something safe", () => {
+  const { cancelledCard } = loadConsole(["cancelledCard"]);
+  const card = (decision?: string) => cancelledCard({
+    approval_id: "apr_1", kind: "outbound_message", status: "cancelled", ...(decision === undefined ? {} : { decision }),
+    summary: "Writer wants to message Coder", created_at: new Date(Date.now() - 3600e3).toISOString(), decided_at: new Date().toISOString(),
+    sender: { handle: "@writer.alice", display_name: "Writer" },
+    message: { message_id: "msg_1", to: { handle: "@coder.bob", display_name: "Coder" }, payload: { text: "hello there" }, status: "cancelled" },
+  });
+
+  const reasons: [string, RegExp][] = [
+    ["conversation_closed", /the chat was closed before anyone decided, so the draft was not sent/],
+    ["emergency_stop", /the Bot was emergency-stopped, so this draft was cancelled and not sent/],
+    ["blocked", /the friendship was blocked, so this draft was cancelled and not sent/],
+    ["revoked", /the friendship was removed, so this draft was cancelled and not sent/],
+    ["room_closed", /the room closed before anyone decided, so the draft was not sent/],
+  ];
+  for (const [decision, sentence] of reasons) {
+    const html = card(decision);
+    assert.match(html, sentence, `${decision} says why the draft can no longer be approved`);
+    assert.doesNotMatch(html, /undefined|\[object Object\]/, `${decision} never leaks a raw value into the card`);
+  }
+
+  for (const decision of ["a_reason_from_a_newer_server", undefined]) {
+    const html = card(decision);
+    assert.match(html, /it was cancelled before it was sent, so nothing was delivered/,
+      "an unknown or missing reason still says the draft was not sent, instead of leaving the card blank");
+    assert.doesNotMatch(html, /undefined|\[object Object\]/, "the fallback never prints the raw decision");
+  }
+});
