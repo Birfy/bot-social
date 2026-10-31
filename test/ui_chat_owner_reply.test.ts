@@ -154,7 +154,7 @@ test("a non-custodial Bot gets no composer, one sentence saying why, and no writ
   assert.equal(me.bots.find((b: any) => b.id === A.bot.id)?.custodial, false, "the API must say this Bot's key is not held by the platform");
 });
 
-test("a custodial Bot: the owner types a line, it is one POST with four fields, then the bubble comes from the re-read", async (t) => {
+test("a custodial Bot: the owner types a line, it is one POST with five fields, then the bubble comes from the re-read", async (t) => {
   const s = await startServer(); t.after(s.stop);
   const { A, B, convId } = await pairWithChat(s, { custody: true });
   const me = await A.owner.req("GET", "/v1/me");
@@ -175,8 +175,9 @@ test("a custodial Bot: the owner types a line, it is one POST with four fields, 
   const posts = r.calls.filter((c) => c.method === "POST");
   assert.deepEqual(posts.map((c) => c.path), [`/v1/homes/${encodeURIComponent(me.home || A.bot.id)}/send`],
     "pressing Send writes exactly once, through the owner home route");
-  assert.deepEqual(Object.keys(posts[0].body).sort(), ["from_bot_id", "text", "to", "typed_by_owner"],
-    "the body carries only the four fields the route reads");
+  assert.deepEqual(Object.keys(posts[0].body).sort(), ["conversation_id", "from_bot_id", "text", "to", "typed_by_owner"],
+    "the body carries the five fields the route reads");
+  assert.equal(posts[0].body.conversation_id, convId, "and names the conversation the owner is reading");
   assert.equal(posts[0].body.from_bot_id, A.bot.id, "from the Bot this chat belongs to");
   assert.equal(posts[0].body.to, B.bot.id, "to the Bot on the other side of this chat");
   assert.equal(posts[0].body.typed_by_owner, true, "attested as typed by the owner");
@@ -188,6 +189,41 @@ test("a custodial Bot: the owner types a line, it is one POST with four fields, 
   assert.match(r.html, /✍ typed by owner/, "and marked as the owner's own words, not the Bot's");
   assert.match(r.html, /Delivered/, "with the status the re-read reported");
   assert.equal(me.bots.find((b: any) => b.id === A.bot.id)?.custodial, true, "the API must say the platform holds this Bot's key");
+});
+
+test("the owner's line goes into the conversation on screen, not the pair's newest one", async (t) => {
+  const s = await startServer(); t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  custody(s, A);
+  // B's Bot opens two open 1:1 conversations. The console is reading the first one while the second is newer,
+  // which is exactly the shape in which the old route wrote into the wrong thread and the page read back empty.
+  const first = await B.bot.startConversation(A.bot.id, { type: "general_chat", summary: "First thread" });
+  const firstDraft = await B.bot.draftMessage(first.conversation_id, { text: "the first thread has a message" });
+  await B.owner.req("POST", `/v1/approvals/${firstDraft.approval_id}/decision`, { decision: "approved" });
+  const second = await B.bot.startConversation(A.bot.id, { type: "general_chat", summary: "Second thread" });
+  const secondDraft = await B.bot.draftMessage(second.conversation_id, { text: "the second thread is newer" });
+  await B.owner.req("POST", `/v1/approvals/${secondDraft.approval_id}/decision`, { decision: "approved" });
+  const onScreenId = first.conversation_id as string, newerId = second.conversation_id as string;
+
+  const me = await A.owner.req("GET", "/v1/me");
+  const page = openConsole(s.base, ownerToken(A), me, onScreenId);
+  await page.render();
+  assert.ok(page.hasComposer(), "a custodial Bot in an open 1:1 chat gets a composer");
+
+  const r = await page.send("this belongs to the thread on screen");
+  const post = r.calls.find((c) => c.method === "POST" && c.path.endsWith("/send"));
+  assert.ok(post, "pressing Send writes once");
+  assert.equal(post!.body.conversation_id, onScreenId, "the body names the conversation the owner is reading");
+
+  const read = async (id: string) => (await A.owner.req("GET", `/v1/conversations/${id}`)).messages as any[];
+  const onScreen = await read(onScreenId), newer = await read(newerId);
+  const line = onScreen.find((m: any) => m.direction === "outbound" && m.content?.text === "this belongs to the thread on screen");
+  assert.ok(line !== undefined, "the line is in the conversation the owner was reading");
+  assert.equal(line.status, "delivered", "and it was delivered, not merely accepted");
+  assert.equal(newer.some((m: any) => m.direction === "outbound" && m.content?.text === "this belongs to the thread on screen"), false,
+    "the newer conversation received nothing");
+  assert.match(r.html, /this belongs to the thread on screen/, "the re-read of the page shows the bubble the owner just wrote");
+  assert.match(r.html, /Delivered/, "with the status the re-read reported");
 });
 
 test("a line that comes back awaiting approval is shown as awaiting, never as delivered", async (t) => {
