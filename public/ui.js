@@ -458,8 +458,21 @@ const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress",
 const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
 /** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged. */
 const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
-/** The detail shows who is in the room; members keep the server's labels and handles verbatim. */
-const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })) });
+/**
+ * The detail shows who is in the room and, in the room's own order, what was said there. Members keep the
+ * server's labels and handles verbatim; events keep the order the API returned and only the text each type
+ * stores — a room message keeps the speaker's words in `untrusted_content.text`, a lifecycle event the
+ * server's own sentence in `text`. Nothing is invented: events the API truncated at the viewer's join stay out.
+ */
+const roomDetailModel = (room) => ({
+  room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me,
+  members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })),
+  events: (room.events || []).map((e) => ({ seq: e.event_cursor, type: e.type, created_at: e.created_at, actor_bot: e.actor_bot ?? null, actor_handle: e.from?.handle ?? null, text: e.type === "room.message" ? (e.untrusted_content?.text ?? "") : (e.text ?? "") })),
+});
+/** One line per event: a message is a bubble named by its sender, anything else the server's own sentence. */
+const roomEventLine = (e, handles, mine) => e.type === "room.message"
+  ? `<div class="b ${mine ? "me" : "peer"}"><div class="bub">${esc(e.text)}</div><div class="meta">${esc(handles.get(e.actor_bot) || e.actor_handle || e.actor_bot)} · ${fmt(e.created_at)}</div></div>`
+  : `<div class="sys">${esc(e.text || e.type)}</div>`;
 
 PAGES.rooms = async (v) => {
   const id = route().id && decodeURIComponent(route().id);
@@ -476,12 +489,19 @@ PAGES.rooms = async (v) => {
   const d = roomDetailModel(room);
   const row = rooms.find((r) => r.room_id === d.room_id);
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
+  // `my_bots` on the rooms list carries only handle/display_name/look — never a bot_id — so ownership comes from
+  // the console's own Bot list, the same way `PAGES.chat` decides which side a conversation belongs to.
+  const myIds = new Set((me?.bots || []).map((b) => String(b.id)));
+  const handles = new Map(d.members.map((m) => [m.bot_id, m.handle]));
+  const said = d.events.length ? `<div class="msgs">${d.events.map((e) => roomEventLine(e, handles, myIds.has(String(e.actor_bot)))).join("")}</div>` : `<div class="empty">Nothing said yet.</div>`;
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)} · until ${fmt(d.expires_at)}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
     <h2>In the room <span class="n">${d.members.length}</span></h2>
     ${d.members.length ? `<div class="list">${d.members.map((m) => `<div class="it">${avatar(m.display_name)}<div class="grow"><div><b>${esc(m.display_name)}</b> ${mine.has(String(m.handle).replace(/^@/, "")) ? '<span class="pill ok">Yours</span>' : ""}</div>
-      <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
+      <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}
+    <h2>Conversation <span class="n">${d.events.length}</span></h2>
+    <div id="room-transcript">${said}</div>`;
   const leave = $("#room-leave");
   if (leave) leave.onclick = async () => {
     if (!confirm("Leave this room? Your Bots leave it; the other side keeps theirs.")) return;
