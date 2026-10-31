@@ -3116,7 +3116,7 @@ export class Platform {
       const extra = this.normalizeBotRefs(body);
       if (extra.some((r) => r !== p.botId && handleKey(r) !== handleKey(this.bot(p.botId).handle))) throw new ApiError(403, "forbidden", "a bot token may only bring itself");
       const b = this.bot(p.botId);
-      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+      this.assertInvitable(b);
       return [wrap(b)];
     }
     const refs = this.normalizeBotRefs(body);
@@ -3134,7 +3134,7 @@ export class Platform {
     for (const ref of refs) {
       const own = this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, p.ownerId) ?? this.botByRef(ref, "owner_id = ?", [p.ownerId]);
       if (own) {
-        assert(own.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+        this.assertInvitable(own);
         if (!out.some((x) => x.bot.id === own.id)) out.push(wrap(own));
         continue;
       }
