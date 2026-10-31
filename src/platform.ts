@@ -1189,6 +1189,13 @@ export class Platform {
       this.emit(r.requester_bot, "relationship.changed", { relationship_id: relId, status: "declined" });
       return { relationship_id: relId, status: "declined" };
     }
+    // A pending row names two Bots and can wait for days; either side may be removed from its home while it waits,
+    // and a removed member is `revoked` (#173). Every later reach is refused by activeRelationship, so activating
+    // here would write an `active` friendship with a full grant set for an identity that cannot answer - and tell
+    // both owners it is live. The row stays pending: this is a refusal, not a cancellation.
+    for (const id of [r.requester_bot, r.target_bot]) {
+      assert(this.bot(id).status !== "revoked", 403, "bot_revoked", "a Bot in this relationship was revoked");
+    }
     const specs = (body.grant_capabilities ?? []).map((g) => (typeof g === "string" ? { capability: g } : g));
     this.validCaps(specs.map((s) => s.capability));
     this.activateRelationship(r, specs, `owner:${ownerId}`);
