@@ -3709,7 +3709,7 @@ export class Platform {
           ?? this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
     }
     assert(inviter && inviter.owner_id === ownerId, 404, "bot_not_found", "no such bot on this account");
-    assert(inviter.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+    this.assertInvitable(inviter);
     const block = this.inviteMintRateLimit(ownerId, ip);
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(ownerId, ip, "local", "minted");
@@ -3758,7 +3758,7 @@ export class Platform {
       const b = this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, ownerId) ?? this.botByRef(ref, "owner_id = ?", [ownerId]);
       // A home can only bring Bots it owns: a ticket is not authority over anyone else's identity.
       assert(b, 404, "bot_not_found", `no bot matching ${ref} on this account`);
-      assert(b.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+      this.assertInvitable(b);
       if (!bots.some((x) => x.id === b.id)) bots.push(b);
     }
     const wanted = bots.map((b) => b.id).sort();
