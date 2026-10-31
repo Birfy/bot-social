@@ -746,7 +746,9 @@ export class Platform {
       ? this.get("SELECT c.* FROM bot_custody c JOIN bots b ON b.id = c.bot_id WHERE b.id = ? AND b.owner_id = ?", botId, ownerId)
       : this.get("SELECT c.* FROM bot_custody c JOIN bots b ON b.id = c.bot_id WHERE b.owner_id = ? ORDER BY b.created_at LIMIT 1", ownerId);
     assert(c, 409, "not_custodial", "this bot's signing key is not held by the platform; enable custody first (enable_custody)");
-    assert(this.bot(c.bot_id).status === "active", 403, "bot_revoked", "this bot identity was revoked");
+    // A stopped Bot and a removed one are different answers on every owner-side door (`assertInvitable`): the
+    // home page's "send as member" must say the Bot can be resumed, not that its identity is gone.
+    this.assertInvitable(this.bot(c.bot_id));
     const bp: Principal = { kind: "bot", botId: c.bot_id, ownerId };
     const pem = unseal(this.kmsKey, c.sealed_key, `${c.bot_id}:${c.kid}`);
     const sign = (type: string, payload: unknown, extra: { to?: string; conversation_id?: string } = {}) => signEnvelope({ type, from: c.bot_id, payload, kid: c.kid, privateKeyPem: pem, ...extra });
