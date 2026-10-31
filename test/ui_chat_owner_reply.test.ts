@@ -148,7 +148,7 @@ test("a non-custodial Bot gets no composer, one sentence saying why, and no writ
   const note = page.note();
   assert.ok(!page.hasComposer() && note !== null,
     `a chat with a non-custodial Bot renders no composer (${page.hasComposer()}) and must say why the console cannot send as it (note: ${note === null ? "none" : `"${note}"`})`);
-  assert.match(note!, matcher(B.handle), "the sentence names the Bot whose key the owner holds");
+  assert.match(note!, matcher(A.handle), "the sentence names the Bot whose key the owner holds — their own");
   assert.match(note!, /signing key is in your hands/, "and says the signing key is the owner's, not the platform's");
   assert.deepEqual(page.calls().filter((c) => c.method !== "GET"), [], "opening the page writes nothing");
   assert.equal(me.bots.find((b: any) => b.id === A.bot.id)?.custodial, false, "the API must say this Bot's key is not held by the platform");
