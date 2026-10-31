@@ -342,12 +342,24 @@ const recentCancelled = (list) => (list || []).slice()
   .slice(0, 20);
 // A revoked member's draft stays as a record: read-only, with the destination and why it cannot be approved.
 // No buttons here on purpose: the pending list is the only place a decision can be made.
+// The card is read-only, so this sentence is the only thing telling the owner the draft cannot go out: every way the
+// platform cancels one says so, and a reason this build does not know (or none at all) still gets a safe sentence
+// rather than a blank line. `decision` is already on the card; nothing here changes an approval or its state.
+const CANCEL_REASON = {
+  member_revoked: (a) => `sending Bot ${esc(a.sender ? a.sender.handle : "?")} was revoked — this draft can no longer be approved`,
+  conversation_closed: () => "the chat was closed before anyone decided, so the draft was not sent",
+  emergency_stop: () => "the Bot was emergency-stopped, so this draft was cancelled and not sent",
+  blocked: () => "the friendship was blocked, so this draft was cancelled and not sent",
+  revoked: () => "the friendship was removed, so this draft was cancelled and not sent",
+  room_closed: () => "the room closed before anyone decided, so the draft was not sent",
+};
+const cancelReason = (a) => (CANCEL_REASON[a.decision] || (() => "it was cancelled before it was sent, so nothing was delivered"))(a);
 function cancelledCard(a) {
   let dest = "";
   if (a.message) dest = `<div class="mut small" style="margin-top:6px">To ${esc(a.message.to.display_name)} ${esc(a.message.to.handle)}</div><div class="small" style="margin-top:4px">${esc(a.message.payload.text)}</div>`;
   else if (a.face_room) dest = `<div class="mut small" style="margin-top:6px">In room ${esc(a.face_room.room_id)}</div><div class="small" style="margin-top:4px">${esc(a.face_room.payload.text)}</div>`;
   else if (a.action) dest = `<div class="mut small" style="margin-top:6px">${esc(a.action.action_type)}</div><div class="struct">${esc(JSON.stringify(a.action.params, null, 1))}</div>`;
-  const why = a.decision === "member_revoked" ? `<div class="small" style="margin-top:6px;color:var(--mut)">sending Bot ${esc(a.sender ? a.sender.handle : "?")} was revoked — this draft can no longer be approved</div>` : "";
+  const why = `<div class="small" style="margin-top:6px;color:var(--mut)">${cancelReason(a)}</div>`;
   return `<div class="card" data-cancelled="${a.approval_id}"><div class="row"><span class="pill gray">${esc(KIND[a.kind] || a.kind)}</span><span class="grow"></span><span class="mut">${ago(a.decided_at ?? a.created_at)}</span></div>
     <div style="font-weight:600;margin-top:8px">${esc(a.summary)}</div>${dest}${why}</div>`;
 }
