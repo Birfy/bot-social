@@ -228,12 +228,18 @@ export class Platform {
 
   /** Append an event to a bot's queue (pull via /v1/events or MCP) and push to its webhook if configured. */
   emit(botId: string, type: string, data: Record<string, unknown>) {
+    const ev = this.appendEvent(botId, type, data);
+    this.webhooks.enqueue(botId, ev);
+    return ev.event_id;
+  }
+
+  /** Write one event row and hand it back in the shape the webhook queue pushes, so a caller can write the row with
+   *  the change it describes, inside that change's transaction, and queue the push only once it has committed. */
+  private appendEvent(botId: string, type: string, data: Record<string, unknown>) {
     const id = newId("evt");
     const created_at = nowIso();
-    const info = this.run("INSERT INTO events (id, bot_id, type, data, created_at) VALUES (?,?,?,?,?)", id, botId, type, JSON.stringify(data), created_at);
-    this.webhooks.enqueue(botId, { event_id: id, type, created_at, data });
-    void info;
-    return id;
+    this.run("INSERT INTO events (id, bot_id, type, data, created_at) VALUES (?,?,?,?,?)", id, botId, type, JSON.stringify(data), created_at);
+    return { event_id: id, type, created_at, data };
   }
 
   private countersign(obj: Record<string, unknown>): string {
@@ -652,13 +658,21 @@ export class Platform {
       } else {
         // This line opens the thread, so the row and its first draft are one decision: a draft the policy layer
         // refuses must leave no empty conversation for either side to read, no `conversation.started` event for the
-        // peer, and no new conversation counted against the relationship's daily quota. The row and the draft commit
-        // together; the trail and the event are written only once that commit is durable.
-        const opened = this.db.transaction(() => {
-          const made = this.openConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId);
-          const drafted = this.draftMessage(cb.bp, made.conversation.conversation_id, draftEnv(made.conversation.conversation_id), typed, mentions, roomId);
-          return { made, drafted };
-        }).immediate();
+        // peer, and no new conversation counted against the relationship's daily quota. The row, its event and the
+        // draft commit together; the trail and the peer's push wait until that commit is durable.
+        let opened: any;
+        try {
+          opened = this.db.transaction(() => {
+            const made = this.openConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId);
+            const drafted = this.draftMessage(cb.bp, made.conversation.conversation_id, draftEnv(made.conversation.conversation_id), typed, mentions, roomId);
+            return { made, drafted };
+          }).immediate();
+        } catch (error) {
+          // A reply-only Bot is refused inside this transaction, and the one thing that refusal leaves behind is the
+          // target owner's notice, which the rollback took with it. It is written here, in the refusal's own words.
+          if ((error as ApiError)?.code === "bot_not_shared") this.noticeUnshared(cb.botId, to, rel.id, "conversation.create");
+          throw error;
+        }
         conversationId = opened.made.conversation.conversation_id;
         message = opened.drafted;
         opened.made.announce();
@@ -1791,17 +1805,21 @@ export class Platform {
   private refuseUnshared(senderBot: string, target: any, relId: string, attempted: "conversation.create" | "message.draft" | "face_room.join", convId: string | null = null): never {
     const sender = this.bot(senderBot);
     this.policyDecision(senderBot, convId, [sender.owner_id, target.owner_id], attempted, "deny", ["grant.reply_only:chat.public"]);
-    const since = new Date(Date.now() - 86400e3).toISOString();
-    const recent = this.get("SELECT 1 FROM events WHERE bot_id = ? AND type = 'share.requested' AND created_at > ? AND json_extract(data, '$.from.bot_id') = ?", target.id, since, senderBot);
-    if (!recent) {
-      this.emit(target.id, "share.requested", {
-        relationship_id: relId, bot_id: target.id, from: this.publicBot(sender), attempted, trust: "platform",
-        note: "This Bot is not shared with the sender, so their attempt to start a conversation was refused and nothing was delivered. Only your owner can share this Bot (for example with an invite link for this Bot); nothing is shared automatically.",
-      });
-    }
+    // This refusal always throws, so a caller holding a transaction rolls it back and would take the notice with it;
+    // that caller writes the notice itself once the rollback is done (`noticeUnshared`), never from inside.
+    if (!this.db.inTransaction) this.noticeUnshared(senderBot, target, relId, attempted);
     throw new ApiError(403, "bot_not_shared",
       `@${target.handle} is not shared with your Bot: its owner allows replies only in conversations their Bot starts. Nothing was delivered. Their owner has been told and can choose to share it.`,
       { suggestion: "ask_owner_to_share", bot_id: target.id, relationship_id: relId, owner_notified: true });
+  }
+
+  /** The one thing a reply-only refusal leaves behind: the target owner's notice, at most once a day per sender. */
+  private noticeUnshared(senderBot: string, target: any, relId: string, attempted: "conversation.create" | "message.draft" | "face_room.join") {
+    if (this.get("SELECT 1 FROM events WHERE bot_id = ? AND type = 'share.requested' AND created_at > ? AND json_extract(data, '$.from.bot_id') = ?", target.id, new Date(Date.now() - 86400e3).toISOString(), senderBot)) return;
+    this.emit(target.id, "share.requested", {
+      relationship_id: relId, bot_id: target.id, from: this.publicBot(this.bot(senderBot)), attempted, trust: "platform",
+      note: "This Bot is not shared with the sender, so their attempt to start a conversation was refused and nothing was delivered. Only your owner can share this Bot (for example with an invite link for this Bot); nothing is shared automatically.",
+    });
   }
 
   private resolveOwnBot(ownerId: string, ref: string) {
@@ -2544,9 +2562,10 @@ export class Platform {
     return opened.conversation;
   }
 
-  /** The write half of `createConversation`: the conversation row plus the one way to announce it. The trail and the
-   *  peer's event are not written here, because a caller may hold the row in a transaction and roll it back: they go
-   *  to `announce`, which that caller runs only once the conversation is really stored. */
+  /** The write half of `createConversation`: the conversation row, its event row and the one way to announce it. The
+   *  allow decision, the audit entry and the peer's webhook push are left to `announce`, which a caller holding the row
+   *  in a transaction runs only once that transaction has committed; the event row stays here, so a rollback takes it
+   *  with the conversation and neither side reads an event about a conversation that never happened. */
   private openConversation(p: Principal, env: Envelope, roomId: string | null = null) {
     this.verifyEnvelope(p, env, "conversation.create");
     const { botId, ownerId } = this.requireBot(p);
@@ -2588,11 +2607,14 @@ export class Platform {
       limits: { max_turns: null, rate_per_min: LIMITS.ratePerConversationPerMin, expires_at: expires },
       effective_capabilities: this.effectiveCaps(botId, peer.id, allowed, roomId),
     };
-    /** The allow decision, the audit entry and the peer's event, written once the conversation is really stored. */
+    // The conversation row and the event that announces it are one write: a first line the policy layer refuses
+    // rolls both back, so the peer is never told about a conversation that does not exist.
+    const started = this.appendEvent(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
+    /** The allow decision, the audit entry and the peer's push, written once the conversation is really stored. */
     const announce = () => {
       this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", [roomRel ? "room.context" : "relationship.active", "intent.allowed"]);
       this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
-      this.emit(peer.id, "conversation.started", { conversation_id: id, from: this.publicBot(this.bot(botId)), trust: "peer_untrusted", untrusted_content: { intent } });
+      this.webhooks.enqueue(peer.id, started);
     };
     return { conversation, announce };
   }
