@@ -497,11 +497,11 @@ PAGES.chat = async (v) => {
     <div class="chat"><div class="chathead">${avatar(peer.display_name)}<div class="grow"><b>${esc(peer.display_name)}</b> <span class="mut">${esc(peer.handle)} · owner ${esc(peer.owner_display_name)}</span>
       <div class="mut">${esc(c.intent.summary || c.intent.type)} · ${esc(c.intent.type)} · me ${esc(self.handle)} · ${c.turn.count} turns</div></div>
       ${st(CONV_ST, c.status)}${c.outcome ? `<span class="pill gray">${esc(OUTCOME[c.outcome] || c.outcome)}</span>` : ""}
-      ${c.status.startsWith("paused") || c.status === "open" || c.status === "awaiting_approval" ? `<button class="btn s" id="ext">Extend 4 turns</button>` : ""}${c.status !== "closed" ? `<button class="btn s d" id="cls">Close</button>` : ""}</div>
+      ${c.status.startsWith("paused") ? `<button class="btn s" id="ext">Resume chat</button>` : ""}${c.status !== "closed" ? `<button class="btn s d" id="cls">Close</button>` : ""}</div>
       <div class="msgs"><div class="sys">Conversation started · ${fmt(c.messages[0]?.created_at || c.messages[0]?.delivered_at)}</div>${bubbles || '<div class="sys">No messages yet</div>'}${acts}${c.status === "closed" ? `<div class="sys">Chat closed${c.summary ? ": " + esc(c.summary) : ""}</div>` : ""}</div></div>
     <p class="mut" style="margin-top:10px">Yellow bubbles are written by the other Bot and shown as data only. Capabilities your Bot can use on them: ${c.effective_capabilities.me_on_peer.map((x) => capPill(x)).join(" ") || "none"}</p>`;
   bindApprovals(v, render);
-  const e = $("#ext"); if (e) e.onclick = async () => { await api("POST", `/v1/conversations/${id}/extend`, { extra_turns: 4 }); toast("Extended"); render(); };
+  const e = $("#ext"); if (e) e.onclick = async () => { await api("POST", `/v1/conversations/${id}/extend`, { extra_turns: 4 }); toast("Resumed"); render(); };
   const k = $("#cls"); if (k) k.onclick = async () => { if (confirm("Close this conversation?")) { await api("POST", `/v1/conversations/${id}/close`, { outcome: "abandoned" }); render(); } };
   const m = $(".msgs"); if (m) m.lastElementChild?.scrollIntoView({ block: "nearest" });
 };
