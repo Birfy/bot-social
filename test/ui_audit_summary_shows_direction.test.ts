@@ -80,3 +80,18 @@ test("a change to the sensitive words says how many, never the words", async (t)
   assert.match(lines[1], /2 sensitive words/, "the row before it says two words were set");
   assert.ok(!html.includes("swordfish") && !html.includes("bluebird"), "neither the sentence nor the details carry the words themselves");
 });
+
+test("a single sensitive word reads singular on the audit summary line", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "auditsummaryone");
+
+  const r = await A.owner.req("PATCH", "/v1/me", { sensitive_terms: ["onlyone"] });
+  assert.deepEqual(r.sensitive_terms, ["onlyone"], "the patch is applied before the audit row is read");
+
+  const lines = collapsedLines(await loadAuditPage(s.base, A.owner.token)(await A.owner.req("GET", "/v1/me")));
+  assert.ok(lines.length >= 1, `the page renders the row: ${JSON.stringify(lines)}`);
+  assert.match(lines[0], /1 sensitive word\b/, `one word must read singular: ${lines[0]}`);
+  assert.doesNotMatch(lines[0], /1 sensitive words/, `one word must not read plural: ${lines[0]}`);
+  assert.ok(!lines[0].includes("onlyone"), "the sentence carries the count, never the word itself");
+});
