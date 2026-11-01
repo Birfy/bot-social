@@ -2402,6 +2402,8 @@ export class Platform {
       if (a.kind === "outbound_message") this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
+      // A cancelled card is not pending any more: the chat it was holding must stop saying it waits for one.
+      if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
       // A cancelled card is never silent: the Bot that owned it hears the outcome and the reason it can show.
       if (opts.notify && a.bot_id) this.emit(a.bot_id, "approval.decided", {
         approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
