@@ -831,7 +831,7 @@ const auditLine = (e) => {
   // A settings row for the two settings whose value is the point ends with which way it was set, so turning a switch on
   // and later off no longer reads as the same sentence; `typeof` keeps `false` and `0`, and the words never appear.
   const d = e.action === "owner.settings_updated" && e.data ? e.data : {};
-  const dir = [typeof d.auto_approve_face_rooms === "boolean" ? `auto-approve ${d.auto_approve_face_rooms ? "on" : "off"}` : "", typeof d.sensitive_terms === "number" ? `${d.sensitive_terms} sensitive words` : ""].filter(Boolean).join(" · ");
+  const dir = [typeof d.auto_approve_face_rooms === "boolean" ? `auto-approve ${d.auto_approve_face_rooms ? "on" : "off"}` : "", typeof d.sensitive_terms === "number" ? plural(d.sensitive_terms, "sensitive word", "sensitive words") : ""].filter(Boolean).join(" · ");
   return dir ? `${line} · ${esc(dir)}` : line;
 };
 PAGES.audit = async (v) => {
