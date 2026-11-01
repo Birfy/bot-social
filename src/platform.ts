@@ -2589,6 +2589,15 @@ export class Platform {
       }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, capability: req.capability, decision, note_to_bot: body.note_to_bot ?? null });
     }
+    // #266: a retryable execution failure is not a decision. The owner said yes and the server found the slot busy
+    // on a calendar the owner can clear — `fail()` already wrote `actions.status='failed'`, the audit row and the
+    // `action.failed` event, so the Bot still learns what happened. Consuming the card here would spend it on a
+    // failure the owner can fix, and `approved_with_edits` — the one affordance built for corrected times — would
+    // be dead on that same card. `calendar.accept_invite`'s `invite_not_found` and `unsupported_action` stay
+    // terminal: consuming the card there is right.
+    if (a.kind === "action" && approve && result?.status === "failed" && result?.reason === "calendar_conflict") {
+      return { approval_id: a.id, decision, ...result };
+    }
     this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
     const flags = J(a.risk_flags, []);
     this.audit.append(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
