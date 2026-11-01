@@ -2547,7 +2547,7 @@ export class Platform {
         if (!keepsInvite) {
           // A chat already closed before this line (a row an older build left pending) is settled here, once. When
           // the clock just ran out, `materializeExpiry` above is what cancelled the card: nothing to repeat.
-          if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed");
+          if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed", { notify: true });
           throw new ApiError(409, "invalid_state", c.outcome === "expired"
             ? "the conversation expired; this draft can no longer be approved"
             : "the conversation is closed; this draft can no longer be approved");
