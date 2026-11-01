@@ -4234,14 +4234,15 @@ export class Platform {
   private endLocalPairGrants(roomId: string, inviterBot: string, guests: string[]) {
     const now = nowIso();
     for (const guest of guests) {
-      const rels = this.all(`SELECT id FROM relationships WHERE status = 'room' AND ((requester_bot = ? AND target_bot = ?) OR (requester_bot = ? AND target_bot = ?))
+      const rels = this.all(`SELECT * FROM relationships WHERE status = 'room' AND ((requester_bot = ? AND target_bot = ?) OR (requester_bot = ? AND target_bot = ?))
         AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)`, guest, inviterBot, inviterBot, guest, roomId);
       for (const r of rels) {
         // Another live claim on the same room may still seat this pair (a second link for the same Bot): keep it.
         if (this.localPairClaim(roomId, inviterBot, guest, r.id)) continue;
         for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND room_id = ? AND status = 'active'", r.id, roomId)) {
           this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
-          this.audit.append("platform", "grant.revoked", g.id, [], { reason: "local_invite_ended", room_id: roomId });
+          // The ending of a share belongs to both owners of the pair: the read side filters by owner id.
+          this.audit.append("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "local_invite_ended", room_id: roomId });
         }
         this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE id = ?", now, r.id);
       }
