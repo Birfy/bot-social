@@ -252,6 +252,10 @@ export class Platform {
 
   // ================================================================ owners & auth
   registerOwner(body: { username: string; display_name?: string; password: string; timezone?: string }) {
+    // A username is a string, so the type gate comes before the format regex: `/…/.test(["ab"])` stringifies and
+    // passes, and the array then reaches the INSERT (or a boolean reaches the SELECT as a parameter). An absent
+    // username keeps the format message it always had.
+    assert(body?.username === undefined || typeof body.username === "string", 400, "invalid_request", "username must be a string");
     assert(body?.username && /^[a-z0-9._-]{2,32}$/i.test(body.username), 400, "invalid_request", "username: 2-32 chars [a-z0-9._-]");
     assert(typeof body.password === "string" && body.password.length >= 6, 400, "invalid_request", "password must be >= 6 chars");
     assert(!this.get("SELECT 1 FROM owners WHERE username = ?", body.username), 409, "username_taken");
@@ -275,6 +279,10 @@ export class Platform {
   }
 
   login(body: { username: string; password: string }) {
+    // The username goes straight into the SELECT, so a value of the wrong type must be refused before it is bound: an
+    // object is read by better-sqlite3 as a named-parameter bag and a boolean is refused outright, and both used to
+    // surface as a 500. An absent username is still the missing field it always was, and keeps answering 401.
+    assert(body?.username === undefined || typeof body.username === "string", 400, "invalid_request", "username must be a string");
     const o = this.get("SELECT * FROM owners WHERE username = ?", body?.username);
     if (!o || !checkPassword(String(body.password ?? ""), o.password_hash)) throw new ApiError(401, "invalid_credentials");
     this.audit.append(`owner:${o.id}`, "owner.login", o.id, [o.id]);
