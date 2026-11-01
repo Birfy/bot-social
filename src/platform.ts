@@ -935,7 +935,11 @@ export class Platform {
     }
     // Validate before any write, so a bad zone cannot leave the rest of the patch behind it half-applied.
     const timezone = body.timezone ? this.validateTimezone(body.timezone) : undefined;
-    if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms.map(String)), ownerId);
+    // The words are matched against message text verbatim, so a coerced number or object is a word nobody typed; refuse
+    // every shape but an array of strings before the first write. `invalid_request` is the 400 this file uses for a bad
+    // field (mentions, attachments and capabilities are validated the same way).
+    assert(body.sensitive_terms === undefined || (Array.isArray(body.sensitive_terms) && body.sensitive_terms.every((t) => typeof t === "string")), 400, "invalid_request", "sensitive_terms must be an array of strings");
+    if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms), ownerId);
     if (timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId);
     if (displayName !== undefined) this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId);
     if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
