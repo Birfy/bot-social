@@ -1876,6 +1876,7 @@ export class Platform {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
         if (member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id) {
           this.removeFaceMember(u.room_id, member);
+          this.settleHeldRoomCards(u.room_id, granted);
           this.endRoomGrantsForBots(u.room_id, [granted]);
         }
       }
@@ -1883,6 +1884,7 @@ export class Platform {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);
         if (member) {
           this.removeFaceMember(g.room_id, member);
+          this.settleHeldRoomCards(g.room_id, granted);
           this.endRoomGrantsForBots(g.room_id, [granted]);
         }
         if (!removed.includes(g.room_id)) removed.push(g.room_id);
@@ -1890,6 +1892,23 @@ export class Platform {
     }
     void actor;
     return [...new Set(removed)];
+  }
+
+  /**
+   * A line waiting in a room its sender no longer sits in can never be approved: the delivery door refuses it as
+   * `not_a_member`, so the card would wait out its 24-hour clock, and until then the owner's only way out is to
+   * reject it. A seat also ends when the share that brought the Bot in is revoked, so settle those lines the moment
+   * the share takes the seat away — and only those: this Bot's own face-room lines in this room, never another
+   * member's card, another room's card, or an action card.
+   */
+  private settleHeldRoomCards(roomId: string, botId: string) {
+    this.cancelPendingFor(
+      `bot_id = ? AND kind = 'face_room_message' AND subject_id IN (
+         SELECT id FROM face_room_drafts WHERE room_id = ? AND sender_bot = ?)`,
+      [botId, roomId, botId],
+      "room_left",
+      { notify: true },
+    );
   }
 
   /** Access grant held by one of my bots on someone else's bot (relationship grants only). */
