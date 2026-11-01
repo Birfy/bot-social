@@ -392,7 +392,11 @@ export class Platform {
   /** One-call onboarding for a FlyBot install: owner + custodial bot + connector token + optional push webhook. */
   onboardFlybot(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; webhook_url?: string; webhook_headers?: unknown }) {
     body = { ...(body ?? {}) };
-    if (body.webhook_url) validateUrl(body.webhook_url);
+    // Both checks land before onboard() commits: a refused sign-up must not leave an owner, a taken handle or live tokens behind.
+    if (body.webhook_url) {
+      validateUrl(body.webhook_url);
+      if (body.webhook_headers !== undefined) validateHeaders(body.webhook_headers);
+    }
     // The bot made here is the owner's FlyBot home (e.g. @danyang.home); local Bots join it as members.
     const base = String(body.display_name ?? body.username ?? "owner").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "owner";
     const out = this.onboard({ ...body, bot_handle: body.bot_handle || `${base}.home`, label: "FlyBot", integration_type: "flybot-home" }, { attestTyped: true });
