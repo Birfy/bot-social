@@ -3596,10 +3596,12 @@ export class Platform {
     const now = this.ts();
     this.run("UPDATE face_rooms SET status = 'closed', closed_at = ?, code = NULL WHERE id = ?", now, roomId);
     this.run("DELETE FROM face_room_codes WHERE room_id = ?", roomId);
-    for (const d of this.all("SELECT * FROM face_room_drafts WHERE room_id = ? AND status = 'pending_approval'", roomId)) {
-      this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", d.id);
-      this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'", "room_closed", now, d.approval_id);
-    }
+    // A line still waiting here is dropped by the closure, and its Bot must be told: cancelling the rows by hand
+    // left it with a card that changed under it and no `approval.decided` to say why. The canceller every other
+    // closed door uses settles the same rows, keeps `room_closed` as the decision on the card, and announces it once.
+    this.cancelPendingFor(
+      `kind = 'face_room_message' AND subject_id IN (SELECT id FROM face_room_drafts WHERE room_id = ? AND status = 'pending_approval')`,
+      [roomId], "room_closed", { notify: true });
     for (const g of this.all("SELECT * FROM grants WHERE room_id = ? AND status = 'active'", roomId)) {
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
       this.audit.append("platform", "grant.revoked", g.id, [], { reason: "room_closed", room_id: roomId });
