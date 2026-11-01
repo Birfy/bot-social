@@ -3393,11 +3393,8 @@ export class Platform {
       label: memberLabel(display_name, owner_name),
     };
   }
-  private faceOwnerIds(roomId: string, includeLeft = false) {
-    const q = includeLeft
-      ? "SELECT DISTINCT owner_id FROM face_room_members WHERE room_id = ?"
-      : "SELECT DISTINCT owner_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL";
-    return this.all(q, roomId).map((r: any) => r.owner_id);
+  private faceOwnerIds(roomId: string) {
+    return this.all("SELECT DISTINCT owner_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((r: any) => r.owner_id);
   }
   private faceInsertEvent(roomId: string, type: string, actorBot: string | null, data: Record<string, unknown>) {
     const id = newId("fev");
@@ -4322,7 +4319,9 @@ export class Platform {
       for (const m of leaving) this.removeFaceMember(roomId, m);
       this.endRoomGrantsForBots(roomId, leaving.map((m: any) => m.bot_id));
     }).immediate();
-    this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, this.faceOwnerIds(roomId, true), { bots: leaving.map((m: any) => m.bot_id) });
+    // The members still here, plus the one leaving: an owner who left earlier is no longer a member, so later
+    // leaves are not theirs to read (joins and messages already stop at the member boundary).
+    this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
     if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
