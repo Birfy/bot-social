@@ -80,6 +80,10 @@ function cnIdValid(id: string): boolean {
 }
 
 export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
+  // One number, however its digits are grouped: fold compatibility forms (full-width digits, U+00A0 → space),
+  // drop format characters (U+200B), then close the whitespace/dot/slash/dash runs between two digits. The
+  // patterns and the luhn / check-digit validators below are unchanged; only the text they read is normalized.
+  text = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/(?<=\d)[\s.\-/]+(?=\d)/g, "");
   const hits: DlpHit[] = [];
   const add = (category: string, action: DlpHit["action"], label: string) => { if (!hits.some((h) => h.category === category)) hits.push({ category, action, label }); };
   for (const m of text.match(/\b\d{17}[\dXx]\b/g) ?? []) if (cnIdValid(m)) add("pii.national_id", "block", "National ID number");
