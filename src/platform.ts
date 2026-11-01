@@ -940,7 +940,14 @@ export class Platform {
     if (displayName !== undefined) this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId);
     if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
     if (notifyBotId !== undefined) this.run("UPDATE owners SET notify_bot_id = ? WHERE id = ?", notifyBotId, ownerId);
-    this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], { fields: Object.keys(body) });
+    // `fields` alone cannot tell a switch turned on from one turned off: both rows would read alike. Record the value
+    // where the value is the point — the auto-approve flag, and how many sensitive words were set, never the words
+    // themselves, which are the owner's secrets. Every other field stays a name only.
+    this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], {
+      fields: Object.keys(body),
+      ...(typeof body.auto_approve_face_rooms === "boolean" ? { auto_approve_face_rooms: body.auto_approve_face_rooms } : {}),
+      ...(Array.isArray(body.sensitive_terms) ? { sensitive_terms: body.sensitive_terms.length } : {}),
+    });
     return this.me(p);
   }
 
