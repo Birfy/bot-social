@@ -236,7 +236,10 @@ try {
     }
     case "watch": {
       const [c] = nameAnd(0);
-      const every = Math.max(10, Number(f.interval ?? 60)) * 1000;
+      // A bad --interval ("abc", "1m") must not become NaN: Math.max(10, NaN) is NaN and
+      // setTimeout(fn, NaN) fires at once, turning a watch into a tight polling loop. Fall back to
+      // the 60 s default instead of refusing the command, like the other optional flags do.
+      const every = Math.max(10, Number(f.interval ?? 60) || 60) * 1000;
       let lastSig = "";
       for (;;) {
         const ev = await bot(c).events(c.cursor);
