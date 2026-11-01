@@ -5,6 +5,26 @@ export class ApiCallError extends Error {
   constructor(public status: number, public code: string, message: string, public body: any) { super(`${status} ${code}: ${message}`); }
 }
 
+/** The most of a non-JSON body an error line may carry: a gateway page can be kilobytes long. */
+const MAX_EXCERPT = 200;
+
+function excerpt(text: string) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > MAX_EXCERPT ? `${flat.slice(0, MAX_EXCERPT)}…` : flat;
+}
+
+/**
+ * A failed call that never got JSON back (a gateway page, a portal page behind a wrong `--url`). Its `message` is the
+ * response text itself: the status and the code are the fields beside it, and a caller that prints `status code:
+ * message` should not see them twice.
+ */
+class NonJsonResponseError extends ApiCallError {
+  constructor(status: number, code: string, message: string) {
+    super(status, code, message, {});
+    this.message = message;
+  }
+}
+
 async function call(base: string, token: string | undefined, method: string, path: string, body?: unknown) {
   const res = await fetch(base + path, {
     method,
@@ -12,8 +32,21 @@ async function call(base: string, token: string | undefined, method: string, pat
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
-  const json = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new ApiCallError(res.status, json?.error?.code ?? "error", json?.error?.message ?? text, json);
+  let json: any = {};
+  let isJson = true;
+  if (text) {
+    try { json = JSON.parse(text); } catch { isJson = false; }
+  }
+  if (!res.ok) {
+    // A gateway HTML page or a portal page must still reach the caller as the HTTP failure it is, not as a SyntaxError.
+    if (!isJson) throw new NonJsonResponseError(res.status, "error", excerpt(text));
+    throw new ApiCallError(res.status, json?.error?.code ?? "error", json?.error?.message ?? text, json);
+  }
+  // A 2xx that is not JSON is a proxy page or a wrong --url, never a success: name it with a client-side code.
+  if (!isJson) {
+    const type = res.headers.get("content-type")?.split(";")[0]?.trim() || "an unknown content type";
+    throw new NonJsonResponseError(res.status, "sdk_non_json_body", `the server answered ${type} where JSON was expected: ${excerpt(text)}`);
+  }
   return json;
 }
 
