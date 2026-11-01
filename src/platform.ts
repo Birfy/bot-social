@@ -3785,7 +3785,10 @@ export class Platform {
       if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
-    this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), ip });
+    // The row goes to every member, so a join never carries the address: a room-mate would read it.
+    // Only the creator's own row (nobody else is in the room yet) keeps it.
+    const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: bots.map((b) => b.id) };
+    this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
     const viewer = this.faceRequireMember(p, out.roomId);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -3959,7 +3962,8 @@ export class Platform {
       if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
-    this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), ip, invite: true });
+    // Same rule on the ticket path: every member reads this row, so no address on it.
+    this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), invite: true });
     const viewer = this.faceRequireMember(p, out.roomId);
     return this.faceRoomView(out.roomId, viewer);
   }
