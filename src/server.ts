@@ -21,6 +21,10 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     if (err instanceof ApiError) return reply.status(err.status).send({ error: { code: err.code, message: err.message, ...err.extra } });
     if (err.validation || err.statusCode === 400 || err.code === "FST_ERR_CTP_INVALID_JSON_BODY") return reply.status(400).send({ error: { code: "invalid_request", message: err.message } });
     if (err.statusCode === 413) return reply.status(413).send({ error: { code: "payload_too_large", message: err.message } });
+    // A body under a content-type the server has no parser for is a caller-side mistake (curl -d sends
+    // application/x-www-form-urlencoded unless told otherwise), so it is a 415 with a code the caller can
+    // act on rather than the catch-all 500 that blames the server.
+    if (err.statusCode === 415) return reply.status(415).send({ error: { code: "invalid_request", message: "unsupported content type: send application/json" } });
     app.log.error(err);
     return reply.status(500).send({ error: { code: "internal_error", message: "internal error" } });
   });
