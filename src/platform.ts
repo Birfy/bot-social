@@ -742,6 +742,18 @@ export class Platform {
     });
   }
 
+  /**
+   * A line that will never be delivered gives its files back. `checkRefs` binds a ref to the message while the card
+   * waits, so leaving that binding behind after a rejection, an expiry or a cancellation keeps bytes the peer never
+   * saw busy: the same ref answers `409 attachment_in_use` on the next draft and the owner has to upload it again.
+   * Only the settled-draft paths call this -- a delivered message keeps its binding, because that is how the peer
+   * finds the file it received.
+   */
+  private freeDraftAttachments(messageId?: string | null) {
+    if (!messageId) return;
+    this.run("UPDATE attachments SET message_id = NULL WHERE message_id = ?", messageId);
+  }
+
   /** Download for the recipient (bot, or its owner) of a delivered message only; the hash is verified. */
   getAttachment(p: Principal, body: { attachment_id: string; bot_id?: string }) {
     const row = this.get("SELECT * FROM attachments WHERE id = ?", body?.attachment_id);
@@ -2439,7 +2451,11 @@ export class Platform {
     const keepArgs = opts.keep ? opts.keep.args : [];
     for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND ${where}${keepSql}`, ...args, ...keepArgs)) {
       this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
-      if (a.kind === "outbound_message") this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
+      if (a.kind === "outbound_message") {
+        this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
+        // The line dies with the card; the files it held at draft time never reached the peer, so they are free.
+        this.freeDraftAttachments(a.subject_id);
+      }
       if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
       // A cancelled card is not pending any more: the chat it was holding must stop saying it waits for one.
@@ -2461,6 +2477,8 @@ export class Platform {
     this.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ?", nowIso(), a.id);
     if (a.kind === "outbound_message") {
       this.run("UPDATE messages SET status = 'expired' WHERE id = ?", a.subject_id);
+      // Same as a rejection: the line never went out, so the files it held are not "already sent".
+      this.freeDraftAttachments(a.subject_id);
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
       if (m) {
         // An expired draft is settled like a rejected one (`rejectMessage`): the peer never sees it and is not told.
@@ -3008,6 +3026,9 @@ export class Platform {
   private rejectMessage(a: any, note?: string) {
     const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
     this.run("UPDATE messages SET status = 'rejected' WHERE id = ?", m.id);
+    // The owner refused the line: nothing was delivered, so the files it held go back to their sender instead of
+    // staying bound to a message that will never reach the peer.
+    this.freeDraftAttachments(m.id);
     // the peer never sees rejected drafts; only the sender bot is informed
     this.emit(m.sender_bot, "approval.decided", { approval_id: a.id, kind: "outbound_message", message_id: m.id, decision: "rejected", note_to_bot: note ?? null });
     return { message_id: m.id, status: "rejected" };
