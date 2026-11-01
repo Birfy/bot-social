@@ -2376,19 +2376,25 @@ export class Platform {
     }
   }
 
-  /** Is this card a line held on a share that no longer exists? Read from the rows now, so a card an older build left
-   *  pending (or one held while the share ended) is judged by the same rule. */
+  /** Is this card held on a share that no longer exists, a line or an action alike? Read from the rows now, so a card
+   *  an older build left pending (or one held while the share ended) is judged by the same rule. */
   private heldCardShareGone(a: any): boolean {
-    if (a.kind !== "outbound_message" || !a.conversation_id) return false;
-    const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
-    if (!m) return false;
-    const c = this.get("SELECT * FROM conversations WHERE id = ?", m.conversation_id);
+    if (!["outbound_message", "action"].includes(a.kind) || !a.conversation_id) return false;
+    const m = a.kind === "outbound_message" ? this.get("SELECT * FROM messages WHERE id = ?", a.subject_id) : null;
+    if (a.kind === "outbound_message" && !m) return false;
+    const x = a.kind === "action" ? this.get("SELECT * FROM actions WHERE id = ?", a.subject_id) : null;
+    if (a.kind === "action" && !x) return false;
+    // The invitee's answer to a booking is not a line this share was carrying: the booking outlives the chat it was
+    // made in, so the accept stays decidable after the chat share ends.
+    if (x?.action_type === "calendar.accept_invite") return false;
+    const c = this.get("SELECT * FROM conversations WHERE id = ?", m ? m.conversation_id : a.conversation_id);
     const rel = c ? this.get("SELECT * FROM relationships WHERE id = ?", c.relationship_id) : null;
     // A room thread is the room's business: its own door says "the room grant is gone", not this share. Read the room
     // off the grants that made it, because the relationship stops being a room when the seat ends.
     if (!c || rel?.status === "room") return false;
     if (this.get("SELECT 1 FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", c.relationship_id)) return false;
-    const sender = this.bot(m.sender_bot), recipient = this.bot(m.recipient_bot);
+    const sender = m ? this.bot(m.sender_bot) : this.bot(x.actor_bot);
+    const recipient = m ? this.bot(m.recipient_bot) : this.bot(c.initiator_bot === sender.id ? c.peer_bot : c.initiator_bot);
     return !this.findGrant(recipient.owner_id, sender.id, "chat.public", recipient.id);
   }
 
