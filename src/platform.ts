@@ -487,6 +487,21 @@ export class Platform {
           this.endLocalPairGrants(inv.room_id, inv.inviter_bot, claim.bots);
         }
       }
+      // #90 continues: that rule ends the reach of the tickets this identity minted. The other half is the seats
+      // its identity took through someone else's link. A revoked Bot cannot answer in that room any more, so its
+      // seat goes with it: the claim drops it (and is released only when it held no one else, so the home can come
+      // back with a live link), and the pair grants that seat wrote stop being active. Only this Bot's own seat
+      // moves — the Bots that stay in the same claim, and other homes' claims on the same link, keep theirs.
+      for (const c of this.all(`SELECT c.ticket, c.owner_id, c.bots, i.room_id, i.inviter_bot FROM local_room_invite_claims c
+        JOIN local_room_invites i ON i.ticket = c.ticket WHERE c.released_at IS NULL AND i.inviter_bot <> ?`, m.id)) {
+        const bots = J(c.bots, []) as string[];
+        if (!bots.includes(m.id)) continue;
+        const rest = bots.filter((b) => b !== m.id);
+        // The claim row changes first: `endLocalPairGrants` reads a live claim as a seat that still holds the pair.
+        if (rest.length) this.run("UPDATE local_room_invite_claims SET bots = ? WHERE ticket = ? AND owner_id = ?", JSON.stringify(rest), c.ticket, c.owner_id);
+        else this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", nowIso(), c.ticket, c.owner_id);
+        this.endLocalPairGrants(c.room_id, c.inviter_bot, [m.id]);
+      }
       // #183: the same rule holds for the face-room tickets this identity minted. A ticket is a bearer
       // credential, so one handed out before the revocation would otherwise keep previewing the room and
       // seating new people in it. Owner-minted tickets (`created_by_bot IS NULL`) are not this identity's reach.
