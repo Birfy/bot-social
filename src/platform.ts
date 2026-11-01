@@ -2589,9 +2589,17 @@ export class Platform {
       }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, capability: req.capability, decision, note_to_bot: body.note_to_bot ?? null });
     }
-    this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
-    const flags = J(a.risk_flags, []);
-    this.audit.append(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
+    // A retryable execution failure is not a decision. `calendar_conflict` clears the moment the owner moves the
+    // conflicting event, and `approved_with_edits` is the door built for exactly that correction — stamping the
+    // card `approved` here would spend it, so the corrected retry could never reach `executeAction` again. The
+    // failed action row, its result, the audit row and the `action.failed` event are already written by
+    // `executeAction`; only the decision on the card is withheld.
+    const retryableFailure = approve && result?.status === "failed" && result?.reason === "calendar_conflict";
+    if (!retryableFailure) {
+      this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
+      const flags = J(a.risk_flags, []);
+      this.audit.append(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
+    }
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     return { approval_id: a.id, decision, ...result };
   }
