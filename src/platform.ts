@@ -3708,6 +3708,22 @@ export class Platform {
   }
 
   /**
+   * #318: a home that only brought a guest in can read the room it put someone into (`faceRequireMember` above),
+   * but acting on the room for everyone is for a home with a seat of its own still seated in it. Used by the write
+   * door `start`; the reading doors keep the wider predicate.
+   */
+  private faceRequireOwnSeat(p: Principal, roomId: string) {
+    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
+    let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND owner_id = ?";
+    const args: unknown[] = [roomId, p.ownerId];
+    if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
+    const members = this.all(sql, ...args);
+    if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
+    return { ownerId: p.ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
+  }
+
+  /**
    * #111: a block is a decision about a Bot pair, so seating the pair in a room again must not hand back the room
    * door the block closed. Asked for the Bots about to take a seat against the ones already in the room.
    */
@@ -4352,7 +4368,9 @@ export class Platform {
 
   startFaceRoom(p: Principal, roomId: string) {
     this.advanceFaceRooms();
-    const viewer = this.faceRequireMember(p, roomId);
+    // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its
+    // own, not the wider membership that also admits a home which only brought a guest in.
+    const viewer = this.faceRequireOwnSeat(p, roomId);
     this.db.transaction(() => {
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
       if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
