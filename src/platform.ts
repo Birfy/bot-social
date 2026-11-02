@@ -951,16 +951,20 @@ export class Platform {
     // every shape but an array of strings before the first write. `invalid_request` is the 400 this file uses for a bad
     // field (mentions, attachments and capabilities are validated the same way).
     assert(body.sensitive_terms === undefined || (Array.isArray(body.sensitive_terms) && body.sensitive_terms.every((t) => typeof t === "string")), 400, "invalid_request", "sensitive_terms must be an array of strings");
-    if (Array.isArray(body.sensitive_terms)) this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms), ownerId);
-    if (timezone) this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId);
-    if (displayName !== undefined) this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId);
-    if (typeof body.auto_approve_face_rooms === "boolean") this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId);
-    if (notifyBotId !== undefined) this.run("UPDATE owners SET notify_bot_id = ? WHERE id = ?", notifyBotId, ownerId);
+    // `fields` names what this patch wrote, not the keys the caller sent: `{"nope":1}` writes nothing, `{"timezone":""}`
+    // is dropped by the validation above, and an empty body writes nothing at all. A patch that writes nothing must not
+    // append an "updated account settings" row — the chain would claim a change that never happened.
+    const changed: string[] = [];
+    if (Array.isArray(body.sensitive_terms)) { this.run("UPDATE owners SET sensitive_terms = ? WHERE id = ?", JSON.stringify(body.sensitive_terms), ownerId); changed.push("sensitive_terms"); }
+    if (timezone) { this.run("UPDATE owners SET timezone = ? WHERE id = ?", timezone, ownerId); changed.push("timezone"); }
+    if (displayName !== undefined) { this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId); changed.push("display_name"); }
+    if (typeof body.auto_approve_face_rooms === "boolean") { this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId); changed.push("auto_approve_face_rooms"); }
+    if (notifyBotId !== undefined) { this.run("UPDATE owners SET notify_bot_id = ? WHERE id = ?", notifyBotId, ownerId); changed.push("notify_bot_id"); }
     // `fields` alone cannot tell a switch turned on from one turned off: both rows would read alike. Record the value
     // where the value is the point — the auto-approve flag, and how many sensitive words were set, never the words
     // themselves, which are the owner's secrets. Every other field stays a name only.
-    this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], {
-      fields: Object.keys(body),
+    if (changed.length > 0) this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], {
+      fields: changed,
       ...(typeof body.auto_approve_face_rooms === "boolean" ? { auto_approve_face_rooms: body.auto_approve_face_rooms } : {}),
       ...(Array.isArray(body.sensitive_terms) ? { sensitive_terms: body.sensitive_terms.length } : {}),
     });
