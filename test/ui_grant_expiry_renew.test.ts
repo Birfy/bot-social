@@ -168,3 +168,14 @@ test("a grant they gave me says when it ends, but only its grantor can renew it"
   assert.equal(page.expiry(), "5 days left", "a grant the peer gave me is shown with its expiry too");
   assert.equal(page.renew(), null, "the renewal belongs to the owner who granted it, so it is not offered on my side");
 });
+
+test("a free/busy grant made for a single day reads as one day", async () => {
+  const oneDay = { window_days: 1, hours: "09:00-18:00" };
+  const single = (await renderFriends(overview([grant("calendar.freebusy.read", at(30), oneDay)]))()).html();
+  assert.match(single, /1 day ·/, `a one-day window must read "1 day"; the card renders "${(single.match(/\d+ days?(?= ·)/) || ["nothing"])[0]}"`);
+  assert.doesNotMatch(single, /1 days/, "a count of one takes the singular, the way grantExpiry and the audit page already write it");
+  const many = (await renderFriends(overview([grant("calendar.freebusy.read", at(30), FREE_BUSY)]))()).html();
+  assert.match(many, /14 days ·/, "a count above one still reads as a plural");
+  const none = (await renderFriends(overview([grant("calendar.freebusy.read", at(30), {})]))()).html();
+  assert.match(none, /no day limit/, "a grant that carries no window keeps its own wording instead of a count");
+});

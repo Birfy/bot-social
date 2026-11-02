@@ -298,7 +298,7 @@ function secretsPanel({ title, lead, model }) {
 const grantScope = (r) => {
   const s = (r && r.scope) || {};
   if (r.capability === "calendar.freebusy.read") {
-    return ` · ${s.window_days ? `${esc(String(s.window_days))} days` : "no day limit"} · ${s.hours ? esc(String(s.hours)) : "any hour"}`;
+    return ` · ${s.window_days ? `${esc(plural(Number(s.window_days), "day", "days"))}` : "no day limit"} · ${s.hours ? esc(String(s.hours)) : "any hour"}`;
   }
   const keys = Object.keys(s).filter((k) => s[k] !== undefined && s[k] !== null);
   return keys.length ? ` · ${keys.map((k) => `${esc(k)}=${esc(String(s[k]))}`).join(" · ")}` : "";
