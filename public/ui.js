@@ -793,7 +793,7 @@ PAGES.bots = async (v) => {
 
 // Audit rows as sentences: "<who> <did what>". Unknown actions fall back to the raw name.
 const AUDIT_LABEL = {
-  "owner.registered": "created this account", "owner.login": "signed in", "owner.password_changed": "changed the password", "owner.settings_updated": "updated account settings",
+  "owner.registered": "created this account", "owner.login": "signed in", "owner.logout": "signed out", "owner.password_changed": "changed the password", "owner.settings_updated": "updated account settings",
   "bot.registered": "registered a Bot", "bot.profile_updated": "updated a Bot's profile", "bot.key_added": "added a signing key", "bot.key_revoked": "revoked a signing key",
   "bot.emergency_stop": "emergency-stopped a Bot", "bot.resumed": "resumed a Bot", "bot.token_rotated": "issued a new Bot token",
   "bot.webhook_set": "set up push", "bot.webhook_cleared": "turned off push", "bot.webhook_tested": "sent a test push",
@@ -806,12 +806,18 @@ const AUDIT_LABEL = {
   "grant.created": "granted a capability", "grant.revoked": "revoked a capability", "grant.requested": "asked for a capability", "grant.declined": "declined a capability request",
   "grant.used_in_room": "used a capability in a face-to-face room",
   "conversation.created": "started a chat", "conversation.closed": "closed a chat", "conversation.paused": "paused a chat", "conversation.extended": "extended a chat",
-  "message.drafted": "drafted a message", "message.delivered": "delivered a message",
+  "message.drafted": "drafted a message", "message.delivered": "delivered a message", "message.not_delivered": "could not deliver a message",
+  "owner_typed_message_delivered": "typed a message to a friend",
   "approval.decided": "decided an approval", "approval.expired": "closed an expired approval",
   "action.drafted": "proposed an action", "action.executed": "carried out an action", "action.failed": "reported a failed action",
   "policy.decision": "applied a policy decision", "policy.denied": "blocked a request by policy", "signature.rejected": "rejected a request with a bad signature",
   "calendar.freebusy.queried": "checked free/busy times", "attachment.uploaded": "uploaded an attachment", "attachment.downloaded": "downloaded an attachment",
-  "face_room.started": "started a face-to-face room", "face_room.left": "left a face-to-face room", "face_room.message_drafted": "drafted a room message",
+  "face_room.created": "opened a face-to-face room", "face_room.joined": "joined a face-to-face room", "face_room.started": "started a face-to-face room",
+  "face_room.left": "left a face-to-face room", "face_room.lead_changed": "changed who leads a face-to-face room",
+  "face_room.invite_minted": "made a face-to-face room invite link", "face_room.invite_revoked": "revoked a face-to-face room invite link",
+  "local_room.invite_minted": "made a room invite link", "local_room.invite_claimed": "joined a room through an invite link",
+  "local_room.invite_released": "released a room invite link", "local_room.invite_revoked": "revoked a room invite link", "local_room.claim_ended": "ended a room claim",
+  "face_room.message_drafted": "drafted a room message",
   "face_room.message_delivered": "delivered a room message", "face_room.lockout": "locked a face-to-face room after failed attempts",
   "home.member_added": "added a home member", "home.member_revoked": "removed a home member", "home.member_reactivated": "re-added a home member",
 };
