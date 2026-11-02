@@ -4589,6 +4589,9 @@ export class Platform {
       assert(peer, 404, "bot_not_found", "no such remote bot");
       // Same gate as sending, but a refused signal is not an audit event: it is not content and can repeat.
       assert(this.findActiveRelationship(me.id, peer.id), 403, "no_relationship", "no active relationship between these bots");
+      // The door a line needs, not just the friendship: a share that was revoked or declined leaves the pair
+      // friends, so a removed share must stop a new "thinking" here instead of only hiding it on the read side.
+      assert(this.findGrant(peer.owner_id, me.id, "chat.public", peer.id), 403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
       target = { toBot: peer.id };
     } else {
       this.advanceFaceRooms();
@@ -4624,6 +4627,9 @@ export class Platform {
       if (e.toBot) {
         if (opts?.room_id || !mineIds.has(e.toBot) || !this.findActiveRelationship(e.botId, e.toBot)) continue;
         const peer = this.bot(e.toBot);
+        // The gate is the share the entry was written under, not only the friendship: revoking or declining it
+        // drops the entry at once, as the README promises for reading a "thinking" line.
+        if (!this.findGrant(peer.owner_id, e.botId, "chat.public", e.toBot)) continue;
         out.push({ scope: "direct", bot: { handle: handle(writer.handle), display_name: sanitizePeerName(writer.display_name, "Bot") }, to: handle(peer.handle), state: e.state, expires_at: new Date(e.expiresMs).toISOString() });
       } else if (e.roomId) {
         if (opts?.room_id && opts.room_id !== e.roomId) continue;
