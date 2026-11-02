@@ -3687,7 +3687,31 @@ export class Platform {
   }
   /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
   advanceFaceRooms() {
+    // The face-room doors that read or move a seat call this first; the invite and join-by-invite doors reach it on
+    // the next such call, so a lapsed share gives its seat back then.
+    this.expireLapsedShares();
     for (const r of this.all("SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ?", this.ts())) this.faceStartRoom(r, "expired");
+  }
+  /**
+   * A share that lapsed by TIME ends its room uses exactly like `revokeGrant` / `revokeBotGrant` /
+   * `declineBotGrant` do: `grant_rooms` records the face rooms a per-bot share put the shared Bot into, and only
+   * those seats are given back. A room both owners entered themselves has no `grant_rooms` row, so it keeps its
+   * seats; `endGrantRooms` decides that from the record, not from the pair. Nothing else expires: the room-scoped
+   * grants that seat wrote are ended by `endGrantRooms` itself, as on the revoke path.
+   */
+  private expireLapsedShares() {
+    // `expired` is in the row set on purpose: lazy readers (`findGrant`, `grantsFor`, a conversation GET through
+    // `effectiveCaps`) flip a lapsed row to `expired` in place and never touch `grant_rooms`, so those rows keep an
+    // open usage with nothing to end them; the pre-flipped case is its own test (case 4). The clock is compared in
+    // SQL so this stays one indexed-shaped query per face-room door, not a table walk in JS.
+    const rows = this.all("SELECT id, status FROM grants WHERE status IN ('active','expired') AND room_id IS NULL AND expires_at IS NOT NULL AND expires_at <= ?", this.ts());
+    const ended: string[] = [];
+    for (const g of rows) {
+      if (g.status === "active") this.run("UPDATE grants SET status = 'expired' WHERE id = ? AND status = 'active'", g.id);
+      // Only a share that still holds a room usage has something to give back: repeating the sweep is a no-op.
+      if (this.get("SELECT 1 FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL LIMIT 1", g.id)) ended.push(g.id);
+    }
+    if (ended.length) this.endGrantRooms(ended, "platform");
   }
   private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
