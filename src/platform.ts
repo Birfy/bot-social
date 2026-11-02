@@ -2011,6 +2011,10 @@ export class Platform {
   }
 
   private endRelationship(ownerId: string, r: any, status: "revoked" | "blocked") {
+    // The shares this row still had alive end with it, and so do the seats they made: the same `endGrantRooms` the
+    // three revoke paths call. Rows scoped to one room are the door a seat wrote, not the share that paid for it, so
+    // they are left out here — `endGrantRooms` ends them together with the seat itself.
+    const endedShares = this.all("SELECT id FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL", r.id).map((g: any) => g.id);
     this.db.transaction(() => {
       this.run("UPDATE relationships SET status = ?, blocked_by = ?, updated_at = ? WHERE id = ?", status, status === "blocked" ? ownerId : null, nowIso(), r.id);
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE relationship_id = ? AND status = 'active'", nowIso(), r.id);
@@ -2020,6 +2024,7 @@ export class Platform {
       // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
       this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true });
     })();
+    if (endedShares.length) this.endGrantRooms(endedShares, `owner:${ownerId}`);
     this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status });
   }
