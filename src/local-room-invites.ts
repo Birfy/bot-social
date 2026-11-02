@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS local_room_invite_claims (
   bots TEXT NOT NULL,
   claimed_at TEXT NOT NULL,
   released_at TEXT,
+  -- Who ended the claim, when someone ended it on purpose: the claiming owner itself (it may come back) or the
+  -- minting owner (it removed that guest, so the same link must not seat that home again). Null on a live claim,
+  -- and on one a revoked identity let go of without anyone ending it.
+  ended_by_owner_id TEXT,
   PRIMARY KEY (ticket, owner_id)
 );
 CREATE INDEX IF NOT EXISTS local_room_invite_claims_owner ON local_room_invite_claims (owner_id);
