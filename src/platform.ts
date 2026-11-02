@@ -2208,6 +2208,10 @@ export class Platform {
     const i = this.get("SELECT * FROM invites WHERE id = ? OR code = ?", id, id);
     assert(i && i.owner_id === ownerId, 404, "invite_not_found");
     this.run("UPDATE invites SET status = 'revoked' WHERE id = ?", i.id);
+    // The card that was waiting on this invite is decided by the revoke: leaving it pending offers the owner an
+    // Approve that can no longer mean anything (the decision path refuses a revoked invite). Same shape as the
+    // other revokes: the record stays, settled, with the reason, and the Bot that asked hears it.
+    this.cancelPendingFor("kind = 'invite' AND subject_id = ?", [i.id], "invite_revoked", { notify: true });
     this.audit.append(`owner:${ownerId}`, "invite.revoked", i.id, [ownerId], {});
     return { invite_id: i.id, status: "revoked" };
   }
@@ -2662,6 +2666,15 @@ export class Platform {
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: r.id, decision, note_to_bot: body.note_to_bot ?? null });
       result = { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
     } else if (a.kind === "invite") {
+      // The stored invite state is the same witness here as in `inviteStatus` and the expiry sweep: a link that was
+      // revoked, expired or used before this decision is not reopened by it. A card an older build left pending is
+      // settled now, with the reason, instead of writing `active`/`rejected` over what the owner already decided.
+      const it = this.get("SELECT * FROM invites WHERE id = ?", a.subject_id);
+      const state = it ? this.inviteStatus(it) : "gone";
+      if (state !== "pending_owner") {
+        this.cancelPendingFor("id = ?", [a.id], state === "revoked" ? "invite_revoked" : "invite_unavailable", { notify: true });
+        throw new ApiError(409, "invalid_state", `the invite is ${state}; this card can no longer be approved`);
+      }
       this.run("UPDATE invites SET status = ? WHERE id = ?", approve ? "active" : "rejected", a.subject_id);
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision, url: approve ? this.inviteUrl(this.get("SELECT code FROM invites WHERE id = ?", a.subject_id).code) : null });
       result = { invite_id: a.subject_id, status: approve ? "active" : "rejected" };
