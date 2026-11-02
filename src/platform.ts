@@ -1035,6 +1035,11 @@ export class Platform {
     const ownerId = this.requireOwner(p);
     this.ownBot(ownerId, botId);
     assert(body?.kid && body?.value, 400, "invalid_request", "kid and value required");
+    // The kid is the binding of the lookup below and of the insert: an object was taken for named parameters
+    // (RangeError) and a boolean had no binding (TypeError), which answered 500 inside better-sqlite3; a number
+    // bound as REAL, so kid 7 and the flattened [1] were stored in the TEXT column as "7.0"/"1.0" and the key
+    // could never be revoked by its name. A kid is a string, and only a string reaches SQL.
+    assert(typeof body.kid === "string", 400, "invalid_request", "kid must be a string");
     try { publicKeyFromRaw(body.value); } catch { throw new ApiError(400, "invalid_public_key"); }
     // `retire_others_in_days` is the caller's day count for every key already on the Bot, so it is checked as one
     // before anything is written: whole days, 0 to 365. Taken raw, "abc" became an invalid Date and answered 500
@@ -2038,6 +2043,13 @@ export class Platform {
 
   block(p: Principal, body: { bot_id?: string; relationship_id?: string; my_bot_id?: string }) {
     const ownerId = this.requireOwner(p);
+    // Every one of these arrives as it is and goes straight into a SQL binding: an object was taken for named
+    // parameters and a boolean had no binding, so the route answered 500 before any of the refusals below could
+    // speak. Check the shape first; a missing or null id still falls through to the same defaults and refusals as
+    // before, and null never reaches SQL because every read below tests the field for truth.
+    assert(body?.bot_id === undefined || body?.bot_id === null || typeof body?.bot_id === "string", 400, "invalid_request", "bot_id must be a string");
+    assert(body?.my_bot_id === undefined || body?.my_bot_id === null || typeof body?.my_bot_id === "string", 400, "invalid_request", "my_bot_id must be a string");
+    assert(body?.relationship_id === undefined || body?.relationship_id === null || typeof body?.relationship_id === "string", 400, "invalid_request", "relationship_id must be a string");
     let r: any;
     if (body?.relationship_id) {
       r = this.get("SELECT * FROM relationships WHERE id = ?", body.relationship_id);
