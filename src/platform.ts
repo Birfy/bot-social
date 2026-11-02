@@ -729,6 +729,9 @@ export class Platform {
   private attachmentBot(p: Principal, botId?: string) {
     if (p.kind === "owner") {
       const ownerId = this.requireOwner(p);
+      // The bot named on an upload used to reach the owner lookup as it arrived: an object or a boolean
+      // answered 500. Only a string goes on to SQL; an absent or null id keeps the default bot.
+      assert(botId === undefined || botId === null || typeof botId === "string", 400, "invalid_request", "bot_id must be a string");
       const b = botId ? this.ownBot(ownerId, botId) : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);
       assert(b, 404, "bot_not_found", "no bot to upload for");
       return { botId: b.id as string, ownerId };
@@ -1116,6 +1119,10 @@ export class Platform {
   /** Kill switch: freeze outbound, pause conversations, revoke bot tokens, cancel pending drafts. */
   emergencyStop(p: Principal, body: { bot_id: string }) {
     const ownerId = this.requireOwner(p);
+    // The kill switch takes its bot from the body, and that value used to reach the lookup as it arrived: an
+    // object was taken for named parameters and a boolean had no binding, so the route answered 500 instead of
+    // naming the field. Only a string goes on to the lookup; an absent or null id keeps the old 404.
+    assert(body?.bot_id === undefined || body?.bot_id === null || typeof body?.bot_id === "string", 400, "invalid_request", "bot_id must be a string");
     const b = this.ownBot(ownerId, body?.bot_id);
     // A removed home member is `revoked`, not `frozen`: freezing it would put the identity in the one state
     // resumeBot accepts, handing the owner a working token for an identity whose invites, drafts, rooms and
@@ -1259,9 +1266,14 @@ export class Platform {
     } else {
       payload = body ?? {};
       assert(payload.from_bot_id, 400, "invalid_request", "from_bot_id required when an owner sends a request");
+      // The sender's id went from the body straight into the owner lookup: an object or a boolean answered 500.
+      // A missing id keeps its own message above; only a string goes on to SQL.
+      assert(payload.from_bot_id === undefined || payload.from_bot_id === null || typeof payload.from_bot_id === "string", 400, "invalid_request", "from_bot_id must be a string");
       fromBot = this.ownBot(p.ownerId, payload.from_bot_id);
     }
     assert(payload.target_handle || payload.target_bot_id, 400, "invalid_request", "target_handle or target_bot_id required");
+    // The target bot id is the other value this route hands to SQL as it arrived; a non-string answered 500.
+    assert(payload.target_bot_id === undefined || payload.target_bot_id === null || typeof payload.target_bot_id === "string", 400, "invalid_request", "target_bot_id must be a string");
     const target = payload.target_bot_id ? this.bot(payload.target_bot_id) : this.botByHandle(payload.target_handle);
     // #90: a revoked Bot answers exactly like one that never existed — same status, code, message and fields.
     // Any difference would turn this door into an oracle for "which handle was revoked".
@@ -2229,6 +2241,9 @@ export class Platform {
       joiner = this.namedOwnBot(p.ownerId, payload.from_bot_id, payload.bot_handle) ?? this.inviteBotFor(p.ownerId);
       this.assertInvitable(joiner);
     }
+    // The code from the body overrides the one in the path and used to reach the invite lookup as it arrived:
+    // an object, an array or a boolean answered 500. An absent or null code keeps the path's code.
+    assert(payload?.code === undefined || payload?.code === null || typeof payload.code === "string", 400, "invalid_request", "code must be a string");
     // Give back the use of any earlier pending join before reading this invite's status: the expired
     // relationship may have been the one use this 1-use link had.
     this.expireStale();
