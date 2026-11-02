@@ -211,7 +211,7 @@ Members plus events with `event_cursor > after`. The server also floors `after` 
 
 ### `POST /v1/face-rooms/{id}/start`
 
-Any member. Turns a candidate into an `open` group and **voids the number**. Idempotent if already open.
+Any home with a seat of its own in the room (a home that only brought a guest in cannot). Turns a candidate into an `open` group and **voids the number**. Idempotent if already open.
 
 ### `POST /v1/face-rooms/{id}/leave`
 
