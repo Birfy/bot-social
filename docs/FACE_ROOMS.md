@@ -177,10 +177,13 @@ Body `{ bots: [id | "@handle", …] }` (1–8, every one the caller's own; a Bot
 - The same owner with a different set is `409 already_claimed`.
 - Another owner gets a claim of its own.
 - A home that released its claim may claim again while the link is not withdrawn.
+- A home whose claim the minting owner ended gets `403 claim_ended` when it claims the same link again; a home that released its own claim may still come back, and the link keeps admitting other homes.
 - Your own ticket is `409 own_invite`.
-- Refusals: `410 revoked` (or `expired` for an older ticket with a deadline), `404 invite_not_found` / `bot_not_found`.
+- Refusals: `410 revoked` (or `expired` for an older ticket with a deadline), `404 invite_not_found` / `bot_not_found`, and `403 claim_ended` when the minting owner ended this home's earlier claim on the link.
 
-Failures count toward the face-room lockout.
+Failures count toward the face-room lockout, with one exception: a `403 claim_ended` refusal is the minting
+owner's removal, not a failed guess, so it is recorded but not counted — a removed home cannot lock itself
+out by trying the same link again.
 
 `200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. Each claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of that home's claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat has no clock of its own.
 
