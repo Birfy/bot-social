@@ -4072,6 +4072,12 @@ export class Platform {
     };
   }
 
+  /** Whether this home has ever held a seat in the room this ticket names: then its refusals are removals, not guesses. */
+  private faceInviteEverSeated(invite: any, ownerId: string) {
+    if (!invite) return false;
+    return !!this.get(`SELECT 1 FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND b.owner_id = ?`, invite.room_id, ownerId);
+  }
+
   /** Join an established room with a ticket: writes the room grants, then confirms (Bot Social #30/#31). */
   joinFaceRoomByInvite(p: Principal, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
@@ -4094,7 +4100,14 @@ export class Platform {
       const invite = this.faceInviteOf(ticket);
       const refusal = this.faceInviteRefusal(invite);
       if (refusal) {
-        this.faceRecordAttempt(ownerId, ip, "invite", refusal.code);
+        // A ticket that seated this home is not a guess when it dies: the lead withdrew it, or its clock ran out.
+        // Its seat stays (a withdrawn link keeps the seats it made), so its retries are the same removal #336 and
+        // #338 exempt on the local-room door. They keep a row under a label of their own, so the refusal is still
+        // visible, but they cannot spend the join budget and lock that home out of every other room. A caller the
+        // ticket never seated keeps the counted code: `docs/FACE_ROOMS.md:144` needs a guessed or leaked ticket to
+        // cost the same as a wrong one.
+        const seated = invite && (refusal.code === "revoked" || refusal.code === "expired" || refusal.code === "ended") && this.faceInviteEverSeated(invite, ownerId);
+        this.faceRecordAttempt(ownerId, ip, "invite", seated ? `${refusal.code}_after_seat` : refusal.code);
         return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
       }
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite!.room_id);

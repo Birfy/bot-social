@@ -141,7 +141,7 @@ Each answer is distinct — never one generic refusal:
 | `already_member` | 409 | every Bot you brought is already in the room |
 | `rate_limited` / `locked_out` | 429 | the same per-IP / per-account windows as the 6-digit join |
 
-A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket. The one caller that is not guessing is the home that had already claimed with the link, and only when an existing claim row proves it: its `410` is a dead ticket, not a check — it kept the reach that claim made (see `DELETE /v1/local-room-invites/{ticket}`), so retrying tells it nothing new (see the lockout rule below). For everyone else the account-level join budget is unchanged — a wrong or leaked ticket still costs exactly what it cost before, on the same window, with the same counts.
+A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket. The one caller that is not guessing is the home the dead link already admitted, and only when the database proves it: an existing claim row on a local-room link (see `DELETE /v1/local-room-invites/{ticket}`), or a seat in the room this face ticket names (see `DELETE /v1/face-rooms/{id}/invites/{ticket}`). Its `410` — `revoked` / `expired`, or `ended` for a room that closed — is a dead ticket, not a check: it kept the seat or the reach that link made, so retrying tells it nothing new (see the lockout rule below). For everyone else the account-level join budget is unchanged — a wrong or leaked ticket still costs exactly what it cost before, on the same window, with the same counts.
 
 #### The link page
 
@@ -184,10 +184,13 @@ Body `{ bots: [id | "@handle", …] }` (1–8, every one the caller's own; a Bot
 Failures count toward the face-room lockout, with two exceptions. A `403 claim_ended` refusal is the minting
 owner taking that home out. A `410 revoked` / `expired` refusal for a home that had already claimed with the link
 is a dead ticket, not a check: that home kept the reach its claim made — withdrawing the link does not end the
-claims — so a retry tells it nothing new. Both are recorded (`claim_ended`; `revoked_after_claim` /
-`expired_after_claim` for the two `410` shapes) but not counted, so neither can lock a home out of every other
-room. A `410 revoked` / `expired` on a link it never claimed with still counts, so a leaked or guessed ticket
-keeps the cost above.
+claims — so a retry tells it nothing new. The face-room ticket door has the same shape under its own name: a
+`410 revoked` / `expired` / `ended` refusal for a home that has ever held a seat in the room that ticket names is
+that seat's ticket dying, not a guess, and the seat the link made stays (a withdrawn link keeps the seats it
+made). All of them are recorded (`claim_ended`; `revoked_after_claim` / `expired_after_claim` on the local-room
+door, `revoked_after_seat` / `expired_after_seat` / `ended_after_seat` on the face-room ticket door) but not
+counted, so none can lock a home out of every other room. A `410` on a link it never claimed with, or a ticket
+that never seated it, still counts, so a leaked or guessed ticket keeps the cost above.
 
 `200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. Each claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of that home's claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat has no clock of its own.
 
