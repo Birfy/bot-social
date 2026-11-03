@@ -129,6 +129,8 @@ Public (no token), rate-limited per address: what a scanned link shows **before*
 
 Same auth and the same `bots` / `handles` / `bot_ids` / `bot_id` / `bot` / `handle` rules as [`POST /join`](#post-v1face-roomsjoin). Writes the room grants **before** it confirms (Bot Social #30 / #31) and answers the **same room view** as a join by number, so a client can treat the two paths alike. It does not create a friendship. A missing or malformed `ticket` is `404 invite_not_found`. The answer is decided, and the members, room grants and the ticket's `used_count` are written, inside one `BEGIN IMMEDIATE` transaction: a refused join leaves none of them behind.
 
+A repeat of a join this home already completed is not a failed check: the ticket did its work and the seat proves it, so `409 already_member` is recorded but does not spend the join budget below — an answer lost in transit must not cost the home its other rooms.
+
 Each answer is distinct — never one generic refusal:
 
 | Code | Status | When |
