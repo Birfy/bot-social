@@ -198,7 +198,7 @@ that never seated it, still counts, so a leaked or guessed ticket keeps the cost
 
 #### `DELETE /v1/local-room-invites/{ticket}`
 
-- **The minting owner withdraws the ticket.** Nobody new can join with it, and the homes that already joined keep their reach. Add `?end_claims=1` when the room itself is gone: that also ends every claim's reach.
+- **The minting owner withdraws the ticket.** Nobody new can join with it, and the homes that already joined keep their reach. Add `?end_claims=1` when the room itself is gone: that also ends every claim's reach. A home that ends the claims of a local-room link also ends its own other live links for that room: a ticket minted by another home for the same `room_id` is not touched.
 - **A claiming owner releases its own claim**, which revokes the room grants that claim wrote.
 
 `204`; anyone else `403`; gone `404`.

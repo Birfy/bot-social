@@ -4393,6 +4393,8 @@ export class Platform {
   /**
    * The minting owner withdraws the ticket: nobody new can join with it, and the homes that already joined keep
    * their seats (owner decision 2026-10-24) unless `endClaims` (the room is gone) ends every claim's reach too.
+   * Ending the claims also withdraws the minting owner's other live links for that room, since the room is gone
+   * for all of them; a ticket another home minted for the same `room_id` is not the caller's to end.
    * A claiming owner releases its own claim, which ends the reach that claim wrote.
    */
   revokeLocalRoomInvite(p: Principal, ticketRaw: unknown, opts: { endClaims?: boolean } = {}) {
@@ -4405,14 +4407,28 @@ export class Platform {
     if (minter && invite.revoked_at && !opts.endClaims) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
     const now = this.ts();
     const ended = minter ? (opts.endClaims ? this.localInviteClaims(invite) : []) : [own!];
+    // `end_claims` means the room itself is gone: every other live link this same home minted for the room goes
+    // with it, and the claims they seated end through the same release + grant path below. Another home's ticket
+    // for the same `room_id` is left alone (`mintLocalRoomInvite` does not check the room's home, so each owner's
+    // authority reaches only the tickets it minted).
+    const siblings = minter && opts.endClaims
+      ? this.all("SELECT * FROM local_room_invites WHERE room_id = ? AND created_by_owner_id = ? AND ticket <> ? AND revoked_at IS NULL", invite.room_id, ownerId, invite.ticket)
+      : [];
+    const siblingClaims = siblings.flatMap((s: any) => this.localInviteClaims(s).map((c: any) => ({ invite: s, claim: c })));
     if (minter && !invite.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
+    for (const s of siblings) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, s.ticket);
     for (const c of ended) {
       // The acting owner ends these: the claimer on a self-release (it may come back), the minter on `end_claims`
       // (the room is gone, so nothing can come back to it).
       this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", now, ownerId, invite.ticket, c.owner_id);
       this.endLocalPairGrants(invite.room_id, invite.inviter_bot, c.bots);
     }
-    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...ended.map((c) => c.owner_id)], minter ? { ended_claims: ended.length } : {});
+    for (const { invite: sibling, claim } of siblingClaims) {
+      this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", now, ownerId, sibling.ticket, claim.owner_id);
+      this.endLocalPairGrants(sibling.room_id, sibling.inviter_bot, claim.bots);
+    }
+    const claimers = [...ended.map((c) => c.owner_id), ...siblingClaims.map(({ claim }) => claim.owner_id)];
+    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...claimers], minter ? { ended_claims: claimers.length } : {});
   }
 
   /** The minting owner ends one home's claim (it removed that guest): that home's reach in the room ends, the link stays. `home` is the home's handle or one of its claimed Bots' handles. */
