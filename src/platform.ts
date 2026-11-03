@@ -4159,6 +4159,11 @@ export class Platform {
     if (!invite || ownerId === null) return null;
     return this.localInviteClaims(invite).find((c) => c.owner_id === ownerId) ?? null;
   }
+  /** Whether this home ever claimed this ticket, however that claim ended. A refusal on such a ticket is not a guess. */
+  private localInviteEverClaimed(invite: any, ownerId: string | null) {
+    if (!invite || ownerId === null) return false;
+    return !!this.get("SELECT 1 FROM local_room_invite_claims WHERE ticket = ? AND owner_id = ?", invite.ticket, ownerId);
+  }
   /** The claim this home once had, however it ended: the live list above leaves released rows out. */
   private localInviteEndedClaim(invite: any, ownerId: string | null) {
     if (!invite || ownerId === null) return null;
@@ -4309,7 +4314,14 @@ export class Platform {
       }
       const refusal = this.localInviteRefusal(invite);
       if (refusal) {
-        this.faceRecordAttempt(ownerId, ip, "local", refusal.code);
+        // A home that had already joined with this link is not guessing: the owner withdrew the link, or an older
+        // ticket's deadline passed. #336 gave the sibling `claim_ended` refusal exactly this exception, and these two
+        // are the same removal for a home the link had already seated. Its retries keep a row under a label of their
+        // own (`revoked_after_claim` / `expired_after_claim`), so the removal stays visible, but they cannot spend the
+        // join budget and lock that home out of every other room. A caller that never held a claim keeps the counted
+        // code: `docs/FACE_ROOMS.md:144` needs a guessed or leaked ticket to cost the same as a wrong one.
+        const removed = invite && (refusal.code === "revoked" || refusal.code === "expired") && this.localInviteEverClaimed(invite, ownerId);
+        this.faceRecordAttempt(ownerId, ip, "local", removed ? `${refusal.code}_after_claim` : refusal.code);
         return { ok: false, ...refusal, lockout: this.faceMaybeLockout(ownerId, ip) };
       }
       // #90: a live ticket whose inviter is no longer active must not write new reach for it. Checked before the
