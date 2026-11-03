@@ -3701,7 +3701,12 @@ export class Platform {
   private faceStartRoom(room: any, reason: "expired" | "start", actor?: { ownerId: string; botId?: string }) {
     if (room.status !== "candidate") return;
     const now = this.ts();
-    this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ?", now, room.id);
+    // Claim the promotion with one conditional UPDATE, so two doors that both read `candidate` cannot both promote
+    // it, and a room started by its owner already cannot be flipped again by a sweep that read the older row.
+    const claim = reason === "expired"
+      ? this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ? AND status = 'candidate' AND expires_at <= ?", now, room.id, now)
+      : this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ? AND status = 'candidate'", now, room.id);
+    if (!claim.changes) return;
     this.run("DELETE FROM face_room_codes WHERE room_id = ?", room.id);
     const text = reason === "expired"
       ? "The matching window ended. The room is now open. The number is no longer valid."
@@ -3712,10 +3717,17 @@ export class Platform {
   }
   /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
   advanceFaceRooms() {
-    // The face-room doors that read or move a seat call this first; the invite and join-by-invite doors reach it on
-    // the next such call, so a lapsed share gives its seat back then.
+    // The face-room doors that read or move a seat call this first; the invite and join-by-invite doors settle it
+    // through `faceSettledRoom` before they answer.
     this.expireLapsedShares();
+    // No lapsed window, nothing to promote: read doors (a preview is one) must not turn a read into a table sweep.
+    if (!this.get("SELECT 1 FROM face_rooms WHERE status = 'candidate' AND expires_at <= ? LIMIT 1", this.ts())) return;
     for (const r of this.all("SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ?", this.ts())) this.faceStartRoom(r, "expired");
+  }
+  /** The room row after any lapsed matching window is settled, so every door answers the same status as a GET. */
+  private faceSettledRoom(roomId: string) {
+    this.advanceFaceRooms();
+    return this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
   }
   /**
    * A share that lapsed by TIME ends its room uses exactly like `revokeGrant` / `revokeBotGrant` /
@@ -3838,7 +3850,9 @@ export class Platform {
     this.faceEmitMembers(roomId, "face_room.lead_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
   }
   private faceRoomView(roomId: string, viewer: { joinSeq?: number; ownerId?: string }, opts: { after?: number } = {}) {
-    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+    // The view is the one place `status` and `started_at` come from, and it reads the settled row, so an entry that
+    // answers with a room view cannot answer a room the matching window has already opened.
+    const room = this.faceSettledRoom(roomId);
     const creator = this.faceCreatorOf(room);
     const creatorOwner = creator ? this.get("SELECT display_name, username FROM owners WHERE id = ?", creator) : null;
     const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m, true));
@@ -3995,6 +4009,7 @@ export class Platform {
    */
   mintFaceRoomInvite(p: Principal, roomId: string, ctx: { ip?: string } = {}) {
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId);
     if (viewer.room.status === "closed") throw new ApiError(410, "ended", "this room has ended");
     this.faceRequireLead(p, roomId, "mint an invite");
@@ -4015,6 +4030,7 @@ export class Platform {
    * revoke lands after it and only later uses are affected.
    */
   revokeFaceRoomInvite(p: Principal, roomId: string, ticketRaw: unknown) {
+    this.advanceFaceRooms();
     this.faceRequireMember(p, roomId);
     this.faceRequireLead(p, roomId, "revoke an invite");
     const ticket = String(ticketRaw ?? "").trim();
@@ -4038,7 +4054,7 @@ export class Platform {
     // Every preview counts against the per-IP window, whether it names a real ticket or not.
     this.faceRecordAttempt(null, ip, "invite", refusal ? refusal.code : "preview");
     if (refusal) throw new ApiError(refusal.status, refusal.code, refusal.message);
-    const room = this.get("SELECT * FROM face_rooms WHERE id = ?", invite!.room_id);
+    const room = this.faceSettledRoom(invite!.room_id);
     const leadRow = this.faceLeadOf(room).effective;
     // The preview answers with exactly the three keys it has always returned; only the two labels are cleaned,
     // the same way `publicBot` cleans them. A read-side name fix, not a change to the response shape.
@@ -4066,6 +4082,7 @@ export class Platform {
     type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
     type Ok = { ok: true; roomId: string; seated: string[] };
     const txn = this.db.transaction((): Ok | Fail => {
+      this.advanceFaceRooms();
       const locked = this.faceLockoutUntil(ownerId, ip);
       if (locked) {
         this.faceRecordAttempt(ownerId, ip, "invite", "locked_out");
