@@ -3597,6 +3597,7 @@ export class Platform {
     return out;
   }
   private faceAddMembers(roomId: string, bots: any[], addedByOwnerId: string) {
+    const leadBefore = this.faceEffectiveLeadId(roomId);
     const now = this.ts();
     for (const b of bots) {
       const snap = this.faceSnapshot(b);
@@ -3612,6 +3613,7 @@ export class Platform {
       }
       this.faceEmitMembers(roomId, "face_room.joined", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member: snap, trust: "platform" });
     }
+    this.faceEmitLeadHandover(roomId, leadBefore);
   }
   /** Implicit room-scoped grants between the newcomers and everyone already in the room (other owners). */
   private syncFaceRoomAccess(roomId: string, newcomers: any[], actorOwnerId: string, bring: { bot: any; viaGrant?: any }[]) {
@@ -3650,6 +3652,7 @@ export class Platform {
   }
   private removeFaceMember(roomId: string, m: any) {
     if (m.left_at) return;
+    const leadBefore = this.faceEffectiveLeadId(roomId);
     const now = this.ts();
     const n = this.run("UPDATE face_room_members SET left_at = ? WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", now, roomId, m.bot_id);
     if (!n.changes) return;
@@ -3658,9 +3661,15 @@ export class Platform {
     const ev = this.faceInsertEvent(roomId, "member.left", m.bot_id, { text, member, trust: "platform" });
     this.emit(m.bot_id, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform", self: true });
     this.faceEmitMembers(roomId, "face_room.left", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, text, member, trust: "platform" });
-    // The chosen lead left: back to the default lead (FlyBot #476).
-    if (this.get("SELECT 1 FROM face_rooms WHERE id = ? AND lead_bot_id = ?", roomId, m.bot_id)) this.faceSetLead(roomId, null, "lead_left", m.bot_id);
+    // The chosen lead left: back to the default lead (FlyBot #476). Its own event already names the Bot that
+    // takes over, so this door must not announce the same change twice.
+    let announced = false;
+    if (this.get("SELECT 1 FROM face_rooms WHERE id = ? AND lead_bot_id = ?", roomId, m.bot_id)) {
+      this.faceSetLead(roomId, null, "lead_left", m.bot_id);
+      announced = true;
+    }
     this.faceCloseIfEmpty(roomId);
+    this.faceEmitLeadHandover(roomId, leadBefore, announced);
   }
   private endRoomGrantsForBots(roomId: string, botIds: string[]) {
     if (!botIds.length) return;
@@ -3841,6 +3850,32 @@ export class Platform {
   private faceLeadFields(roomId: string) {
     const lead = this.faceLeadOf(this.get("SELECT * FROM face_rooms WHERE id = ?", roomId));
     return { lead_bot_handle: lead.set?.handle ?? null, effective_lead_bot_handle: lead.effective?.handle ?? null };
+  }
+  /** The Bot every home follows right now, as an id (null when the room has no members left). */
+  private faceEffectiveLeadId(roomId: string): string | null {
+    return this.faceLeadOf(this.get("SELECT * FROM face_rooms WHERE id = ?", roomId)).effective?.bot_id ?? null;
+  }
+  /**
+   * A join, a leave or a removal can move the default lead by itself: the creator's first Bot still in the room
+   * leads, so another home can inherit the room without the creator picking anyone. Announce that like any other
+   * lead change. The one exception is a picked lead's own exit, which the caller passes as `announced`: its
+   * `lead_left` event already carries the new `effective_lead_bot_handle`, and a second event would say it twice.
+   */
+  private faceEmitLeadHandover(roomId: string, before: string | null, announced = false) {
+    if (announced || !before) return;
+    const lead = this.faceLeadOf(this.get("SELECT * FROM face_rooms WHERE id = ?", roomId));
+    const effective = lead.effective;
+    if (!effective || effective.bot_id === before) return;
+    const data = {
+      text: leadSystemText(effective, "handover"),
+      reason: "handover",
+      lead: lead.set ? this.faceMemberPublic(lead.set) : null,
+      lead_bot_handle: lead.set?.handle ?? null,
+      effective_lead_bot_handle: effective.handle,
+      trust: "platform",
+    };
+    const ev = this.faceInsertEvent(roomId, "room.lead_changed", null, data);
+    this.faceEmitMembers(roomId, "face_room.lead_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
   }
   /** Store the lead (null = default), and tell every member with a platform event. */
   private faceSetLead(roomId: string, botId: string | null, reason: "set" | "cleared" | "lead_left", actorBot: string | null) {
