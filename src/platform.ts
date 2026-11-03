@@ -4605,7 +4605,10 @@ export class Platform {
     }).immediate();
     // The members still here, plus the one leaving: an owner who left earlier is no longer a member, so later
     // leaves are not theirs to read (joins and messages already stop at the member boundary).
-    this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
+    // A leave that removes nobody writes nothing: it is not a leave, and a row saying it happened would put an
+    // owner who never sat in the room into that room's audit trail. The same rule a join that seats nobody
+    // follows for `face_room.joined`; the response and the room state are unchanged.
+    if (leaving.length) this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
     if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
