@@ -155,7 +155,7 @@ export function leaveSystemText(ownerName: string, displayName: string): string 
   return `${ownerName}'s ${displayName} left`;
 }
 
-export function leadSystemText(lead: { display_name: string; owner_name: string } | null, reason: "set" | "cleared" | "lead_left"): string {
+export function leadSystemText(lead: { display_name: string; owner_name: string } | null, reason: "set" | "cleared" | "lead_left" | "handover"): string {
   if (lead) return `Room lead: ${lead.owner_name}'s ${lead.display_name}`;
   return reason === "lead_left" ? "The room lead left. The default lead takes over." : "The room lead is back to the default.";
 }
