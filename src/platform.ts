@@ -3696,8 +3696,13 @@ export class Platform {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
     const ownerId = p.ownerId;
-    let sql = "SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR added_by_owner_id = ?)";
-    const args: unknown[] = [roomId, ownerId, ownerId];
+    // A seat of your own is what makes the room yours. A Bot another owner brought in on the share you hold on it
+    // is not one: once your last Bot has left, the guest still sitting there must not keep the room open to you.
+    // An owner who never took a seat here (they only brought the guest in) is not a leaver and keeps that access.
+    let sql = `SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR (added_by_owner_id = ? AND (
+      NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = face_room_members.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = face_room_members.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`;
+    const args: unknown[] = [roomId, ownerId, ownerId, ownerId, ownerId];
     if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
     let members = this.all(sql, ...args);
     if (asBot) {
@@ -3724,6 +3729,28 @@ export class Platform {
     const members = this.all(sql, ...args);
     if (!members.length) throw new ApiError(404, "face_room_not_found", "no such room");
     return { ownerId: p.ownerId, botIds: members.map((m: any) => m.bot_id as string), members, joinSeq: Math.min(...members.map((m: any) => m.join_seq as number)), room };
+  }
+
+  /**
+   * The answer a join gives, built from what the join itself proves: the seats this owner already holds, and the
+   * seats it just wrote (`seated`). A joiner with neither — a leaver bringing a guest who already sits there — gets
+   * the room back with no events, not the history its own read door keeps shut. The seat rule in faceRequireMember
+   * decides every later read, so this answer is not a way into a room that rule keeps from the caller.
+   */
+  private faceJoinViewer(p: Principal, roomId: string, seated: string[]) {
+    const rows: any[] = [];
+    let ownSql = "SELECT join_seq FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND owner_id = ?";
+    const ownArgs: unknown[] = [roomId, p.ownerId];
+    if (p.kind === "bot") { ownSql += " AND bot_id = ?"; ownArgs.push(p.botId); }
+    rows.push(...this.all(ownSql, ...ownArgs));
+    if (seated.length) {
+      const marks = seated.map(() => "?").join(",");
+      rows.push(...this.all(`SELECT join_seq FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND bot_id IN (${marks})`, roomId, ...seated));
+    }
+    if (rows.length) return { ownerId: p.ownerId, joinSeq: Math.min(...rows.map((r: any) => r.join_seq as number)) };
+    // Nothing this join proves: start after the newest event, so the answer carries the room and no history.
+    const top = this.get("SELECT COALESCE(MAX(seq), 0) AS top FROM face_room_events WHERE room_id = ?", roomId)?.top as number;
+    return { ownerId: p.ownerId, joinSeq: (top ?? 0) + 1 };
   }
 
   /**
@@ -3794,7 +3821,7 @@ export class Platform {
     const codeOk = isFaceCode(rawCode);
     const code = codeOk ? String(rawCode).trim() : "";
     type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
-    type Ok = { ok: true; created: boolean; roomId: string };
+    type Ok = { ok: true; created: boolean; roomId: string; seated: string[] };
     const txn = this.db.transaction((): Ok | Fail => {
       this.advanceFaceRooms();
       const locked = this.faceLockoutUntil(ownerId, ip);
@@ -3826,7 +3853,7 @@ export class Platform {
         this.faceAddMembers(id, bots, ownerId);
         this.syncFaceRoomAccess(id, bots, ownerId, bring);
         this.faceRecordAttempt(ownerId, ip, code, "created");
-        return { ok: true, created: true, roomId: id };
+        return { ok: true, created: true, roomId: id, seated: bots.map((b) => b.id) };
       }
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", mapping.room_id);
       if (!room || room.status !== "candidate" || Date.parse(room.expires_at) <= this.nowMs()) {
@@ -3853,7 +3880,7 @@ export class Platform {
         this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
       }
       this.faceRecordAttempt(ownerId, ip, code, newcomers.length ? "joined" : "rejoined");
-      return { ok: true, created: false, roomId: room.id };
+      return { ok: true, created: false, roomId: room.id, seated: newcomers.map((n: any) => n.id) };
     });
     const out = txn.immediate();
     if (!out.ok) {
@@ -3864,7 +3891,7 @@ export class Platform {
     // Only the creator's own row (nobody else is in the room yet) keeps it.
     const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: bots.map((b) => b.id) };
     this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
-    const viewer = this.faceRequireMember(p, out.roomId);
+    const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
 
@@ -3991,7 +4018,7 @@ export class Platform {
     const bots = bring.map((x) => x.bot);
     const ticket = String(body?.ticket ?? "").trim();
     type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
-    type Ok = { ok: true; roomId: string };
+    type Ok = { ok: true; roomId: string; seated: string[] };
     const txn = this.db.transaction((): Ok | Fail => {
       const locked = this.faceLockoutUntil(ownerId, ip);
       if (locked) {
@@ -4030,7 +4057,7 @@ export class Platform {
       this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
       this.run("UPDATE face_room_invites SET used_count = used_count + 1, last_used_at = ?, last_used_by_owner_id = ? WHERE ticket = ?", this.ts(), ownerId, ticket);
       this.faceRecordAttempt(ownerId, ip, "invite", "invited");
-      return { ok: true, roomId: room.id };
+      return { ok: true, roomId: room.id, seated: newcomers.map((n: any) => n.id) };
     });
     const out = txn.immediate();
     if (!out.ok) {
@@ -4039,7 +4066,7 @@ export class Platform {
     }
     // Same rule on the ticket path: every member reads this row, so no address on it.
     this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), invite: true });
-    const viewer = this.faceRequireMember(p, out.roomId);
+    const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
 
@@ -4353,17 +4380,22 @@ export class Platform {
     this.advanceFaceRooms();
     const ownerId = p.ownerId;
     const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
-    const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, p.botId] : [ownerId, ownerId];
+    const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, ownerId, ownerId, p.botId] : [ownerId, ownerId, ownerId, ownerId];
     const rows = this.all(`SELECT r.id, r.status, r.expires_at, r.started_at, COUNT(DISTINCT m2.bot_id) member_count
       FROM face_rooms r
-      JOIN face_room_members m ON m.room_id = r.id AND (m.owner_id = ? OR m.added_by_owner_id = ?) AND m.left_at IS NULL ${extra}
+      JOIN face_room_members m ON m.room_id = r.id AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+        NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL)))) ${extra}
       LEFT JOIN face_room_members m2 ON m2.room_id = r.id AND m2.left_at IS NULL
       WHERE r.status != 'closed'
       GROUP BY r.id ORDER BY r.created_at DESC`, ...args);
     return {
       rooms: rows.map((r: any) => ({
         room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
-        my_bots: this.all("SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND (m.owner_id = ? OR m.added_by_owner_id = ?) AND m.left_at IS NULL", r.id, ownerId, ownerId)
+        my_bots: this.all(`SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+          NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+          OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`,
+          r.id, ownerId, ownerId, ownerId, ownerId)
           .map((m: any) => ({ handle: m.handle, display_name: peerDisplayName(m.display_name, "Bot"), ...lookOf(m) })),
       })),
     };
@@ -4651,7 +4683,11 @@ export class Platform {
         const room = this.get("SELECT status FROM face_rooms WHERE id = ?", e.roomId);
         const member = room?.status === "open" && this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", e.roomId, e.botId);
         if (!member) continue;
-        const sees = this.all("SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR added_by_owner_id = ?)", e.roomId, viewerOwner, viewerOwner)
+        // Same seat rule as the room itself: a guest brought on your share stops counting for you once you left.
+        const sees = this.all(`SELECT bot_id FROM face_room_members WHERE room_id = ? AND left_at IS NULL AND (owner_id = ? OR (added_by_owner_id = ? AND (
+          NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = face_room_members.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+          OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = face_room_members.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`,
+          e.roomId, viewerOwner, viewerOwner, viewerOwner, viewerOwner)
           .some((m: any) => p.kind !== "bot" || m.bot_id === p.botId);
         if (!sees) continue;
         out.push({ scope: "face_room", room_id: e.roomId, bot: { handle: handle(member.handle), display_name: sanitizePeerName(member.display_name, "Bot") }, state: e.state, expires_at: new Date(e.expiresMs).toISOString() });
