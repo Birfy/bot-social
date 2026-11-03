@@ -1992,7 +1992,15 @@ export class Platform {
       FROM grants g JOIN relationships r ON r.id = g.relationship_id
       WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL
         AND g.capability = 'chat.public'`,
-      ...myBotIds, ownerId).filter((g: any) => this.grantedBotOf(g, g) === targetBotId);
+      ...myBotIds, ownerId).filter((g: any) => {
+      // A share that ran out on its own clock is not reach, even though the row still says `active` until a reader
+      // flips it: seating a Bot in a room must not be the reader that treats a lapsed share as live.
+      if (g.expires_at && Date.parse(g.expires_at) < Date.now()) {
+        this.run("UPDATE grants SET status = 'expired' WHERE id = ?", g.id);
+        return false;
+      }
+      return this.grantedBotOf(g, g) === targetBotId;
+    });
     // #23: a grant whose access is reply-only comes last; the caller refuses it (bot_not_shared).
     const full = rows.find((g: any) => !this.replyOnlyAccess(g.relationship_id, g.grantor_owner, g.grantee_bot));
     return full ? { ...full, reply_only_access: false } : rows[0] ? { ...rows[0], reply_only_access: true } : null;
