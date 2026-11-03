@@ -3950,9 +3950,12 @@ export class Platform {
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     // The row goes to every member, so a join never carries the address: a room-mate would read it.
-    // Only the creator's own row (nobody else is in the room yet) keeps it.
-    const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: bots.map((b) => b.id) };
-    this.audit.append(`owner:${ownerId}`, out.created ? "face_room.created" : "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    // Only the creator's own row (nobody else is in the room yet) keeps it. The row names the seats this
+    // request took (`out.seated`), not every Bot it brought: one already in the room sat down again, so it
+    // is not a join. A repeat join that seats nobody writes no row; its "rejoined" attempt already records it.
+    const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: out.seated };
+    if (out.created) this.audit.append(`owner:${ownerId}`, "face_room.created", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    else if (out.seated.length) this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -4142,8 +4145,9 @@ export class Platform {
       if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
-    // Same rule on the ticket path: every member reads this row, so no address on it.
-    this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: bots.map((b) => b.id), invite: true });
+    // Same rule on the ticket path: every member reads this row, so no address on it, and it names only
+    // the seats this request took.
+    if (out.seated.length) this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: out.seated, invite: true });
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
