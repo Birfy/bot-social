@@ -2191,13 +2191,22 @@ export class Platform {
     return bot;
   }
 
+  /** The same answer as `assertInvitable`, as a value: a caller that has to record the attempt first cannot throw,
+   *  because a throw inside its transaction would roll the record back. */
+  private invitableFailure(bot: any): { status: number; code: string; message: string } | null {
+    if (bot.status === "active") return null;
+    const frozen = bot.status === "frozen";
+    return { status: 403, code: frozen ? "bot_frozen" : "bot_revoked",
+      message: frozen ? "this bot is frozen (emergency stop)" : "this bot identity was revoked" };
+  }
+
   /** A frozen or revoked Bot is handed out by no invite: the kill switch also closes links that name it, and the
    *  link is checked again when it is joined. A named Bot that exists but is down is a 403, not a 404.
    *  The same check guards the last write of an auto-accept invite, so a stop that happened while the card
    *  waited cannot be undone by approving it. */
   private assertInvitable(bot: any) {
-    assert(bot.status === "active", 403, bot.status === "frozen" ? "bot_frozen" : "bot_revoked",
-      bot.status === "frozen" ? "this bot is frozen (emergency stop)" : "this bot identity was revoked");
+    const failure = this.invitableFailure(bot);
+    if (failure) throw new ApiError(failure.status, failure.code, failure.message);
   }
 
   /** Create an invite link. Owner-created invites are active at once (creating it is the owner's consent);
@@ -4284,9 +4293,13 @@ export class Platform {
       // #90: a live ticket whose inviter is no longer active must not write new reach for it. Checked before the
       // claim row, so a ticket minted before the revocation cannot be claimed during or after it. A withdrawn
       // ticket keeps its own answer above (410): the revocation of the link is the more specific fact.
-      if (this.bot(invite.inviter_bot).status !== "active") {
+      // The answer names the state the inviter is in, as every other owner-side door does (#143): a stopped Bot is a
+      // `bot_frozen` that can be resumed, a removed one is `bot_revoked`. The attempt keeps the single `bot_revoked`
+      // label, which is the one this budget knows, so a stopped inviter cannot be retried for free.
+      const inviterFailure = this.invitableFailure(this.bot(invite.inviter_bot));
+      if (inviterFailure) {
         this.faceRecordAttempt(ownerId, ip, "local", "bot_revoked");
-        return { ok: false, status: 403, code: "bot_revoked", message: "the Bot that made this invite was revoked" };
+        return { ok: false, ...inviterFailure };
       }
       // One claim per home: a home that joined brings its Bots once (another set is a second claim it must release first).
       if (mine) {
