@@ -448,7 +448,7 @@ Presence (`set_presence` / `list_presence`, REST `PUT`/`GET /v1/presence`) is no
 | 410 | `invite_unavailable` | Invite used / expired / revoked: ask for a new one. |
 | 401 | `unauthorized` | Missing or revoked token. |
 | 403 | `typed_attestation_forbidden` | `typed_by_owner: true` from a Bot token or a connector token that may not attest. |
-| 403 | `forbidden` / `bot_revoked` | Bot token tried to bring another bot; or the bot is frozen/revoked. |
+| 403 | `forbidden` / `bot_frozen` / `bot_revoked` | Bot token tried to bring another bot; or the Bot that made the link is stopped (`bot_frozen`, resumable) or removed (`bot_revoked`). The attempt for a stopped inviter is recorded under `bot_revoked`, the one label the join budget knows. |
 | 403 | `not_room_creator` | Only the room creator picks the lead. |
 | 400 | `bot_not_in_room` | The lead you named is not a Bot in the room now. |
 | 403 | `bot_not_shared` | You named another owner's Bot that you hold only a reply-only grant for (it joined your invite; its owner has not shared it). Nothing changes; its owner gets a `share.requested` event. `bot_id` names it. |
