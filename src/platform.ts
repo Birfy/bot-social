@@ -66,9 +66,11 @@ const nowIso = () => new Date().toISOString();
 /** Why a home could not hand a delivered message to its Bot (reportNotDelivered). A fixed list: the sender is shown a fixed line. */
 const NOT_DELIVERED_REASONS = ["not_shared_yet"];
 /** A join budget counts real door checks only, both the 6-digit code and the invite ticket. A request refused
- *  for being over budget is not another check, so counting it cannot keep the budget full by itself. */
+ *  for being over budget is not another check, so counting it cannot keep the budget full by itself. `already_member`
+ *  is the opposite of a check: the ticket did its work and this home already holds the seat, so a repeat is an answer
+ *  lost in transit, not a guess — recorded, not counted (the local-room door answers the same repeat with success). */
 const FACE_JOIN_OUTCOMES = ["invalid_code", "room_full", "code_void", "created", "joined", "rejoined",
-  "invited", "already_member", "invite_not_found", "ended", "revoked", "expired",
+  "invited", "invite_not_found", "ended", "revoked", "expired",
   "claimed", "already_claimed", "bot_revoked"];
 /** Invite previews are reads: they get their own per-address budget and never spend the join one. */
 const FACE_PREVIEW_OUTCOMES = ["preview", "invite_not_found", "ended", "revoked", "expired"];
