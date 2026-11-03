@@ -4159,6 +4159,11 @@ export class Platform {
     if (!invite || ownerId === null) return null;
     return this.localInviteClaims(invite).find((c) => c.owner_id === ownerId) ?? null;
   }
+  /** The claim this home once had, however it ended: the live list above leaves released rows out. */
+  private localInviteEndedClaim(invite: any, ownerId: string | null) {
+    if (!invite || ownerId === null) return null;
+    return this.get("SELECT * FROM local_room_invite_claims WHERE ticket = ? AND owner_id = ? AND released_at IS NOT NULL", invite.ticket, ownerId) ?? null;
+  }
   private localClaimView(c: { owner_id: string; bots: string[] }) {
     return {
       home: this.homeHandleOf(c.owner_id),
@@ -4324,10 +4329,17 @@ export class Platform {
         return { ok: false, status: 409, code: "already_claimed", message: "this invite was already used for other Bots of yours" };
       }
       if (invite.created_by_owner_id === ownerId) return { ok: false, status: 409, code: "own_invite", message: "this is your own invite link" };
+      // A claim the minting owner ended removed this home from the room, so the link must not seat it again.
+      // A claim this home released itself is the other case, and it may come back (the upsert below clears it).
+      const ended = this.localInviteEndedClaim(invite, ownerId);
+      if (ended && ended.ended_by_owner_id && ended.ended_by_owner_id !== ownerId) {
+        this.faceRecordAttempt(ownerId, ip, "local", "claim_ended");
+        return { ok: false, status: 403, code: "claim_ended", message: "the owner of this room ended your claim on it", lockout: this.faceMaybeLockout(ownerId, ip) };
+      }
       const now = this.ts();
       // A home that gave its claim back (left) may come back with the same link while it is not withdrawn.
-      this.run(`INSERT INTO local_room_invite_claims (ticket, owner_id, bots, claimed_at, released_at) VALUES (?,?,?,?,NULL)
-        ON CONFLICT (ticket, owner_id) DO UPDATE SET bots = excluded.bots, claimed_at = excluded.claimed_at, released_at = NULL`, invite.ticket, ownerId, JSON.stringify(wanted), now);
+      this.run(`INSERT INTO local_room_invite_claims (ticket, owner_id, bots, claimed_at, released_at, ended_by_owner_id) VALUES (?,?,?,?,NULL,NULL)
+        ON CONFLICT (ticket, owner_id) DO UPDATE SET bots = excluded.bots, claimed_at = excluded.claimed_at, released_at = NULL, ended_by_owner_id = NULL`, invite.ticket, ownerId, JSON.stringify(wanted), now);
       const inviter = this.bot(invite.inviter_bot);
       for (const b of bots) this.ensureLocalPairGrant(invite.room_id, inviter, b, ownerId);
       this.faceRecordAttempt(ownerId, ip, "local", "claimed");
@@ -4367,7 +4379,9 @@ export class Platform {
     const ended = minter ? (opts.endClaims ? this.localInviteClaims(invite) : []) : [own!];
     if (minter && !invite.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
     for (const c of ended) {
-      this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", now, invite.ticket, c.owner_id);
+      // The acting owner ends these: the claimer on a self-release (it may come back), the minter on `end_claims`
+      // (the room is gone, so nothing can come back to it).
+      this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", now, ownerId, invite.ticket, c.owner_id);
       this.endLocalPairGrants(invite.room_id, invite.inviter_bot, c.bots);
     }
     this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...ended.map((c) => c.owner_id)], minter ? { ended_claims: ended.length } : {});
@@ -4383,7 +4397,8 @@ export class Platform {
     const home = handle ? this.botByRef(handle) ?? null : null;
     const claim = home ? this.localInviteClaimOf(invite, home.owner_id) : null;
     if (!claim) throw new ApiError(404, "claim_not_found", "no home joined with this link under that handle");
-    this.run("UPDATE local_room_invite_claims SET released_at = ? WHERE ticket = ? AND owner_id = ?", this.ts(), invite.ticket, claim.owner_id);
+    // The minter ends it: recorded, so the same link does not seat that home again.
+    this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", this.ts(), p.ownerId, invite.ticket, claim.owner_id);
     this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claim.bots);
     this.audit.append(`owner:${p.ownerId}`, "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
   }

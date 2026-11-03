@@ -29,6 +29,10 @@ export function openDb(path: string): Database.Database {
   if (!ocols.includes("notify_bot_id")) db.exec("ALTER TABLE owners ADD COLUMN notify_bot_id TEXT");
   db.exec(FACE_ROOM_SCHEMA);
   db.exec(LOCAL_ROOM_INVITE_SCHEMA);
+  // Who ended a local-room claim: the minting owner ending it (removing that guest) must outlast the release,
+  // so the same link does not seat that home again. Rows written before the column existed stay null.
+  const lrcols = (db.prepare("PRAGMA table_info(local_room_invite_claims)").all() as { name: string }[]).map((c) => c.name);
+  if (!lrcols.includes("ended_by_owner_id")) db.exec("ALTER TABLE local_room_invite_claims ADD COLUMN ended_by_owner_id TEXT");
   const tcols = (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((c) => c.name);
   if (!tcols.includes("id")) db.exec("ALTER TABLE tokens ADD COLUMN id TEXT");
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
