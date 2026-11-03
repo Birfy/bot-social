@@ -28,6 +28,18 @@ const second = async (o: Who, name: string) => {
   return { id: r.bot_id as string, handle: `@${local}-${name}.bot` };
 };
 
+/** Two homes, one Bot each: Ann created the room, so the default lead is Ann's Bot. */
+async function twoHomeRoom(t: any) {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const B = await ownerWithBot(s.base, "ben");
+  const a = await join(s.base, A, "616161");
+  assert.equal(a.status, 200);
+  assert.equal((await join(s.base, B, "616161")).status, 200);
+  return { s, A, B, roomId: a.body.room_id as string };
+}
+
 async function room(t: any) {
   const s = await startServer();
   t.after(s.stop);
@@ -128,6 +140,59 @@ test("when the creator's Bots are all gone, the first Bot that joined leads", as
   const vb = await view(s.base, B, roomId);
   assert.equal(vb.body.effective_lead_bot_handle, B.handle);
   assert.equal(vb.body.created_by_me, false);
+});
+
+test("a membership change that moves the default lead announces one handover, and the new lead hears it", async (t) => {
+  const { s, A, B, roomId } = await twoHomeRoom(t);
+  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, A.owner.token, {})).status, 200);
+  const vb = await view(s.base, B, roomId);
+  assert.equal(vb.body.effective_lead_bot_handle, B.handle);
+  const changes = vb.body.events.filter((e: any) => e.type === "room.lead_changed");
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].reason, "handover");
+  assert.equal(changes[0].lead_bot_handle, null);
+  assert.equal(changes[0].effective_lead_bot_handle, B.handle);
+  assert.equal(changes[0].text, `Room lead: ben's ${vb.body.members.find((m: any) => m.handle === B.handle).display_name}`);
+  const inbox = await B.bot.req("GET", "/v1/events?since=0");
+  assert.ok(inbox.events.some((e: any) => e.event_type === "face_room.lead_changed" && e.room_id === roomId && e.reason === "handover" && e.effective_lead_bot_handle === B.handle));
+});
+
+test("the creator coming back takes the default lead back with one more handover", async (t) => {
+  const { s, A, B, roomId } = await twoHomeRoom(t);
+  await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, A.owner.token, {});
+  assert.equal((await join(s.base, A, "616161")).status, 200);
+  const vb = await view(s.base, B, roomId);
+  assert.equal(vb.body.effective_lead_bot_handle, A.handle);
+  const changes = vb.body.events.filter((e: any) => e.type === "room.lead_changed");
+  assert.deepEqual(changes.map((e: any) => e.reason), ["handover", "handover"]);
+  assert.equal(changes[1].effective_lead_bot_handle, A.handle);
+});
+
+test("the picked lead leaving stays a lead_left, with no extra handover", async (t) => {
+  const { s, A, B, roomId } = await twoHomeRoom(t);
+  assert.equal((await setLead(s.base, A, roomId, B.handle)).status, 200);
+  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, B.owner.token, {})).status, 200);
+  const va = await view(s.base, A, roomId);
+  assert.deepEqual(va.body.events.filter((e: any) => e.type === "room.lead_changed").map((e: any) => e.reason), ["set", "lead_left"]);
+});
+
+test("a leave that keeps the same default lead announces nothing", async (t) => {
+  const { s, A, B, roomId } = await twoHomeRoom(t);
+  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, B.owner.token, {})).status, 200);
+  assert.equal((await join(s.base, B, "616161")).status, 200);
+  const va = await view(s.base, A, roomId);
+  assert.equal(va.body.effective_lead_bot_handle, A.handle);
+  assert.deepEqual(va.body.events.filter((e: any) => e.type === "room.lead_changed"), []);
+});
+
+test("removing one Bot of the creator's home hands the room to the creator's next Bot, once", async (t) => {
+  const { s, A, B, a2, roomId } = await room(t);
+  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, A.owner.token, { bots: [A.handle] })).status, 200);
+  const vb = await view(s.base, B, roomId);
+  assert.equal(vb.body.effective_lead_bot_handle, a2.handle);
+  const changes = vb.body.events.filter((e: any) => e.type === "room.lead_changed");
+  assert.deepEqual(changes.map((e: any) => e.reason), ["handover"]);
+  assert.equal(changes[0].effective_lead_bot_handle, a2.handle);
 });
 
 test("each owner sets role labels of their own Bots only; roles are sanitized and shown to every member", async (t) => {
