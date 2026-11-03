@@ -1942,16 +1942,24 @@ export class Platform {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
       const granted = this.grantedBotOf(g, r);
       const granteeOwner = this.bot(g.grantee_bot).owner_id;
-      const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL", gid);
+      // Every usage row is checked, not only the open ones: the room's own sweep closes a usage when a member
+      // leaves, and that used to hide the seat from this door. A usage this door finds already ended is not a seat
+      // given back — the seat may still be there (its bringer left first), so look at the room before deciding.
+      // A usage already ended whose room no longer seats the Bot is history and stays out of `removed`.
+      const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ?", gid);
       for (const u of usages) {
-        this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
-        removed.push(u.room_id);
+        const live = !u.ended_at;
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
-        if (member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id) {
+        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id;
+        // Nothing to give back and no seat to take: the room closed, or its owner already walked the Bot out.
+        if (!live && !seated) continue;
+        if (live) this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
+        if (seated) {
           this.removeFaceMember(u.room_id, member);
           this.settleHeldRoomCards(u.room_id, granted);
           this.endRoomGrantsForBots(u.room_id, [granted]);
         }
+        removed.push(u.room_id);
       }
       if (g.room_id) {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);

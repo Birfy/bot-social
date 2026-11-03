@@ -64,6 +64,7 @@ test("a guest keeps its seat after its bringer left, then the share that seated 
   assert.equal((await req(s.base, "POST", `/v1/face-rooms/${room}/leave`, A.owner.token, {})).status, 200);
   console.log(`# after A left: F.bot left_at ${memberOf(room, F.bot.id)?.left_at ? "set" : "null"} | share ${JSON.stringify(shareRow(F.owner_id, A.bot.id))} | F-B grants ${pairGrants(room, F.bot.id, B.bot.id)}`);
 
+  const usagesBefore = (db.prepare("SELECT COUNT(*) n FROM grant_rooms WHERE grant_id = ?").get(gid) as any).n;
   assert.equal((await req(s.base, "DELETE", `/v1/grants/${gid}`, F.owner.token)).status, 200);
   const after = memberOf(room, F.bot.id);
   let sendAfter = "delivered";
@@ -74,5 +75,56 @@ test("a guest keeps its seat after its bringer left, then the share that seated 
 
   assert.equal(after?.left_at != null, true, "the share that seated the guest is revoked, so its seat must be gone");
   assert.equal(pairGrants(room, F.bot.id, B.bot.id), 0, "a revoked share must not leave room grants between the guest and the members");
-  assert.notEqual(sendAfter, "delivered", "a guest whose share was revoked must not reach the room");
+  assert.equal(sendAfter, "room_not_shared", "a guest whose share was revoked must not reach the room");
+  // The usage row for this room is closed and no new row was written for it: the seat came from that one share,
+  // and its record stays one row with an end.
+  assert.equal((db.prepare("SELECT COUNT(*) n FROM grant_rooms WHERE grant_id = ?").get(gid) as any).n, usagesBefore, "revoking must not add grant_rooms rows");
+  assert.equal((db.prepare("SELECT COUNT(*) n FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL").get(gid) as any).n, 0, "every usage of the revoked share is ended");
+});
+
+test("a revoked share gives back only the seats still held, and names only those rooms", async (t) => {
+  const s: any = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann");
+  const F = await ownerWithBot(s.base, "fay");
+  await shareWith(s.base, F, A); // F shares its Bot with A, so A may bring it into a room
+
+  const db = s.platform.db;
+  const join = (o: any, code: string, bots: string[]) => req(s.base, "POST", "/v1/face-rooms/join", o.owner.token, { code, bots });
+  const start = (room: string) => req(s.base, "POST", `/v1/face-rooms/${room}/start`, A.owner.token, {});
+  const leave = (o: any, room: string, bots: string[]) => req(s.base, "POST", `/v1/face-rooms/${room}/leave`, o.owner.token, { bots });
+  const memberOf = (room: string) => db.prepare("SELECT left_at FROM face_room_members WHERE room_id = ? AND bot_id = ?").get(room, F.bot.id) as any;
+  const usageOf = (room: string) => db.prepare("SELECT ended_at FROM grant_rooms WHERE grant_id = ? AND room_id = ?").get(gid, room) as any;
+  const gid = (db.prepare(`SELECT id FROM grants WHERE capability = 'chat.public' AND grantor_owner = ? AND grantee_bot = ? AND room_id IS NULL ORDER BY created_at`).get(F.owner_id, A.bot.id) as any).id;
+
+  // Room 1: its usage is already closed by the sweep that ran when the bringer left, but the guest is still seated.
+  const seated = (await join(A, "616161", [A.bot.id, F.bot.id])).body.room_id;
+  assert.equal((await start(seated)).status, 200);
+  assert.equal((await leave(A, seated, [A.bot.id])).status, 200);
+  // Room 2: the guest's own owner walked it out, so this usage is history and its seat is already gone.
+  const gone = (await join(A, "626262", [A.bot.id, F.bot.id])).body.room_id;
+  assert.equal((await start(gone)).status, 200);
+  assert.equal((await leave(F, gone, [F.bot.id])).status, 200);
+
+  const closedUsage = usageOf(seated)?.ended_at;
+  assert.ok(closedUsage, "the room sweep ends the usage when the bringer leaves");
+  assert.ok(usageOf(gone)?.ended_at, "the room sweep ends the usage when the guest leaves");
+  assert.equal(memberOf(seated)?.left_at, null);
+  const goneLeftAt = memberOf(gone)?.left_at;
+  const goneEndedAt = usageOf(gone)?.ended_at;
+  assert.notEqual(goneLeftAt, null);
+
+  const res = await req(s.base, "DELETE", `/v1/bots/${F.bot.id}/grants/${gid}`, F.owner.token);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  console.log(`# revoked: rooms_removed ${JSON.stringify(res.body.rooms_removed)} | seated left_at ${memberOf(seated)?.left_at ? "set" : "null"} | gone left_at ${memberOf(gone)?.left_at === goneLeftAt ? "unchanged" : "changed"}`);
+
+  assert.deepEqual(res.body.rooms_removed, [seated], "only the room that still seated the guest is given back");
+  assert.notEqual(memberOf(seated)?.left_at, null, "the seat the revoked share still held is gone");
+  assert.equal(memberOf(gone)?.left_at, goneLeftAt, "a seat already given back must not be touched a second time");
+  assert.equal(usageOf(gone)?.ended_at, goneEndedAt, "a usage already ended keeps its end time");
+  const audits = (s.platform.audit.db.prepare("SELECT data FROM audit_events WHERE action = 'grant.revoked' AND subject = ?").all(gid) as any[])
+    .map((r) => JSON.parse(r.data)).filter((d) => Array.isArray(d.rooms));
+  assert.equal(audits.length, 1, "one grant.revoked row carries the rooms this revoke gave back");
+  assert.deepEqual(audits[0].rooms, [seated], "the audit names only the room whose seat was really removed");
+  assert.equal((db.prepare("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL").get(gone) as any).n, 1, "the other room keeps its own seat");
 });
