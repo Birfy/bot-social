@@ -4432,9 +4432,10 @@ export class Platform {
   /**
    * The minting owner withdraws the ticket: nobody new can join with it, and the homes that already joined keep
    * their seats (owner decision 2026-10-24) unless `endClaims` (the room is gone) ends every claim's reach too.
-   * Ending the claims also withdraws the minting owner's other live links for that room, since the room is gone
-   * for all of them; a ticket another home minted for the same `room_id` is not the caller's to end.
-   * A claiming owner releases its own claim, which ends the reach that claim wrote.
+   * Ending the claims covers every claim the minting home seated in that room, including one made through a link
+   * it had already withdrawn plain, since a withdrawal keeps the seats it made; the live links go with it, while
+   * a ticket already withdrawn keeps its own timestamp. A ticket another home minted for the same `room_id` is not
+   * the caller's to end. A claiming owner releases its own claim, which ends the reach that claim wrote.
    */
   revokeLocalRoomInvite(p: Principal, ticketRaw: unknown, opts: { endClaims?: boolean } = {}) {
     const ownerId = p.ownerId;
@@ -4446,16 +4447,17 @@ export class Platform {
     if (minter && invite.revoked_at && !opts.endClaims) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
     const now = this.ts();
     const ended = minter ? (opts.endClaims ? this.localInviteClaims(invite) : []) : [own!];
-    // `end_claims` means the room itself is gone: every other live link this same home minted for the room goes
-    // with it, and the claims they seated end through the same release + grant path below. Another home's ticket
-    // for the same `room_id` is left alone (`mintLocalRoomInvite` does not check the room's home, so each owner's
-    // authority reaches only the tickets it minted).
+    // `end_claims` means the room itself is gone, so the sweep is by claim: every claim this same home seated in
+    // the room ends through the release + grant path below, whether the link that seated it is still live or was
+    // withdrawn plain (a plain withdrawal keeps the seats it made). The tickets go with it too, but a ticket
+    // already withdrawn keeps its own `revoked_at`. Another home's ticket for the same `room_id` is left alone
+    // (`mintLocalRoomInvite` does not check the room's home, so each owner's authority reaches only its own tickets).
     const siblings = minter && opts.endClaims
-      ? this.all("SELECT * FROM local_room_invites WHERE room_id = ? AND created_by_owner_id = ? AND ticket <> ? AND revoked_at IS NULL", invite.room_id, ownerId, invite.ticket)
+      ? this.all("SELECT * FROM local_room_invites WHERE room_id = ? AND created_by_owner_id = ? AND ticket <> ?", invite.room_id, ownerId, invite.ticket)
       : [];
     const siblingClaims = siblings.flatMap((s: any) => this.localInviteClaims(s).map((c: any) => ({ invite: s, claim: c })));
     if (minter && !invite.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, invite.ticket);
-    for (const s of siblings) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, s.ticket);
+    for (const s of siblings) if (!s.revoked_at) this.run("UPDATE local_room_invites SET revoked_at = ? WHERE ticket = ?", now, s.ticket);
     for (const c of ended) {
       // The acting owner ends these: the claimer on a self-release (it may come back), the minter on `end_claims`
       // (the room is gone, so nothing can come back to it).
