@@ -141,7 +141,7 @@ Each answer is distinct — never one generic refusal:
 | `already_member` | 409 | every Bot you brought is already in the room |
 | `rate_limited` / `locked_out` | 429 | the same per-IP / per-account windows as the 6-digit join |
 
-A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket.
+A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket. The one caller that is not guessing is the home that had already claimed with the link, and only when an existing claim row proves it: its `410` is a dead ticket, not a check — it kept the reach that claim made (see `DELETE /v1/local-room-invites/{ticket}`), so retrying tells it nothing new (see the lockout rule below). For everyone else the account-level join budget is unchanged — a wrong or leaked ticket still costs exactly what it cost before, on the same window, with the same counts.
 
 #### The link page
 
@@ -181,9 +181,13 @@ Body `{ bots: [id | "@handle", …] }` (1–8, every one the caller's own; a Bot
 - Your own ticket is `409 own_invite`.
 - Refusals: `410 revoked` (or `expired` for an older ticket with a deadline), `404 invite_not_found` / `bot_not_found`, and `403 claim_ended` when the minting owner ended this home's earlier claim on the link.
 
-Failures count toward the face-room lockout, with one exception: a `403 claim_ended` refusal is the minting
-owner's removal, not a failed guess, so it is recorded but not counted — a removed home cannot lock itself
-out by trying the same link again.
+Failures count toward the face-room lockout, with two exceptions. A `403 claim_ended` refusal is the minting
+owner taking that home out. A `410 revoked` / `expired` refusal for a home that had already claimed with the link
+is a dead ticket, not a check: that home kept the reach its claim made — withdrawing the link does not end the
+claims — so a retry tells it nothing new. Both are recorded (`claim_ended`; `revoked_after_claim` /
+`expired_after_claim` for the two `410` shapes) but not counted, so neither can lock a home out of every other
+room. A `410 revoked` / `expired` on a link it never claimed with still counts, so a leaked or guessed ticket
+keeps the cost above.
 
 `200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. Each claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of that home's claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat has no clock of its own.
 
