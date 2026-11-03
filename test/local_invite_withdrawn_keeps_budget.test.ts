@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ownerWithBot, startServer } from "./helpers.js";
 
-// A home that joined with a local-room link is removed when the minting owner withdraws the whole link (or when
-// an older ticket's deadline passes). Its retries then answer `410 revoked` / `410 expired`, and every one of
-// them is a real door check, so it spends the same account join budget as a guessed ticket. #336 already gave
-// the sibling refusal `claim_ended` an explicit exception: a removed home must not lock itself out by trying the
-// same link again. Both refusal shapes are the same removal for a home the link had already seated, so that home
-// keeps its budget, while a caller that never held a claim on the ticket keeps counting
-// (docs/FACE_ROOMS.md:144, the anti-enumeration window).
+// A home that joined with a local-room link keeps its reach when the minting owner withdraws the whole link, and
+// an older ticket's deadline passing does not take it out either: withdrawing a link ends its claims, not the
+// seats they made. Its retries then answer `410 revoked` / `410 expired` — a dead ticket, not a door check — so
+// those `410`s are recorded but do not spend the account join budget a guessed ticket pays. #336 gave the sibling
+// refusal `claim_ended` that exception for the minting owner's removal; these two are a dead end rather than a
+// removal, for a home the link had already seated, so that home keeps its budget, while a caller that never held
+// a claim on the ticket keeps counting (docs/FACE_ROOMS.md:144, the anti-enumeration window).
 
 const ROOM = "session-3f5c1d20-9b47-4a6e-8c11-2d4e6f8a0b13";
 
@@ -32,7 +32,7 @@ const joinByNumber = (base: string, o: any, code: string) => req(base, "POST", "
 const outcomes = (s: any, ownerId: string) =>
   (s.platform.db.prepare("SELECT outcome, COUNT(*) n FROM face_room_attempts WHERE owner_id = ? GROUP BY outcome").all(ownerId) as any[]);
 
-test("a home removed by withdrawing the link keeps its join budget and still reaches an unrelated room", async (t) => {
+test("a home whose link was withdrawn keeps its join budget and still reaches an unrelated room", async (t) => {
   const s = await startServer();
   t.after(s.stop);
   const A = await ownerWithBot(s.base, "ann");
@@ -45,7 +45,7 @@ test("a home removed by withdrawing the link keeps its join budget and still rea
   // An unrelated room seats a home that was never in this one, so the door itself is not the variable below.
   assert.equal((await joinByNumber(s.base, C, "313131")).status, 200);
 
-  // The minting owner withdraws the link: B's retries are the removed home's retries.
+  // The minting owner withdraws the link: B's retries are the withdrawn home's retries.
   const rv = await revoke(s.base, A, m.body.ticket);
   assert.ok(rv.status === 204 || rv.status === 200, JSON.stringify(rv.body));
 
@@ -60,10 +60,10 @@ test("a home removed by withdrawing the link keeps its join budget and still rea
   const peer = await ownerWithBot(s.base, "dee");
   assert.equal((await joinByNumber(s.base, peer, "727272")).status, 200);
 
-  // The removed home must still reach a room it was never in.
+  // The home whose link died must still reach a room it was never in.
   const unrelated = await joinByNumber(s.base, B, "727272");
-  assert.equal(unrelated.status, 200, `a removed home must still reach an unrelated room; got ${unrelated.status} ${JSON.stringify(unrelated.body)}`);
-  // The removal is still recorded: the attempt keeps a row, it just is not a failed guess.
+  assert.equal(unrelated.status, 200, `a withdrawn home must still reach an unrelated room; got ${unrelated.status} ${JSON.stringify(unrelated.body)}`);
+  // The refusal is still recorded: the attempt keeps a row, it just is not a failed guess.
   assert.ok(outcomes(s, B.owner_id).some((r: any) => r.outcome === "revoked_after_claim"), JSON.stringify(outcomes(s, B.owner_id)));
 });
 
