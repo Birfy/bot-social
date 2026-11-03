@@ -1982,13 +1982,16 @@ export class Platform {
     );
   }
 
-  /** Access grant held by one of my bots on someone else's bot (relationship grants only). */
+  /** Access grant held by one of my bots on someone else's bot (relationship grants only). Only `chat.public` counts:
+   *  bringing a Bot into a room seats the pair and `ensurePairRoomGrant` writes the room grants back with
+   *  `DEFAULT_CAPABILITIES`, so a share that kept only profile/freebusy must not open that door. */
   private accessGrantTo(ownerId: string, myBotIds: string[], targetBotId: string) {
     if (!myBotIds.length) return null;
     const marks = myBotIds.map(() => "?").join(",");
     const rows = this.all(`SELECT g.*, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner, r.status AS rel_status
       FROM grants g JOIN relationships r ON r.id = g.relationship_id
-      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL`,
+      WHERE g.grantee_bot IN (${marks}) AND g.grantor_owner != ? AND g.status = 'active' AND r.status = 'active' AND g.room_id IS NULL
+        AND g.capability = 'chat.public'`,
       ...myBotIds, ownerId).filter((g: any) => this.grantedBotOf(g, g) === targetBotId);
     // #23: a grant whose access is reply-only comes last; the caller refuses it (bot_not_shared).
     const full = rows.find((g: any) => !this.replyOnlyAccess(g.relationship_id, g.grantor_owner, g.grantee_bot));
