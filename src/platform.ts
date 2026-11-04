@@ -1980,6 +1980,15 @@ export class Platform {
     return [...out];
   }
 
+  /** A seat in a face room is paid for by the share that can bring a Bot in: `chat.public`, never a reply-only row.
+   *  `accessGrantTo` seats a guest on that row alone, and the room's own grants are written back for every capability,
+   *  so ending a calendar or profile share must not take a seat. The record alone cannot say this — the old sibling
+   *  loop wrote a `grant_rooms` row for every share of the bringer, and those rows are still in the database — so the
+   *  judgement belongs here, where a seat is actually given back. */
+  private grantPaysForSeat(g: any) {
+    return g.capability === "chat.public" && !g.reply_only;
+  }
+
   /** End room usages for these grants and remove the granted bot from those rooms when we added it. */
   private endGrantRooms(grantIds: string[], actor: string): string[] {
     if (!grantIds.length) return [];
@@ -1999,11 +2008,14 @@ export class Platform {
       // not take it. It is the same bound the lapse door uses in its pre-filter. A usage still open short-circuits
       // it: it has not handed its seat over yet, so the seat it sees is its own.
       // A usage already ended whose room no longer seats the Bot is history and stays out of `removed`.
+      // A row this share never paid for is not a claim on the seat: it is closed with the share (it is history once
+      // the share ends), but no seat is given back. See `grantPaysForSeat`: this covers rows written before that rule.
+      const pays = this.grantPaysForSeat(g);
       const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ?", gid);
       for (const u of usages) {
         const live = !u.ended_at;
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
-        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id
+        const seated = pays && !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id
           && (live || member.joined_at <= u.ended_at);
         // Nothing to give back and no seat to take: the room closed, or its owner already walked the Bot out.
         if (!live && !seated) continue;
@@ -2015,7 +2027,10 @@ export class Platform {
         }
         removed.push(u.room_id);
       }
-      if (g.room_id) {
+      // The room's own row is the same door: `ensurePairRoomGrant` writes one per default capability, and
+      // `DELETE /v1/grants/{id}` reaches them. Only the room's `chat.public` row pays for the seat; ending its
+      // profile row ends that grant alone and leaves the guest where the chat row still lets it stay.
+      if (g.room_id && pays) {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);
         if (member) {
           this.removeFaceMember(g.room_id, member);
@@ -3727,7 +3742,10 @@ export class Platform {
     }
     for (const x of bring) {
       if (!x.viaGrant) continue;
-      const siblings = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL",
+      // Only the chat share pays for this seat: `accessGrantTo` brought the Bot in on that row, and the calendar or
+      // profile rows of the same bundle are not uses of the room. Recording them was what let ending one of them
+      // take the seat away (the judgement in `endGrantRooms` still covers the rows that fix left behind).
+      const siblings = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND capability = 'chat.public' AND IFNULL(reply_only, 0) = 0",
         x.viaGrant.relationship_id, x.viaGrant.grantor_owner, x.viaGrant.grantee_bot);
       const ids = siblings.length ? siblings.map((s: any) => s.id) : [x.viaGrant.id];
       for (const gid of ids) this.recordGrantRoomUse(gid, roomId, `owner:${actorOwnerId}`, [actorOwnerId, x.bot.owner_id]);
