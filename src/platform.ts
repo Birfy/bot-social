@@ -1961,12 +1961,17 @@ export class Platform {
       // Every usage row is checked, not only the open ones: the room's own sweep closes a usage when a member
       // leaves, and that used to hide the seat from this door. A usage this door finds already ended is not a seat
       // given back — the seat may still be there (its bringer left first), so look at the room before deciding.
+      // An ended usage can only claim a seat that was already there when it ended: a seat that arrived later was
+      // made by the share that let the Bot back in, and this end reaching the older row through the lineage must
+      // not take it. It is the same bound the lapse door uses in its pre-filter. A usage still open short-circuits
+      // it: it has not handed its seat over yet, so the seat it sees is its own.
       // A usage already ended whose room no longer seats the Bot is history and stays out of `removed`.
       const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ?", gid);
       for (const u of usages) {
         const live = !u.ended_at;
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
-        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id;
+        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id
+          && (live || member.joined_at <= u.ended_at);
         // Nothing to give back and no seat to take: the room closed, or its owner already walked the Bot out.
         if (!live && !seated) continue;
         if (live) this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
