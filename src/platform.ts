@@ -3319,6 +3319,13 @@ export class Platform {
       summary = body?.summary ?? null;
     }
     assert(["agreed", "declined", "abandoned"].includes(outcome), 400, "invalid_request", "outcome must be agreed|declined|abandoned");
+    // A chat whose own clock ran out is closed by the clock, never as agreed: settle the expiry first, through the one
+    // path every other door into a lapsed chat takes, then refuse it as closed. The refused close contributes nothing
+    // of its own — no outcome, no summary; the row lands `closed`/`expired` and the cards hanging off it died as
+    // `conversation_expired`.
+    this.materializeExpiry(c);
+    assert(!(c.status === "closed" && c.outcome === "expired"), 409, "invalid_state", "conversation is closed (expired)");
+    // A chat closed any other way keeps the answer this door always gave.
     assert(c.status !== "closed", 409, "conversation_closed");
     this.run("UPDATE conversations SET status = 'closed', outcome = ?, summary = ?, updated_at = ? WHERE id = ?", outcome, summary, nowIso(), convId);
     // The invitee's decision about this chat's booking outlives the chat, so that one draft is kept; the subquery is
