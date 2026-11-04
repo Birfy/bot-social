@@ -3794,7 +3794,7 @@ export class Platform {
     // open usage with nothing to end them; the pre-flipped case is its own test (case 4). The clock is compared in
     // SQL so this stays one indexed-shaped query per face-room door, not a table walk in JS.
     const rows = this.all("SELECT id, status FROM grants WHERE status IN ('active','expired') AND room_id IS NULL AND expires_at IS NOT NULL AND expires_at <= ?", this.ts());
-    const ended: string[] = [];
+    const ended = new Set<string>();
     for (const g of rows) {
       if (g.status === "active") this.run("UPDATE grants SET status = 'expired' WHERE id = ? AND status = 'active'", g.id);
       // A share can still be holding a seat after the room's own sweep closed its usage row (the seat is kept on
@@ -3804,13 +3804,26 @@ export class Platform {
       // share's — this is a pre-filter, never a policy. When the usage has already ended, only a seat that was
       // already there before it ended can be this share's; a seat that arrived later belongs to the share that let
       // it back in (the same grantor/grantee bot/capability row is swept separately).
-      if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
-          AND (u.ended_at IS NULL OR EXISTS (SELECT 1 FROM face_room_members m
-            WHERE m.room_id = u.room_id AND m.left_at IS NULL AND m.added_by_owner_id != m.owner_id
-              AND m.joined_at <= u.ended_at))
-          LIMIT 1`, g.id)) ended.push(g.id);
+      // A renewal writes a new row and leaves the seat on the row it replaced, so the seat this lapse must give back
+      // sits on an ancestor: the lineage is asked row by row, with the same window on every row, and an ended ancestor
+      // can claim no seat that arrived after it ended.
+      // A line that was renewed again after this row lapsed still has a live row: that row carries the share, so this
+      // row's lapse is not the line's lapse and no seat is handed over (a seat this row made is the line's, exactly
+      // like one an ancestor made). The check is new in this rule: before it, the sweep took the row it saw.
+      const self = this.get("SELECT * FROM grants WHERE id = ?", g.id);
+      const lineLive = !!self && !!this.get(`SELECT 1 FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ?
+          AND capability = ? AND IFNULL(room_id,'') = ? AND status = 'active' AND created_at > ? LIMIT 1`,
+        self.relationship_id, self.grantor_owner, self.grantee_bot, self.capability, self.room_id ?? "", self.created_at);
+      if (lineLive) continue;
+      for (const id of this.shareLineage([g.id])) {
+        if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
+            AND (u.ended_at IS NULL OR EXISTS (SELECT 1 FROM face_room_members m
+              WHERE m.room_id = u.room_id AND m.left_at IS NULL AND m.added_by_owner_id != m.owner_id
+                AND m.joined_at <= u.ended_at))
+            LIMIT 1`, id)) ended.add(id);
+      }
     }
-    if (ended.length) this.endGrantRooms(ended, "platform");
+    if (ended.size) this.endGrantRooms([...ended], "platform");
   }
   private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
