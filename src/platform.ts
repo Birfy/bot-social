@@ -4413,7 +4413,12 @@ export class Platform {
         this.faceRecordAttempt(ownerId, ip, "local", "already_claimed");
         return { ok: false, status: 409, code: "already_claimed", message: "this invite was already used for other Bots of yours" };
       }
-      if (invite.created_by_owner_id === ownerId) return { ok: false, status: 409, code: "own_invite", message: "this is your own invite link" };
+      // A home holding its own link is not guessing: the refusal is recorded under its own label but, like
+      // `already_member`, not counted — testing your own ticket must not lock you out of every other room.
+      if (invite.created_by_owner_id === ownerId) {
+        this.faceRecordAttempt(ownerId, ip, "local", "own_invite");
+        return { ok: false, status: 409, code: "own_invite", message: "this is your own invite link" };
+      }
       // A claim the minting owner ended removed this home from the room, so the link must not seat it again.
       // A claim this home released itself is the other case, and it may come back (the upsert below clears it).
       const ended = this.localInviteEndedClaim(invite, ownerId);
