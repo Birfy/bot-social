@@ -130,3 +130,25 @@ test("an unscoped free/busy grant is returned whole", async () => {
     assert.deepEqual(fb.results[B.bot.id].busy, [{ start: inDays(2, 2), end: inDays(2, 3) }], "a grant with no hours shares the block as it is");
   } finally { await stop(); }
 });
+
+test("a long block is cut to the queried window, not to its own length", async () => {
+  const { base, stop } = await startServer();
+  try {
+    const { A, B } = await friends(base, { freebusy: true });
+    // One entry that begins years before the query and ends years after it: the answer may only cover the queried
+    // days, one piece per day, rather than one piece per day of the entry's own lifetime.
+    await addEntry(B.owner, "2020-01-01T00:00:00.000Z", "2030-01-01T00:00:00.000Z", "a decade-long block");
+    const cid = (await A.bot.startConversation(B.bot.id, meetingIntent())).conversation_id;
+    const win = queryWindow();
+    const fb = await A.bot.freebusy(cid, [B.bot.id], win);
+    const busy: { start: string; end: string }[] = fb.results[B.bot.id].busy;
+    const ws = Date.parse(win.start), we = Date.parse(win.end);
+    assert.ok(busy.length <= 4, `a decade-long block yields at most one piece per queried day, got ${busy.length}`);
+    for (const b of busy) {
+      const s = Date.parse(b.start), e = Date.parse(b.end);
+      assert.ok(s >= ws && e <= we, `${b.start}..${b.end} lies outside the queried window`);
+      assert.equal(localMinutes(s, TZ), OPEN, "each piece starts at the grant's opening time");
+      assert.equal(localMinutes(e, TZ), CLOSE, "each piece ends at the grant's closing time");
+    }
+  } finally { await stop(); }
+});

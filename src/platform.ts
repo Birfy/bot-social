@@ -3542,9 +3542,11 @@ export class Platform {
       // The grant's `hours` bounds the answer, not only the suggestions: a block wholly outside the window is not
       // shared, and one that crosses a boundary is cut there — dropping a crossing block whole would tell the peer
       // that its inside part is free. `window_days` above narrows the query; this narrows the blocks it returns.
+      // Each block is first cut to the queried span, so a block that lasts longer than the query yields one piece
+      // per queried day, never one per day of its own lifetime: the answer cannot grow with the entry's length.
       const rows = s < e ? this.busyOf(peerB.owner_id, s, e) : [];
       const busy = hrs
-        ? rows.flatMap((x) => clipToDailyHours(Date.parse(x.start), Date.parse(x.end), hrs, tz).map(([bs, be]) => ({ start: new Date(bs).toISOString(), end: new Date(be).toISOString() })))
+        ? rows.flatMap((x) => clipToDailyHours(Math.max(Date.parse(x.start), s), Math.min(Date.parse(x.end), e), hrs, tz).map(([bs, be]) => ({ start: new Date(bs).toISOString(), end: new Date(be).toISOString() })))
         : rows.map((x) => ({ start: x.start, end: x.end }));
       results[sub] = { busy, grant_id: g.id, window: { start: new Date(s).toISOString(), end: new Date(Math.max(s, e)).toISOString() }, scope: g.scope, redacted: ["title", "location", "attendees"] };
       busy.forEach((b) => busyAll.push([Date.parse(b.start), Date.parse(b.end)]));
