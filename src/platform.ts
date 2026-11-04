@@ -2054,9 +2054,10 @@ export class Platform {
   /**
    * A line waiting in a room its sender no longer sits in can never be approved: the delivery door refuses it as
    * `not_a_member`, so the card would wait out its 24-hour clock, and until then the owner's only way out is to
-   * reject it. A seat also ends when the share that brought the Bot in is revoked, so settle those lines the moment
-   * the share takes the seat away — and only those: this Bot's own face-room lines in this room, never another
-   * member's card, another room's card, or an action card.
+   * reject it. A seat ends when the Bot leaves, when an owner takes a guest seat back, when the share that brought
+   * the Bot in is revoked, and when a home member is revoked, so settle those lines the moment the seat goes — and
+   * only those: this Bot's own face-room lines in this room, never another member's card, another room's card, or
+   * an action card.
    */
   private settleHeldRoomCards(roomId: string, botId: string) {
     this.cancelPendingFor(
@@ -3839,6 +3840,13 @@ export class Platform {
       announced = true;
     }
     this.faceCloseIfEmpty(roomId);
+    // The seat ends here for every door that takes one (a Bot's own `leave`, an owner taking a guest seat back, a
+    // revoked share or home member). A line this Bot left waiting in this room can never be delivered: the
+    // delivery door refuses it as `not_a_member`, so the card would sit in its owner's queue for 24 hours and then
+    // die unexplained. Settle it the moment the seat goes. Ordered after the empty-room door on purpose: the last
+    // member out closes the room, and `faceCloseIfEmpty` already settles every line there as `room_closed`, so a
+    // second decision is never written.
+    this.settleHeldRoomCards(roomId, m.bot_id);
     this.faceEmitLeadHandover(roomId, leadBefore, announced);
   }
   private endRoomGrantsForBots(roomId: string, botIds: string[]) {
