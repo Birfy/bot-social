@@ -1953,7 +1953,7 @@ export class Platform {
   private grantRoomPublic(roomId: string) {
     const room = this.get("SELECT id, status, expires_at, started_at FROM face_rooms WHERE id = ?", roomId);
     if (!room) return { room_id: roomId, status: "unknown" };
-    return { room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at };
+    return { room_id: room.id, status: room.status, expires_at: this.faceRoomDeadline(room), started_at: room.started_at };
   }
 
   private activeGrantRooms(grantId: string) {
@@ -3875,14 +3875,26 @@ export class Platform {
     this.run("UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL", now, roomId);
     this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)", now, roomId);
   }
+  /**
+   * The matching-window deadline is the candidate's alone: `open` means the number is void, and the room then ends
+   * when its last member leaves, not when the window ran out. Rows written before a start was cleared still hold the
+   * old time, so an `open` room reports no deadline whatever its row says.
+   */
+  private faceRoomDeadline(room: { status: string; expires_at: string | null }): string | null {
+    if (room.status === "open") return null;
+    return room.expires_at || null;
+  }
   private faceStartRoom(room: any, reason: "expired" | "start", actor?: { actor: string; botId?: string }) {
     if (room.status !== "candidate") return;
     const now = this.ts();
     // Claim the promotion with one conditional UPDATE, so two doors that both read `candidate` cannot both promote
     // it, and a room started by its owner already cannot be flipped again by a sweep that read the older row.
+    // The matching window dies with the number it belonged to: `expires_at` is NOT NULL, so the column's own "no
+    // deadline" value is the empty string (the same convention `local_room_invites` uses) and every reader maps it
+    // to null.
     const claim = reason === "expired"
-      ? this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ? AND status = 'candidate' AND expires_at <= ?", now, room.id, now)
-      : this.run("UPDATE face_rooms SET status = 'open', started_at = ?, code = NULL WHERE id = ? AND status = 'candidate'", now, room.id);
+      ? this.run("UPDATE face_rooms SET status = 'open', started_at = ?, expires_at = '', code = NULL WHERE id = ? AND status = 'candidate' AND expires_at <= ?", now, room.id, now)
+      : this.run("UPDATE face_rooms SET status = 'open', started_at = ?, expires_at = '', code = NULL WHERE id = ? AND status = 'candidate'", now, room.id);
     if (!claim.changes) return;
     this.run("DELETE FROM face_room_codes WHERE room_id = ?", room.id);
     const text = reason === "expired"
@@ -4086,7 +4098,7 @@ export class Platform {
     const after = opts.after !== undefined ? opts.after : floor;
     const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
     return {
-      room_id: room.id, status: room.status, expires_at: room.expires_at, started_at: room.started_at, closed_at: room.closed_at,
+      room_id: room.id, status: room.status, expires_at: this.faceRoomDeadline(room), started_at: room.started_at, closed_at: room.closed_at,
       created_by: creatorOwner ? { owner_name: peerOwnerName(creatorOwner, "Owner") } : null,
       created_by_me: Boolean(creator && viewer.ownerId === creator),
       ...this.faceLeadFields(roomId),
@@ -4754,7 +4766,7 @@ export class Platform {
       GROUP BY r.id ORDER BY r.created_at DESC`, ...args);
     return {
       rooms: rows.map((r: any) => ({
-        room_id: r.id, status: r.status, expires_at: r.expires_at, started_at: r.started_at, member_count: r.member_count,
+        room_id: r.id, status: r.status, expires_at: this.faceRoomDeadline(r), started_at: r.started_at, member_count: r.member_count,
         my_bots: this.all(`SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
           NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
           OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`,
