@@ -2027,17 +2027,19 @@ export class Platform {
         }
         removed.push(u.room_id);
       }
-      // The room's own row is the same door: `ensurePairRoomGrant` writes one per default capability, and
-      // `DELETE /v1/grants/{id}` reaches them. Only the room's `chat.public` row pays for the seat; ending its
-      // profile row ends that grant alone and leaves the guest where the chat row still lets it stay.
+      // The room's own row is addressed to the other members: it did not bring the grantor's own Bot in, and
+      // `DELETE /v1/grants/{id}` reaches it. Only a guest seat is given back here — the same judgement the usage
+      // rows above make, where a seat its own owner took is not the grant's to take. Ending the host's row ends
+      // that row alone: the seat, the room's other grants and `removed` stay untouched.
       if (g.room_id && pays) {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);
-        if (member) {
+        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id;
+        if (seated) {
           this.removeFaceMember(g.room_id, member);
           this.settleHeldRoomCards(g.room_id, granted);
           this.endRoomGrantsForBots(g.room_id, [granted]);
+          if (!removed.includes(g.room_id)) removed.push(g.room_id);
         }
-        if (!removed.includes(g.room_id)) removed.push(g.room_id);
       }
     }
     void actor;
