@@ -95,4 +95,17 @@ export class BotClient {
     return this.signed("/v1/grant-requests", "grant.request", { relationship_id, capability, scope, reason });
   }
   events(since = 0) { return this.req("GET", `/v1/events?since=${since}`); }
+
+  // Face rooms: a Bot enters on the same 6-digit number its owner uses, and every line it writes is a draft its
+  // owner approves. The door authenticates the Bot's own token, so nothing here is signed as an envelope.
+  faceRooms() { return this.req("GET", "/v1/face-rooms"); }
+  faceRoom(room_id: string, after?: number) {
+    const tail = after !== undefined ? `?after=${encodeURIComponent(String(after))}` : "";
+    return this.req("GET", `/v1/face-rooms/${encodeURIComponent(room_id)}${tail}`);
+  }
+  joinFaceRoom(code: string) { return this.req("POST", "/v1/face-rooms/join", { code, bots: [this.id] }); }
+  draftFaceRoomMessage(room_id: string, payload: { text: string; mentions?: string[] }) {
+    return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/messages`, { ...payload, bot_id: this.id });
+  }
+  leaveFaceRoom(room_id: string) { return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/leave`, { bot_id: this.id }); }
 }
