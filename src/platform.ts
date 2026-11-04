@@ -1061,6 +1061,7 @@ export class Platform {
     // thing that decides if the owner's console may send as it (`custodialBot`). Never inferred from integration_type.
     return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at, EXISTS (SELECT 1 FROM bot_custody c WHERE c.bot_id = bots.id) AS custodial FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
       ...b, custodial: !!b.custodial, ...lookOf(b), webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
+      draft_budget: this.draftBudget(b.id),
     }));
   }
 
@@ -3017,6 +3018,18 @@ export class Platform {
   private draftsInLastHour(botId: string, hourAgo: number) {
     return this.get(`SELECT (SELECT COUNT(*) FROM messages WHERE sender_bot = ? AND created_ms > ?)
       + (SELECT COUNT(*) FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?) n`, botId, hourAgo, botId, hourAgo).n;
+  }
+
+  /** The same budget, read-only for the owner: the count the draft doors enforce, and how long until the oldest draft
+   *  leaves the window. `resets_in` is null when the window is empty, otherwise whole seconds in 0–3600. */
+  private draftBudget(botId: string) {
+    const now = this.nowMs(), hourAgo = now - 3600e3;
+    const used = this.draftsInLastHour(botId, hourAgo);
+    if (!used) return { used: 0, limit: LIMITS.ratePerBotPerHour, resets_in: null };
+    const { m } = this.get(`SELECT MIN(created_ms) m FROM (
+      SELECT created_ms FROM messages WHERE sender_bot = ? AND created_ms > ?
+      UNION ALL SELECT created_ms FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?)`, botId, hourAgo, botId, hourAgo);
+    return { used, limit: LIMITS.ratePerBotPerHour, resets_in: Math.min(3600, Math.max(0, Math.ceil((m + 3600e3 - now) / 1000))) };
   }
 
   /** `typedByOwner` is internal: set only by sendAsMember after typedByOwner() authorised it, never from the envelope or text. */
