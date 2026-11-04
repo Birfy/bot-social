@@ -2689,6 +2689,15 @@ export class Platform {
     const a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     assert(a, 404, "approval_not_found");
     assert(a.owner_id === ownerId, 403, "forbidden", "not your approval");
+    // A connector token decides only the owner's own default hold (README "Who may decide a hold"). A row that carries
+    // a finding of its own — `risk`, `attachment`, `policy` — or a face-room line standing in for the owner's Auto-send
+    // switch is the owner's, whatever the client thinks. A row that carries no hold at all keeps the old rule, so the
+    // connector does not lose the request cards it has always been able to decide. The refusal names no peer content:
+    // the connector already sees the card, not the line.
+    if (p.kind === "owner" && p.scope === "connector"
+      && a.hold_reason != null && !(a.kind === "outbound_message" && a.hold_reason === "blanket_outbound")) {
+      throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
+    }
     // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
     // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
