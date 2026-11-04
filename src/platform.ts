@@ -3731,13 +3731,14 @@ export class Platform {
     }
     this.faceEmitLeadHandover(roomId, leadBefore);
   }
-  /** Implicit room-scoped grants between the newcomers and everyone already in the room (other owners). */
-  private syncFaceRoomAccess(roomId: string, newcomers: any[], actorOwnerId: string, bring: { bot: any; viaGrant?: any }[]) {
+  /** Implicit room-scoped grants between the newcomers and everyone already in the room (other owners).
+   *  `actorOwnerId` scopes the rows' owners; `actor` is who writes them (the joining caller, connector tag included). */
+  private syncFaceRoomAccess(roomId: string, newcomers: any[], actorOwnerId: string, actor: string, bring: { bot: any; viaGrant?: any }[]) {
     const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId);
     for (const nb of newcomers) {
       for (const em of members) {
         if (em.bot_id === nb.id || em.owner_id === nb.owner_id) continue;
-        this.ensurePairRoomGrant(roomId, nb, this.bot(em.bot_id), actorOwnerId);
+        this.ensurePairRoomGrant(roomId, nb, this.bot(em.bot_id), actor);
       }
     }
     for (const x of bring) {
@@ -3748,10 +3749,10 @@ export class Platform {
       const siblings = this.all("SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND room_id IS NULL AND capability = 'chat.public' AND IFNULL(reply_only, 0) = 0",
         x.viaGrant.relationship_id, x.viaGrant.grantor_owner, x.viaGrant.grantee_bot);
       const ids = siblings.length ? siblings.map((s: any) => s.id) : [x.viaGrant.id];
-      for (const gid of ids) this.recordGrantRoomUse(gid, roomId, `owner:${actorOwnerId}`, [actorOwnerId, x.bot.owner_id]);
+      for (const gid of ids) this.recordGrantRoomUse(gid, roomId, actor, [actorOwnerId, x.bot.owner_id]);
     }
   }
-  private ensurePairRoomGrant(roomId: string, a: any, b: any, actorOwnerId: string) {
+  private ensurePairRoomGrant(roomId: string, a: any, b: any, actor: string) {
     // Layer 2 of #111: the join doors already refuse a blocked pair, so this is the backstop for any path that
     // still arrives here (a seat sync, a claim). A block outlives the room it was made in; never rebuild its door.
     if (this.pairRelationships(a.id, b.id).some((r: any) => r.status === "blocked")) return;
@@ -3763,7 +3764,6 @@ export class Platform {
     const now = nowIso();
     this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, requester_scope, target_scope)
       VALUES (?,?,?,?,?,'room',?,?,?,?,?,'bot','bot')`, id, a.id, b.id, a.owner_id, b.owner_id, "face room", "[]", "[]", now, now);
-    const actor = `owner:${actorOwnerId}`;
     for (const cap of DEFAULT_CAPABILITIES) {
       this.insertGrant(id, a.owner_id, b.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
       this.insertGrant(id, b.owner_id, a.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
@@ -3828,7 +3828,7 @@ export class Platform {
     this.run("UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL", now, roomId);
     this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)", now, roomId);
   }
-  private faceStartRoom(room: any, reason: "expired" | "start", actor?: { ownerId: string; botId?: string }) {
+  private faceStartRoom(room: any, reason: "expired" | "start", actor?: { actor: string; botId?: string }) {
     if (room.status !== "candidate") return;
     const now = this.ts();
     // Claim the promotion with one conditional UPDATE, so two doors that both read `candidate` cannot both promote
@@ -3843,7 +3843,7 @@ export class Platform {
       : "The room is now open. The number is no longer valid.";
     const ev = this.faceInsertEvent(room.id, "room.started", actor?.botId ?? null, { text, reason, trust: "platform" });
     this.faceEmitMembers(room.id, "face_room.started", { room_id: room.id, event_id: ev.id, event_cursor: ev.seq, text, reason, trust: "platform" });
-    this.audit.append(actor ? `owner:${actor.ownerId}` : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
+    this.audit.append(actor ? actor.actor : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
   }
   /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
   advanceFaceRooms() {
@@ -4053,6 +4053,7 @@ export class Platform {
    */
   joinFaceRoom(p: Principal, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
+    const actor = this.actorOf(p);
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
     const bring = this.faceBotsToBring(p, body);
     const bots = bring.map((x) => x.bot);
@@ -4090,7 +4091,7 @@ export class Platform {
         this.run("INSERT INTO face_rooms (id, code, status, created_at, expires_at, created_by_owner_id) VALUES (?,?,?,?,?,?)", id, code, "candidate", now, expires, ownerId);
         this.run("INSERT INTO face_room_codes (code, room_id, expires_at) VALUES (?,?,?)", code, id, expires);
         this.faceAddMembers(id, bots, ownerId);
-        this.syncFaceRoomAccess(id, bots, ownerId, bring);
+        this.syncFaceRoomAccess(id, bots, ownerId, actor, bring);
         this.faceRecordAttempt(ownerId, ip, code, "created");
         return { ok: true, created: true, roomId: id, seated: bots.map((b) => b.id) };
       }
@@ -4116,14 +4117,14 @@ export class Platform {
       }
       if (newcomers.length) {
         this.faceAddMembers(room.id, newcomers, ownerId);
-        this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
+        this.syncFaceRoomAccess(room.id, newcomers, ownerId, actor, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
       }
       this.faceRecordAttempt(ownerId, ip, code, newcomers.length ? "joined" : "rejoined");
       return { ok: true, created: false, roomId: room.id, seated: newcomers.map((n: any) => n.id) };
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     // The row goes to every member, so a join never carries the address: a room-mate would read it.
@@ -4131,8 +4132,8 @@ export class Platform {
     // request took (`out.seated`), not every Bot it brought: one already in the room sat down again, so it
     // is not a join. A repeat join that seats nobody writes no row; its "rejoined" attempt already records it.
     const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: out.seated };
-    if (out.created) this.audit.append(`owner:${ownerId}`, "face_room.created", out.roomId, this.faceOwnerIds(out.roomId), joinData);
-    else if (out.seated.length) this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    if (out.created) this.audit.append(actor, "face_room.created", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    else if (out.seated.length) this.audit.append(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -4202,7 +4203,7 @@ export class Platform {
     const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
     this.run("INSERT INTO face_room_invites (ticket, room_id, created_by_owner_id, created_by_bot, expires_at, created_at) VALUES (?,?,?,?,?,?)",
       ticket, roomId, p.ownerId, p.kind === "bot" ? p.botId : null, expiresAt, this.ts());
-    this.audit.append(`owner:${p.ownerId}`, "face_room.invite_minted", roomId, this.faceOwnerIds(roomId), { expires_at: expiresAt, ttl_seconds: Math.round(this.faceRoomLimits.inviteTtlMs / 1000) });
+    this.audit.append(this.actorOf(p), "face_room.invite_minted", roomId, this.faceOwnerIds(roomId), { expires_at: expiresAt, ttl_seconds: Math.round(this.faceRoomLimits.inviteTtlMs / 1000) });
     return { room_id: roomId, ticket, url: this.faceInviteUrl(ticket), expires_at: expiresAt };
   }
 
@@ -4221,7 +4222,7 @@ export class Platform {
     const revokedAt = invite.revoked_at ?? this.ts();
     if (!invite.revoked_at) {
       this.run("UPDATE face_room_invites SET revoked_at = ? WHERE ticket = ?", revokedAt, ticket);
-      this.audit.append(`owner:${p.ownerId}`, "face_room.invite_revoked", roomId, this.faceOwnerIds(roomId), {});
+      this.audit.append(this.actorOf(p), "face_room.invite_revoked", roomId, this.faceOwnerIds(roomId), {});
     }
     return { room_id: roomId, revoked: true, revoked_at: revokedAt };
   }
@@ -4263,6 +4264,7 @@ export class Platform {
   /** Join an established room with a ticket: writes the room grants, then confirms (Bot Social #30/#31). */
   joinFaceRoomByInvite(p: Principal, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
+    const actor = this.actorOf(p);
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
     const bring = this.faceBotsToBring(p, body);
     const bots = bring.map((x) => x.bot);
@@ -4312,19 +4314,19 @@ export class Platform {
         return { ok: false, status: 404, code: "invite_not_found", message: "this invite link is not valid", lockout: this.faceMaybeLockout(ownerId, ip) };
       }
       this.faceAddMembers(room.id, newcomers, ownerId);
-      this.syncFaceRoomAccess(room.id, newcomers, ownerId, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
+      this.syncFaceRoomAccess(room.id, newcomers, ownerId, actor, bring.filter((x) => newcomers.some((n) => n.id === x.bot.id)));
       this.run("UPDATE face_room_invites SET used_count = used_count + 1, last_used_at = ?, last_used_by_owner_id = ? WHERE ticket = ?", this.ts(), ownerId, ticket);
       this.faceRecordAttempt(ownerId, ip, "invite", "invited");
       return { ok: true, roomId: room.id, seated: newcomers.map((n: any) => n.id) };
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     // Same rule on the ticket path: every member reads this row, so no address on it, and it names only
     // the seats this request took.
-    if (out.seated.length) this.audit.append(`owner:${ownerId}`, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: out.seated, invite: true });
+    if (out.seated.length) this.audit.append(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: out.seated, invite: true });
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -4443,7 +4445,7 @@ export class Platform {
     this.run("INSERT INTO local_room_invites (ticket, room_id, name, created_by_owner_id, inviter_bot, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
       ticket, roomId, name, ownerId, inviter.id, expiresAt, this.ts());
     // The ticket is a bearer credential: it is returned once and never written to the audit log.
-    this.audit.append(`owner:${ownerId}`, "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
+    this.audit.append(this.actorOf(p), "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
     return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: null, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
   }
 
@@ -4471,6 +4473,7 @@ export class Platform {
    */
   claimLocalRoomInvite(p: Principal, ticketRaw: unknown, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
+    const actor = this.actorOf(p);
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
     const refs = p.kind === "bot" ? [p.botId] : this.normalizeBotRefs(body);
     assert(refs.length >= 1, 400, "invalid_request", "bots: name at least one of your Bots to bring");
@@ -4555,17 +4558,17 @@ export class Platform {
       this.run(`INSERT INTO local_room_invite_claims (ticket, owner_id, bots, claimed_at, released_at, ended_by_owner_id) VALUES (?,?,?,?,NULL,NULL)
         ON CONFLICT (ticket, owner_id) DO UPDATE SET bots = excluded.bots, claimed_at = excluded.claimed_at, released_at = NULL, ended_by_owner_id = NULL`, invite.ticket, ownerId, JSON.stringify(wanted), now);
       const inviter = this.bot(invite.inviter_bot);
-      for (const b of bots) this.ensureLocalPairGrant(invite.room_id, inviter, b, ownerId);
+      for (const b of bots) this.ensureLocalPairGrant(invite.room_id, inviter, b, actor);
       this.faceRecordAttempt(ownerId, ip, "local", "claimed");
       return { ok: true, invite: this.localInviteOf(invite.ticket), fresh: true };
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(`owner:${ownerId}`, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     const invite = out.invite;
-    if (out.fresh) this.audit.append(`owner:${ownerId}`, "local_room.invite_claimed", invite.room_id, [ownerId, invite.created_by_owner_id], { inviter_bot: invite.inviter_bot, bots: wanted });
+    if (out.fresh) this.audit.append(actor, "local_room.invite_claimed", invite.room_id, [ownerId, invite.created_by_owner_id], { inviter_bot: invite.inviter_bot, bots: wanted });
     const inviter = this.bot(invite.inviter_bot);
     return {
       ...this.localInviteView(invite, ownerId),
@@ -4616,7 +4619,7 @@ export class Platform {
       this.endLocalPairGrants(sibling.room_id, sibling.inviter_bot, claim.bots);
     }
     const claimers = [...ended.map((c) => c.owner_id), ...siblingClaims.map(({ claim }) => claim.owner_id)];
-    this.audit.append(`owner:${ownerId}`, minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...claimers], minter ? { ended_claims: claimers.length } : {});
+    this.audit.append(this.actorOf(p), minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...claimers], minter ? { ended_claims: claimers.length } : {});
   }
 
   /** The minting owner ends one home's claim (it removed that guest): that home's reach in the room ends, the link stays. `home` is the home's handle or one of its claimed Bots' handles. */
@@ -4632,10 +4635,10 @@ export class Platform {
     // The minter ends it: recorded, so the same link does not seat that home again.
     this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", this.ts(), p.ownerId, invite.ticket, claim.owner_id);
     this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claim.bots);
-    this.audit.append(`owner:${p.ownerId}`, "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
+    this.audit.append(this.actorOf(p), "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
   }
 
-  private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actorOwnerId: string) {
+  private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actor: string) {
     // Layer 2 of #111, the local-room twin of `ensurePairRoomGrant`: never rebuild a blocked pair's door.
     if (this.pairRelationships(guest.id, inviter.id).some((r: any) => r.status === "blocked")) return;
     const hit = this.get(`SELECT g.id FROM grants g JOIN relationships r ON r.id = g.relationship_id
@@ -4646,7 +4649,6 @@ export class Platform {
     const now = nowIso();
     this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, requester_scope, target_scope)
       VALUES (?,?,?,?,?,'room',?,?,?,?,?,'bot','bot')`, id, guest.id, inviter.id, guest.owner_id, inviter.owner_id, "local room", "[]", "[]", now, now);
-    const actor = `owner:${actorOwnerId}`;
     for (const cap of DEFAULT_CAPABILITIES) {
       this.insertGrant(id, inviter.owner_id, guest.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
       this.insertGrant(id, guest.owner_id, inviter.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
@@ -4723,7 +4725,7 @@ export class Platform {
     this.db.transaction(() => {
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
       if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
-      if (room.status === "candidate") this.faceStartRoom(room, "start", { ownerId: viewer.ownerId, botId: viewer.botIds[0] });
+      if (room.status === "candidate") this.faceStartRoom(room, "start", { actor: this.actorOf(p), botId: viewer.botIds[0] });
     }).immediate();
     return this.faceRoomView(roomId, viewer);
   }
@@ -4755,7 +4757,7 @@ export class Platform {
     // A leave that removes nobody writes nothing: it is not a leave, and a row saying it happened would put an
     // owner who never sat in the room into that room's audit trail. The same rule a join that seats nobody
     // follows for `face_room.joined`; the response and the room state are unchanged.
-    if (leaving.length) this.audit.append(`owner:${viewer.ownerId}`, "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
+    if (leaving.length) this.audit.append(this.actorOf(p), "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
     if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
@@ -4783,7 +4785,7 @@ export class Platform {
     }
     if ((room.lead_bot_id ?? null) !== botId) {
       this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", viewer.botIds[0] ?? null)).immediate();
-      this.audit.append(`owner:${viewer.ownerId}`, "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
+      this.audit.append(this.actorOf(p), "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
     }
     return this.faceRoomView(roomId, viewer);
   }
