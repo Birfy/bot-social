@@ -840,13 +840,70 @@ const auditLine = (e) => {
   const dir = [typeof d.auto_approve_face_rooms === "boolean" ? `auto-approve ${d.auto_approve_face_rooms ? "on" : "off"}` : "", typeof d.sensitive_terms === "number" ? plural(d.sensitive_terms, "sensitive word", "sensitive words") : ""].filter(Boolean).join(" · ");
   return dir ? `${line} · ${esc(dir)}` : line;
 };
-PAGES.audit = async (v) => {
+/** The families the page filters by; the room doors write their rows under `face_room.`, so `room` stands for that. */
+const AUDIT_FAMILIES = [["", "Everything"], ["message", "Messages"], ["grant", "Grants"], ["room", "Rooms"], ["approval", "Approvals"]];
+const AUDIT_PREFIX = { room: "face_room" };
+/** The rows the page shows, out of the ones it already fetched: an action family and a day range, both optional. An
+ *  action this build has no family for is kept when no family is chosen — the log is evidence, not a menu. Days are
+ *  compared where the page already displays them, so a row never slides into another day between the two. */
+const auditRows = (events, { action = "", from = "", to = "" } = {}) => {
+  const prefix = action ? AUDIT_PREFIX[action] || action : "";
+  return (events || []).filter((e) => {
+    const name = String(e.action || "");
+    if (prefix && name !== prefix && !name.startsWith(prefix + ".")) return false;
+    const day = e.ts ? localDate(e.ts) : "";
+    if (from && day < from) return false;
+    if (to && day > to) return false;
+    return true;
+  });
+};
+/** The rows as the server sent them, one JSON object per line: `seq`, `hash` and `prev_hash` are what makes the file
+ *  evidence rather than a screenshot. An empty log is an empty file, not a lone blank line. */
+const auditJsonl = (rows) => {
+  const lines = (rows || []).map((e) => JSON.stringify(e));
+  return lines.length ? lines.join("\n") + "\n" : "";
+};
+/** Hand the browser a text file built in memory: the download is the page's own rows, nothing refetched. */
+function downloadText(name, text, type = "application/json") {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  if (document.body && document.body.appendChild) document.body.appendChild(a);
+  a.click();
+  if (a.remove) a.remove();
+  URL.revokeObjectURL(a.href);
+}
+/** The filter the page is showing; the router calls the page without one, and a control re-renders with the new one. */
+let auditFilter = { action: "", from: "", to: "" };
+PAGES.audit = async (v, filter) => {
+  if (filter) auditFilter = { action: filter.action || "", from: filter.from || "", to: filter.to || "" };
   const { events, chain } = await api("GET", "/v1/audit-events?limit=1000");
-  const rows = events.slice().reverse().slice(0, 300);
+  const rows = auditRows(events.slice().reverse(), auditFilter).slice(0, 300);
+  const options = AUDIT_FAMILIES.map(([k, t]) => `<option value="${k}"${k === auditFilter.action ? " selected" : ""}>${t}</option>`).join("");
   v.innerHTML = `<h1>Audit log</h1><p class="sub">Everything that happened on your account and your Bots, newest first (latest 300). The log is append-only and hash-chained, so tampering is detectable.</p>
     <div class="card row">${chain.ok ? `<span class="pill ok">✓ Verified</span><span class="mut">${esc(plural(chain.count, "record", "records"))} about you, verified against the tamper-evident chain</span>` : `<span class="pill bad">✗ Verification failed</span><span class="mut">The chain does not verify (at record #${esc(chain.broken_at)}). Tell the server operator.</span>`}</div>
-    ${rows.length ? `<div class="list">${rows.map((e) => `<div class="it" style="align-items:flex-start"><div class="grow"><div>${auditLine(e)}</div><div class="mut">${fmt(e.ts)}</div>
-      <details><summary class="mut" style="cursor:pointer">Details</summary><div class="struct">${esc(`#${e.seq} · ${e.action}\nactor ${e.actor}${e.subject ? `\nsubject ${e.subject}` : ""}\n${JSON.stringify(e.data, null, 1)}\nhash ${e.hash}\nprev ${e.prev_hash}`)}</div></details></div></div>`).join("")}</div>` : `<div class="empty">No records yet</div>`}`;
+    <div class="row" style="flex-wrap:wrap;margin:10px 0 6px">
+      <select id="audit-action" style="max-width:200px">${options}</select>
+      <input id="audit-from" type="date" value="${esc(auditFilter.from)}" title="From this day">
+      <input id="audit-to" type="date" value="${esc(auditFilter.to)}" title="To this day">
+      <button class="btn s" id="audit-clear">Clear</button>
+      <span class="grow"></span>
+      <button class="btn s" id="audit-jsonl" title="Download the rows on screen as JSON Lines">Download JSONL</button>
+    </div>
+    ${rows.length ? `<div class="list">${rows.map((e) => `<div class="it" data-seq="${esc(e.seq)}" style="align-items:flex-start"><div class="grow"><div>${auditLine(e)}</div><div class="mut">${fmt(e.ts)}</div>
+      <details><summary class="mut" style="cursor:pointer">Details</summary><div class="struct">${esc(`#${e.seq} · ${e.action}\nactor ${e.actor}${e.subject ? `\nsubject ${e.subject}` : ""}\n${JSON.stringify(e.data, null, 1)}\nhash ${e.hash}\nprev ${e.prev_hash}`)}</div></details></div></div>`).join("")}</div>` : `<div class="empty">No records match this filter</div>`}`;
+  // The controls may not be in the document at all (a page rendered off-screen still has to finish), so every
+  // handler is attached only where the element exists.
+  const pick = (sel) => $(sel);
+  const action = pick("#audit-action"), from = pick("#audit-from"), to = pick("#audit-to");
+  const apply = () => PAGES.audit(v, { action: action ? action.value : auditFilter.action, from: from ? from.value : auditFilter.from, to: to ? to.value : auditFilter.to });
+  if (action) action.onchange = apply;
+  if (from) from.onchange = apply;
+  if (to) to.onchange = apply;
+  const clear = pick("#audit-clear");
+  if (clear) clear.onclick = () => PAGES.audit(v, { action: "", from: "", to: "" });
+  const jsonl = pick("#audit-jsonl");
+  if (jsonl) jsonl.onclick = () => downloadText(`audit-${localDate(new Date().toISOString())}.jsonl`, auditJsonl(rows), "application/x-ndjson");
 };
 
 const WH_ST = { delivered: ["Delivered", "ok"], failed: ["Failed", "bad"], sending: ["Sending", "warn"], rate_limited: ["Rate limited · retrying later", "warn"], cancelled: ["Cancelled", "gray"] };
