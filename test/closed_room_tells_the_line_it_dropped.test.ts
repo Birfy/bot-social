@@ -57,14 +57,16 @@ test("a room that closes with a waiting line tells its Bot that the line was dro
   t.after(s.stop);
   const { A, B } = await friends(s.base);
   const roomId = await openRoom(s, "707301", A, B);
-  const line = await heldLine(s, roomId, A, "a line the closed room drops");
+  const gone = await heldLine(s, roomId, A, "a line the sender's own leave settles");
 
-  // The sender walks out first. A seat ending on its own leaves the line held (that is the pinned behaviour of
-  // `test/edited_payload_whitelist.test.ts` case h), so the line is still there when the room closes.
+  // The sender walks out first: its seat ends, so its own waiting line goes with it, and that is the leave's
+  // business rather than the closure's. Nothing is left pending for the room to drop when it closes.
   const left = await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, A.owner.token, {});
   assert.equal(left.status, 200, JSON.stringify(left.body));
-  assert.equal(approvalRow(s, line.approvalId).status, "pending", "a line whose sender left is still held");
-  assert.equal((await decidedEvents(A.bot, line.approvalId)).length, 0, "and nothing was announced yet");
+  assert.equal(approvalRow(s, gone.approvalId).decision, "room_left", "the seat took its own waiting line with it");
+
+  // A line written by the member who stays is still waiting when that member is the last one to walk out.
+  const line = await heldLine(s, roomId, B, "a line the closed room drops");
 
   // The last member leaves too: the room closes with the line still waiting.
   const last = await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, B.owner.token, {});
@@ -77,7 +79,7 @@ test("a room that closes with a waiting line tells its Bot that the line was dro
   assert.equal(draftRow(s, line.messageId).status, "cancelled", "the line behind the card is settled with it");
 
   // Every other way a card dies tells its Bot; the room closing must not be the silent one.
-  const told = await decidedEvents(A.bot, line.approvalId);
+  const told = await decidedEvents(B.bot, line.approvalId);
   assert.equal(told.length, 1, "the Bot that wrote the dropped line hears about it exactly once");
   assert.equal(told[0].decision, "cancelled");
   assert.equal(told[0].kind, "face_room_message");

@@ -196,7 +196,7 @@ test("g: an edit refused by DLP writes nothing, and the unedited approval after 
   assert.equal("mentions" in editedEv, false, "an edited line carries no mentions");
 });
 
-test("h: a face-room line refused for a sender who left writes nothing, the mention list included", async (t) => {
+test("h: a face-room line whose sender left is settled, and a later decision writes nothing, the mention list included", async (t) => {
   const s = await startServer();
   t.after(s.stop);
   const A = await ownerWithBot(s.base, "frla");
@@ -212,12 +212,13 @@ test("h: a face-room line refused for a sender who left writes nothing, the ment
   assert.deepEqual(await cardMentions(), [B.handle], "the card shows the @");
   const events = async () => ((await B.owner.req("GET", `/v1/face-rooms/${roomId}`)) as any).events.filter((e: any) => e.type === "room.message");
 
-  // The sender leaves while its line waits: the delivery door refuses it, and must not have rewritten the draft.
+  // The sender leaves while its line waits: the seat goes, so the held line is settled with it and can never be
+  // approved. The decision door refuses the settled card instead of delivering as a Bot that is no longer seated.
   await A.owner.req("POST", `/v1/face-rooms/${roomId}/leave`, { bots: [A.bot.id] });
-  await expectApiError(A.owner.req("POST", `/v1/approvals/${d.approval_id}/decision`, { decision: "approved_with_edits", edited_payload: { text: "rewritten line" } }), 409, "not_a_member");
-  assert.equal(row("SELECT mentions FROM face_room_drafts WHERE id = ?", d.message_id).mentions, before, "a not_a_member refusal leaves the mention list exactly as it was");
-  assert.equal(row("SELECT status FROM face_room_drafts WHERE id = ?", d.message_id).status, "pending_approval", "the line is still held");
-  assert.equal(row("SELECT status FROM approvals WHERE id = ?", d.approval_id).status, "pending", "the card is still pending");
-  assert.deepEqual(await cardMentions(), [B.handle], "the card still shows the @");
+  await expectApiError(A.owner.req("POST", `/v1/approvals/${d.approval_id}/decision`, { decision: "approved_with_edits", edited_payload: { text: "rewritten line" } }), 409, "invalid_state");
+  assert.equal(row("SELECT mentions FROM face_room_drafts WHERE id = ?", d.message_id).mentions, before, "a refused decision leaves the mention list exactly as it was");
+  assert.equal(row("SELECT status FROM face_room_drafts WHERE id = ?", d.message_id).status, "cancelled", "the line went with the seat");
+  assert.equal(row("SELECT status FROM approvals WHERE id = ?", d.approval_id).status, "cancelled", "the card is settled, not waiting");
+  assert.equal(row("SELECT decision FROM approvals WHERE id = ?", d.approval_id).decision, "room_left", "the card records why it was settled");
   assert.equal((await events()).length, 0, "no member was told of a line");
 });
