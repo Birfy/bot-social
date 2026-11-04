@@ -795,13 +795,18 @@ export class Platform {
    *
    * A file a card is still waiting on is not the upload clock's to delete: the sweep leaves a bound row alone while
    * the message it belongs to is `pending_approval`, because that card may still be approved and the peer may still
-   * download the bytes. Only a waiting card gets this stay -- a rejected, cancelled or expired line unbinds its file
+   * download the bytes. Only a card that can still be decided gets this stay: a card past its own `expires_at` is
+   * not waiting for anything, even on an instance whose queue nobody reads (`expireStale` has not run), so the file
+   * is collected instead of being held forever. A rejected, cancelled or expired line unbinds its file
    * (`freeDraftAttachments`) and a delivered one keeps its binding on the TTL it always had.
    */
   cleanupAttachments(now = Date.now()) {
+    const at = new Date(now).toISOString();
     const r = this.run(`DELETE FROM attachments WHERE expires_at <= ?
       AND (message_id IS NULL OR NOT EXISTS (
-        SELECT 1 FROM messages m WHERE m.id = attachments.message_id AND m.status = 'pending_approval'))`, new Date(now).toISOString()) as any;
+        SELECT 1 FROM messages m JOIN approvals a ON a.id = m.approval_id
+        WHERE m.id = attachments.message_id AND m.status = 'pending_approval'
+          AND a.status = 'pending' AND a.expires_at > ?))`, at, at) as any;
     return r?.changes ?? 0;
   }
 
