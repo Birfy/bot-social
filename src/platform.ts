@@ -1563,7 +1563,7 @@ export class Platform {
     assert(g.grantor_owner === ownerId, 403, "forbidden", "only the grantor can revoke");
     this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", nowIso(), grantId);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
-    this.endGrantRooms([grantId], `owner:${ownerId}`);
+    this.endGrantRooms(this.shareLineage([grantId]), `owner:${ownerId}`);
     this.settleCardsForEndedShare([g]);
     this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked" });
@@ -1590,7 +1590,7 @@ export class Platform {
     const ids = bundle.map((x: any) => x.id);
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
-    const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
     this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
@@ -1629,7 +1629,7 @@ export class Platform {
     const ids = bundle.map((x: any) => x.id as string);
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
-    const rooms = this.endGrantRooms(ids, `owner:${ownerId}`);
+    const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
     this.audit.append(`owner:${ownerId}`, "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
@@ -1931,6 +1931,22 @@ export class Platform {
     this.audit.append(actor, "grant.used_in_room", grantId, owners, { room_id: roomId });
   }
 
+  /** The rows a share was renewed from: `insertGrant` marks the live row `superseded` and writes a new one, and the
+   *  old row keeps the room usages that made its guest seat. Ending the current row must hand those rows over too,
+   *  or the seat outlives the share. Only rows created strictly before it are ancestors — a row created later is
+   *  the live share itself, and its seats are not this end's to take. */
+  private shareLineage(grantIds: string[]): string[] {
+    const out = new Set(grantIds);
+    for (const gid of grantIds) {
+      const g = this.get("SELECT * FROM grants WHERE id = ?", gid);
+      if (!g) continue;
+      for (const p of this.all(`SELECT id FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ?
+          AND capability = ? AND IFNULL(room_id,'') = ? AND status IN ('superseded','expired') AND created_at < ? AND id != ?`,
+        g.relationship_id, g.grantor_owner, g.grantee_bot, g.capability, g.room_id ?? "", g.created_at, gid)) out.add(p.id);
+    }
+    return [...out];
+  }
+
   /** End room usages for these grants and remove the granted bot from those rooms when we added it. */
   private endGrantRooms(grantIds: string[], actor: string): string[] {
     if (!grantIds.length) return [];
@@ -1945,12 +1961,17 @@ export class Platform {
       // Every usage row is checked, not only the open ones: the room's own sweep closes a usage when a member
       // leaves, and that used to hide the seat from this door. A usage this door finds already ended is not a seat
       // given back — the seat may still be there (its bringer left first), so look at the room before deciding.
+      // An ended usage can only claim a seat that was already there when it ended: a seat that arrived later was
+      // made by the share that let the Bot back in, and this end reaching the older row through the lineage must
+      // not take it. It is the same bound the lapse door uses in its pre-filter. A usage still open short-circuits
+      // it: it has not handed its seat over yet, so the seat it sees is its own.
       // A usage already ended whose room no longer seats the Bot is history and stays out of `removed`.
       const usages = this.all("SELECT * FROM grant_rooms WHERE grant_id = ?", gid);
       for (const u of usages) {
         const live = !u.ended_at;
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", u.room_id, granted);
-        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id;
+        const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id
+          && (live || member.joined_at <= u.ended_at);
         // Nothing to give back and no seat to take: the room closed, or its owner already walked the Bot out.
         if (!live && !seated) continue;
         if (live) this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
@@ -2045,7 +2066,7 @@ export class Platform {
       // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
       this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true });
     })();
-    if (endedShares.length) this.endGrantRooms(endedShares, `owner:${ownerId}`);
+    if (endedShares.length) this.endGrantRooms(this.shareLineage(endedShares), `owner:${ownerId}`);
     this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status });
   }
