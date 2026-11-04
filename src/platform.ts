@@ -2490,7 +2490,8 @@ export class Platform {
       // The overview is the one read that keeps a lapsed grant: the owner must see it ended and be able to renew it
       // from the card. `/v1/relationships` (and every reach check) keeps the default read, which drops it.
       const grants = this.grantsFor(r.id, { includeExpired: true });
-      const convs = this.all("SELECT id, status, outcome, intent, turn_count, max_turns, created_at, updated_at FROM conversations WHERE relationship_id = ? ORDER BY updated_at DESC", r.id);
+      // `expires_at` is read for the computed state only: it is never handed to the client here.
+      const convs = this.all("SELECT id, status, outcome, intent, turn_count, max_turns, created_at, updated_at, expires_at FROM conversations WHERE relationship_id = ? ORDER BY updated_at DESC", r.id);
       const lastMsg = this.get("SELECT MAX(COALESCE(delivered_at, created_at)) t FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?)", r.id)?.t ?? null;
       const last = convs[0];
       const times = [r.updated_at, last?.updated_at, lastMsg].filter(Boolean).sort();
@@ -2504,7 +2505,7 @@ export class Platform {
           granted_to_me: grants.filter((g) => g.grantee_bot === selected.id).map((g) => ({ capability: g.capability, scope: g.scope, expires_at: g.expires_at, status: g.status })),
         },
         conversation_count: convs.length,
-        last_conversation: last ? { conversation_id: last.id, status: last.status, outcome: last.outcome, intent: J(last.intent).type, summary: J(last.intent).summary, turn: { count: last.turn_count, max: null }, updated_at: last.updated_at } : null,
+        last_conversation: last ? { conversation_id: last.id, ...this.reportedConvState(last), intent: J(last.intent).type, summary: J(last.intent).summary, turn: { count: last.turn_count, max: null }, updated_at: last.updated_at } : null,
         last_activity_at: times[times.length - 1] ?? null,
       };
     });
@@ -2903,6 +2904,16 @@ export class Platform {
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: c.id, outcome: "expired", trust: "platform", summary: null });
   }
 
+  /** What a read reports for a chat: a row whose own clock ran out is closed/expired even on an instance where nothing
+   *  has touched it yet, because `materializeExpiry` only runs on a write path. The read is computed and never writes
+   *  the row -- a console that lists a lapsed chat as Active is the reason this exists. A closed row keeps the outcome
+   *  it was closed with (agreed, declined, expired). */
+  private reportedConvState(c: any) {
+    return c.status !== "closed" && c.expires_at && Date.parse(c.expires_at) < Date.now()
+      ? { status: "closed", outcome: "expired" }
+      : { status: c.status, outcome: c.outcome };
+  }
+
   /** Refuse only a chat an owner stopped; a closed chat is not a pause, and a pre-removal paused_limit resumes on use. */
   private assertNotPaused(c: any) {
     if (c.status === "paused_limit") this.resumeConversation(c, "platform", { reason: "turn_limit_removed" });
@@ -3260,6 +3271,10 @@ export class Platform {
     const c = this.conv(convId);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
     assert(owners.includes(ownerId), 403, "forbidden");
+    // A chat whose clock ran out is closed, whatever the row still says: settle it here (a POST may write) and refuse
+    // it before `resumeConversation` can flip it back to open, announce a resume or write an extend to the audit.
+    this.materializeExpiry(c);
+    assert(c.status !== "closed", 409, "invalid_state", `conversation is closed (${c.outcome})`);
     assert(["paused_limit", "paused_loop", "paused_stop", "open", "awaiting_approval"].includes(c.status), 409, "invalid_state", `conversation is ${c.status}`);
     void body;
     this.resumeConversation(c, `owner:${ownerId}`, { resumed_from: c.status });
@@ -3313,7 +3328,7 @@ export class Platform {
     const rows = p.kind === "owner"
       ? this.all("SELECT c.* FROM conversations c WHERE c.initiator_bot IN (SELECT id FROM bots WHERE owner_id = ?) OR c.peer_bot IN (SELECT id FROM bots WHERE owner_id = ?) ORDER BY c.created_at DESC", p.ownerId, p.ownerId)
       : this.all("SELECT * FROM conversations WHERE initiator_bot = ? OR peer_bot = ? ORDER BY created_at DESC", p.botId, p.botId);
-    return rows.map((c) => ({ conversation_id: c.id, status: c.status, outcome: c.outcome, intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: null }, created_at: c.created_at, updated_at: c.updated_at }));
+    return rows.map((c) => ({ conversation_id: c.id, ...this.reportedConvState(c), intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: null }, created_at: c.created_at, updated_at: c.updated_at }));
   }
 
   /** #57: the room a conversation is bound to, when its door is a room relationship; null for a 1:1 conversation. */
@@ -3349,7 +3364,7 @@ export class Platform {
     // 1:1 send on a room chat — that route resolves `activeRelationship` and would land the line in another thread.
     const roomId = this.roomOfConversation(c);
     return {
-      conversation_id: c.id, room_id: roomId, status: c.status, outcome: c.outcome, summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
+      conversation_id: c.id, room_id: roomId, ...this.reportedConvState(c), summary: c.summary, intent: J(c.intent), turn: { count: c.turn_count, max: null },
       initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), messages: msgs, actions,
       // #57: a conversation bound to a room reports that room's capabilities, not the friendship's; 1:1 is unchanged.
       effective_capabilities: this.effectiveCaps(viewerBot, viewerBot === c.initiator_bot ? c.peer_bot : c.initiator_bot, J(c.intent).allowed_capabilities, roomId),
