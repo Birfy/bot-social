@@ -85,7 +85,7 @@ test("the note about a non-custodial key names the owner's own Bot, not the othe
   assert.match(page.note!, matcher(A.handle), "the sentence names the Bot whose signing key is in the owner's hands — the owner's own");
   assert.doesNotMatch(page.note!, matcher(B.handle), "it must not name the other side's Bot");
   assert.match(page.note!,
-    /signing key is in your hands, so the console cannot send as it — reply from your Bot's runtime, or turn on key custody on its details page and refresh\.$/,
+    /signing key is in your hands, so the console cannot send as it — reply from your Bot's runtime, or run the enable_custody tool in your owner MCP session \(read it back with custody_status\) to let Bot Social hold the key, then refresh\.$/,
     "and the rest of the sentence is unchanged");
 });
 
