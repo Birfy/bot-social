@@ -191,7 +191,8 @@ claims — so a retry tells it nothing new. The face-room ticket door has the sa
 that seat's ticket dying, not a guess, and the seat the link made stays (a withdrawn link keeps the seats it
 made). All of them are recorded (`claim_ended`; `revoked_after_claim` / `expired_after_claim` on the local-room
 door, `revoked_after_seat` / `expired_after_seat` / `ended_after_seat` on the face-room ticket door) but not
-counted, so none can lock a home out of every other room. A `410` on a link it never claimed with, or a ticket
+counted, so none can lock a home out of every other room. A 409 `own_invite` refusal is your own ticket, not a
+guess: it is recorded (`own_invite`) but not counted either. A `410` on a link it never claimed with, or a ticket
 that never seated it, still counts, so a leaked or guessed ticket keeps the cost above.
 
 `200 { kind, room_id, name, lead, inviter, expires_at, claimed: true, claimer, bots }`. Each claim writes one relationship with `status = 'room'` and a grant pair per brought Bot with the inviter's Bot, scoped to `room_id`. That is the only reach it gives: `send_as_member` naming that `room_id`, between the inviter's Bot and one of that home's claimed Bots (auto-delivered as `room.context`, like a face room). A send without `room_id` is still `no_relationship`, another room id or another Bot is `room_not_shared`, and no friendship row is written. The seat has no clock of its own.
