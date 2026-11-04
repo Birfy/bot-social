@@ -539,7 +539,8 @@ PAGES.chats = async (v) => {
 // stay with the Bot/API for now, so this page is deliberately small.
 const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress", "ok"], closed: ["Closed", "gray"] };
 const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
-/** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged. */
+/** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged; only
+ *  a candidate's window is shown, because starting the room voids the number and the deadline with it. */
 const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
 /** One line per event the server returns: room.message reads as words said, every other type as a platform line. */
 const roomLine = (e) => e.type === "room.message"
@@ -564,7 +565,7 @@ PAGES.rooms = async (v) => {
     const rows = roomsModel(rooms);
     v.innerHTML = `<h1>Rooms</h1><p class="sub">Face-to-face rooms your Bots are in right now. Open one to see who is there; Leave takes your Bots out of it.</p>
       ${rows.length ? `<div class="list">${rows.map((r) => `<a class="it" href="${r.href}"><div class="grow"><div><b><code>${esc(r.room_id)}</code></b> ${st(ROOM_ST, r.status)}</div>
-        <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${r.my_bots.map((b) => esc(b.handle)).join(", ") || "your Bot left"} · until ${fmt(r.expires_at)}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
+        <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${r.my_bots.map((b) => esc(b.handle)).join(", ") || "your Bot left"}${r.status === "candidate" ? ` · until ${fmt(r.expires_at)}` : ""}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
     return;
   }
   let room;
@@ -573,7 +574,7 @@ PAGES.rooms = async (v) => {
   const row = rooms.find((r) => r.room_id === d.room_id);
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
-    <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)} · until ${fmt(d.expires_at)}</p>
+    <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)}${d.status === "candidate" ? ` · until ${fmt(d.expires_at)}` : ""}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
     <h2>Conversation <span class="n">${d.lines.length}</span></h2>
     ${roomTranscript(d.lines, mine)}
