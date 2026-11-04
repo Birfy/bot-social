@@ -2698,6 +2698,18 @@ export class Platform {
       && a.hold_reason != null && !(a.kind === "outbound_message" && a.hold_reason === "blanket_outbound")) {
       throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
     }
+
+    // The same question asked of the text that would actually run. An action card is decided with its params as
+    // drafted or as edited here, and an edit can put a title on it that the owner's own scan flags: reading the hold
+    // off the row alone lets a clean card be booked with text the platform would have held. Owner logins keep every
+    // edit; only the connector's own decision is never the step that settles what a finding means.
+    if (p.kind === "owner" && p.scope === "connector" && a.kind === "action") {
+      const x = this.get("SELECT params, justification FROM actions WHERE id = ?", a.subject_id);
+      const effective = { ...J(x?.params), ...(body.decision === "approved_with_edits" && body.edited_params ? body.edited_params : {}) };
+      if (this.actionHold(a.owner_id, effective, x?.justification ?? null) != null) {
+        throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
+      }
+    }
     // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
     // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
@@ -3048,6 +3060,18 @@ export class Platform {
     return flags;
   }
 
+  /**
+   * The hold an action draft's own findings make, or `null` when it carries none. The draft door and a connector's
+   * decision read the same text through the same rule: a title or a justification that trips the owner's DLP terms or
+   * reads as an injection is the owner's to decide. `blanket_outbound` is an outbound line's default hold, not
+   * something a card stores, so it is written as none.
+   */
+  private actionHold(ownerId: string, params: any, justification: string | null): HoldReason | null {
+    const text = [params?.title, justification].filter(Boolean).join(" ");
+    const hold = holdReasonOf({ riskFlags: this.dlp(ownerId, { text }), injectionSuspected: detectInjection(text).suspected });
+    return hold === "blanket_outbound" ? null : hold;
+  }
+
   private pauseConversation(c: any, status: string, reason: string) {
     this.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), c.id);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
@@ -3319,7 +3343,7 @@ export class Platform {
     assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "DLP blocked this action draft");
     const id = newId("act");
     const reasons = [...def.reasons];
-    const aprId = this.createApproval(ownerId, "action", id, botId, convId, summary, reasons, dlpFlags, LIMITS.meetingApprovalTtlMs);
+    const aprId = this.createApproval(ownerId, "action", id, botId, convId, summary, reasons, dlpFlags, LIMITS.meetingApprovalTtlMs, undefined, this.actionHold(ownerId, params, pl.justification ?? null));
     this.run("INSERT INTO actions (id, conversation_id, actor_bot, action_type, params, justification, envelope, status, approval_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, pl.action_type, JSON.stringify(params), pl.justification ?? null, JSON.stringify(env), "pending_approval", aprId, nowIso());
     this.policyDecision(botId, convId, owners, "action.draft", "require_approval", reasons, { action_id: id, action_type: pl.action_type });
