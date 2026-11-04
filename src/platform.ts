@@ -790,10 +790,35 @@ export class Platform {
     return { attachment: refOf(row), message_id: m.id, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", content_base64: bytes.toString("base64") };
   }
 
-  /** Deletes expired files. Returns how many went. */
+  /**
+   * Deletes expired files. Returns how many went.
+   *
+   * A file a card is still waiting on is not the upload clock's to delete: the sweep leaves a bound row alone while
+   * the message it belongs to is `pending_approval`, because that card may still be approved and the peer may still
+   * download the bytes. Only a waiting card gets this stay -- a rejected, cancelled or expired line unbinds its file
+   * (`freeDraftAttachments`) and a delivered one keeps its binding on the TTL it always had.
+   */
   cleanupAttachments(now = Date.now()) {
-    const r = this.run("DELETE FROM attachments WHERE expires_at <= ?", new Date(now).toISOString()) as any;
+    const r = this.run(`DELETE FROM attachments WHERE expires_at <= ?
+      AND (message_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.id = attachments.message_id AND m.status = 'pending_approval'))`, new Date(now).toISOString()) as any;
     return r?.changes ?? 0;
+  }
+
+  /**
+   * Every ref a draft carries must still be a live file when its card is decided. The sweep keeps a waiting card's
+   * file, but nothing extends it: a file can outlive its own deadline under a card that waited longer, and a short
+   * `BOTSOCIAL_ATTACHMENT_TTL_DAYS` makes that the ordinary case. The caller refuses before its first write, so the
+   * card stays pending and the owner can reject it and upload the file again.
+   */
+  private assertDraftAttachmentsLive(payload: any) {
+    const refs = Array.isArray(payload?.attachments) ? payload.attachments : [];
+    for (const ref of refs) {
+      const row = this.get("SELECT expires_at FROM attachments WHERE id = ?", ref?.id);
+      assert(row, 404, "attachment_not_found", "an attachment on this line is gone; reject this card and upload the file again");
+      assert(Date.parse(row.expires_at) > Date.now(), 410, "attachment_expired",
+        "an attachment on this line has expired; reject this card and upload the file again");
+    }
   }
 
   // ================================================================ custodial signing keys
@@ -3026,6 +3051,8 @@ export class Platform {
     this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
       "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
+    // While this card waits it holds its files: the sweep skips a bound row until the card is decided
+    // (`cleanupAttachments`), so the bytes outlive the upload clock for exactly as long as the owner takes.
     for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
     this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
@@ -3160,6 +3187,10 @@ export class Platform {
     // so the owner can still decide it after a resume.
     this.assertReachable(recipient);
     let payload = J(m.payload);
+    // The refs were signed into the draft, and an edit cannot touch them (`editedPayloadOf`), so they are checked
+    // here, before any write. A file that died while its card waited is refused: the card stays pending, the peer
+    // hears nothing, and the owner can reject it and upload the file again.
+    this.assertDraftAttachmentsLive(payload);
     const edited = body.decision === "approved_with_edits" && body.edited_payload;
     // Validate the edit before any write: a refused edit must not already have cleared the draft's mention list.
     const patch = edited ? editedPayloadOf(body) : null;
