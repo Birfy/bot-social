@@ -1561,6 +1561,9 @@ export class Platform {
     const g = this.get("SELECT * FROM grants WHERE id = ?", grantId);
     assert(g, 404, "grant_not_found");
     assert(g.grantor_owner === ownerId, 403, "forbidden", "only the grantor can revoke");
+    // Only a live row can be ended. A `superseded` row is the history a renewal left behind: it still owns the room
+    // usages that paid for the guest's seat, so ending it would take a seat the live row is responsible for.
+    assert(g.status === "active", 409, "invalid_state", `the grant is ${g.status}`);
     this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", nowIso(), grantId);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
     this.endGrantRooms(this.shareLineage([grantId]), `owner:${ownerId}`);
