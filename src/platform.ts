@@ -2722,7 +2722,11 @@ export class Platform {
     }
     if (a.conversation_id) {
       const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
-      if (c) card.conversation = { conversation_id: c.id, intent: J(c.intent), status: c.status, turn: { count: c.turn_count, max: null } };
+      // The chat a card hangs off is reported the way the conversation read reports it (`reportedConvState`), not with
+      // the raw row: a chat past its own clock reads closed/expired here too, or the owner's pending list would keep
+      // calling it open while the chat page already says it expired. The read never writes the row -- the expiry is
+      // materialized by the next door that touches the chat, not by looking at a card.
+      if (c) card.conversation = { conversation_id: c.id, intent: J(c.intent), ...this.reportedConvState(c), turn: { count: c.turn_count, max: null } };
     }
     return card;
   }
