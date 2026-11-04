@@ -45,3 +45,51 @@ export function isoInTz(ms: number, tz: string): string {
 }
 
 export const overlaps = (a0: number, a1: number, b0: number, b1: number) => a0 < b1 && b0 < a1;
+
+/** The local calendar date of an instant in `tz`. */
+function localDate(ms: number, tz: string): { y: number; mo: number; d: number } {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { y: +p.year, mo: +p.month, d: +p.day };
+}
+
+/** Milliseconds `tz` is ahead of UTC at `ms`, read from the zone itself rather than a fixed table. */
+function zoneOffset(ms: number, tz: string): number {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000;
+}
+
+/** Epoch ms of a wall-clock time (a local calendar date plus minutes since local midnight) in `tz`. The offset is
+ *  read at the running instant, so a boundary on a DST-change day follows the clock: the wall time asked for is the
+ *  one returned, not a fixed number of hours after local midnight. */
+function instantOfWall(y: number, mo: number, d: number, minutes: number, tz: string): number {
+  const wall = Date.UTC(y, mo - 1, d, Math.floor(minutes / 60), minutes % 60);
+  let at = wall;
+  for (let i = 0; i < 4; i++) {
+    const next = wall - zoneOffset(at, tz);
+    if (next === at) break;
+    at = next;
+  }
+  return at;
+}
+
+/** The parts of `[start, end)` that fall inside a daily `hours` window in `tz`, in order. A block wholly outside is
+ *  dropped and one that crosses a boundary is cut there; a block covering several local days yields one piece per
+ *  day, because an overnight block is not one continuous busy slot once the window applies. `hours` is wall clock in
+ *  `tz` with no weekday rule, and a window that ends before it starts shares nothing at all. */
+export function clipToDailyHours(start: number, end: number, hours: [number, number], tz: string): [number, number][] {
+  const [open, close] = hours;
+  if (!(start < end) || !(open < close)) return [];
+  const first = localDate(start, tz);
+  const out: [number, number][] = [];
+  const maxDays = Math.ceil((end - start) / 86400e3) + 3;
+  for (let i = 0; i <= maxDays; i++) {
+    const day = new Date(Date.UTC(first.y, first.mo - 1, first.d + i));
+    const from = instantOfWall(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), open, tz);
+    const to = instantOfWall(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), close, tz);
+    const s = Math.max(start, from);
+    const e = Math.min(end, to);
+    if (s < e) out.push([s, e]);
+    if (to >= end) break;
+  }
+  return out;
+}
