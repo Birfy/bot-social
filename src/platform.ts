@@ -3764,8 +3764,15 @@ export class Platform {
     const ended: string[] = [];
     for (const g of rows) {
       if (g.status === "active") this.run("UPDATE grants SET status = 'expired' WHERE id = ? AND status = 'active'", g.id);
-      // Only a share that still holds a room usage has something to give back: repeating the sweep is a no-op.
-      if (this.get("SELECT 1 FROM grant_rooms WHERE grant_id = ? AND ended_at IS NULL LIMIT 1", g.id)) ended.push(g.id);
+      // A share can still be holding a seat after the room's own sweep closed its usage row (the seat is kept on
+      // purpose when the bringer leaves first), so this gate cannot ask whether the usage is open. It asks the
+      // rooms: is a guest seat still there in a room this share brought a Bot into? A share with nothing left to
+      // give back answers no and is not handed over again. `endGrantRooms` still decides which seats are this
+      // share's — this is a pre-filter, never a policy.
+      if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
+          AND (u.ended_at IS NULL OR EXISTS (SELECT 1 FROM face_room_members m
+            WHERE m.room_id = u.room_id AND m.left_at IS NULL AND m.added_by_owner_id != m.owner_id))
+          LIMIT 1`, g.id)) ended.push(g.id);
     }
     if (ended.length) this.endGrantRooms(ended, "platform");
   }
