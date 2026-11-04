@@ -535,10 +535,12 @@ PAGES.chats = async (v) => {
 };
 
 // ------------------------------------------------------------------ rooms
-// Face-to-face rooms: the console reads them and can leave one. Opening a room, changing roles and clearing it
-// stay with the Bot/API for now, so this page is deliberately small.
+// Face-to-face rooms: the console joins with a code, starts a waiting room and can leave one. Changing roles and
+// clearing a room stay with the Bot/API for now, so this page is deliberately small.
 const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress", "ok"], closed: ["Closed", "gray"] };
 const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
+/** A room code is exactly six digits; the check runs before any request, so a typo never reaches the API. */
+const roomCodeOk = (code) => /^\d{6}$/.test(String(code || "").trim());
 /** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged; only
  *  a candidate's window is shown, because starting the room voids the number and the deadline with it. */
 const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
@@ -563,9 +565,25 @@ PAGES.rooms = async (v) => {
   const rooms = await PAGES.rooms.list();
   if (!id) {
     const rows = roomsModel(rooms);
+    const myBots = me?.bots || [];
     v.innerHTML = `<h1>Rooms</h1><p class="sub">Face-to-face rooms your Bots are in right now. Open one to see who is there; Leave takes your Bots out of it.</p>
+      ${myBots.length ? `<div class="card"><b>Join a room</b>
+        <p class="mut" style="margin:4px 0 8px">Enter the 6-digit code the other owner gave you and pick which of your Bots joins.</p>
+        <div class="field"><label for="join-code">Room code</label><input id="join-code" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="off" spellcheck="false"></div>
+        <div class="field"><label for="join-bot">Join with</label><select id="join-bot">${myBots.map((b) => `<option value="${esc(b.id)}">@${esc(String(b.handle ?? "").replace(/^@/, ""))}</option>`).join("")}</select></div>
+        <div class="row"><button class="btn p" id="join-go">Join room</button><span id="join-err"></span></div></div>`
+      : `<div class="empty">First <a href="#/bots">register a Bot</a>; it is the Bot that joins the room.</div>`}
       ${rows.length ? `<div class="list">${rows.map((r) => `<a class="it" href="${r.href}"><div class="grow"><div><b><code>${esc(r.room_id)}</code></b> ${st(ROOM_ST, r.status)}</div>
         <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${r.my_bots.map((b) => esc(b.handle)).join(", ") || "your Bot left"}${r.status === "candidate" ? ` · until ${fmt(r.expires_at)}` : ""}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
+    const go = $("#join-go");
+    if (go) go.onclick = async () => {
+      clearErrs(go.closest(".card")); formErr($("#join-err"), "");
+      const code = $("#join-code").value.trim();
+      if (!roomCodeOk(code)) { fieldErr($("#join-code"), "Enter the 6-digit code the other owner gave you."); return; }
+      go.disabled = true;
+      try { await PAGES.rooms.join(code, [$("#join-bot").value]); toast("Joined the room"); render(); }
+      catch { go.disabled = false; }
+    };
     return;
   }
   let room;
@@ -573,7 +591,7 @@ PAGES.rooms = async (v) => {
   const d = roomDetailModel(room);
   const row = rooms.find((r) => r.room_id === d.room_id);
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
-  v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
+  v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span>${d.status === "candidate" ? `<button class="btn p" id="room-start">Start room</button>` : ""}<button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)}${d.status === "candidate" ? ` · until ${fmt(d.expires_at)}` : ""}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
     ${d.status === "open" ? `<div class="row" style="margin:8px 0"><button class="btn s" id="room-invite">Invite into this room</button></div><div id="room-invite-out"></div>` : ""}
@@ -582,6 +600,12 @@ PAGES.rooms = async (v) => {
     <h2>In the room <span class="n">${d.members.length}</span></h2>
     ${d.members.length ? `<div class="list">${d.members.map((m) => `<div class="it">${avatar(m.display_name)}<div class="grow"><div><b>${esc(m.display_name)}</b> ${mine.has(String(m.handle).replace(/^@/, "")) ? '<span class="pill ok">Yours</span>' : ""}</div>
       <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
+  const start = $("#room-start");
+  if (start) start.onclick = async () => {
+    start.disabled = true;
+    try { await PAGES.rooms.start(d.room_id); toast("Room started"); render(); }
+    catch { start.disabled = false; }
+  };
   const leave = $("#room-leave");
   if (leave) leave.onclick = async () => {
     if (!confirm("Leave this room? Your Bots leave it; the other side keeps theirs.")) return;
@@ -613,9 +637,11 @@ PAGES.rooms = async (v) => {
     }
   };
 };
-/** The three server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
+/** The five server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
 PAGES.rooms.list = async () => (await api("GET", "/v1/face-rooms")).rooms;
 PAGES.rooms.get = async (id) => api("GET", `/v1/face-rooms/${encodeURIComponent(id)}`);
+PAGES.rooms.join = async (code, bots) => api("POST", "/v1/face-rooms/join", { code, bots });
+PAGES.rooms.start = async (id) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/start`);
 PAGES.rooms.leave = async (id, body = {}) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/leave`, body);
 PAGES.rooms.invite = async (id) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/invites`, {});
 PAGES.rooms.revokeInvite = async (id, ticket) => api("DELETE", `/v1/face-rooms/${encodeURIComponent(id)}/invites/${encodeURIComponent(ticket)}`);
