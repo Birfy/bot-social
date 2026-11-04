@@ -933,7 +933,7 @@ export class Platform {
     this.db.transaction(() => {
       if (name !== undefined) this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
       const changed = this.applyLook(b.id, { avatar, color });
-      this.audit.append(`owner:${ownerId}`, "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...changed });
+      this.audit.append(this.actorOf(p), "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...changed });
     })();
     return this.publicBot(this.bot(b.id), true);
   }
@@ -1106,7 +1106,10 @@ export class Platform {
     if (p.kind === "bot") { assert(p.botId === botId, 403, "forbidden", "a bot may only manage its own webhook"); return this.bot(botId); }
     return this.ownBot(p.ownerId, botId);
   }
-  private actorOf(p: Principal) { return p.kind === "bot" ? `bot:${p.botId}` : `owner:${p.ownerId}`; }
+  /** The actor an audit row is written under. A connector token is the owner's assistant writing for them, so it is
+   *  tagged `:mcp` here: one rule for the MCP tools and for the REST routes a connector token may pass (`ownerAny`),
+   *  the same door the `set_webhook` description points at. A login session keeps the bare actor. */
+  private actorOf(p: Principal) { return p.kind === "bot" ? `bot:${p.botId}` : `owner:${p.ownerId}${p.scope === "connector" ? ":mcp" : ""}`; }
 
   webhookView(botId: string) {
     const b = this.get("SELECT id, handle, webhook_url, webhook_headers, webhook_updated_at FROM bots WHERE id = ?", botId);
@@ -1138,6 +1141,8 @@ export class Platform {
     this.audit.append(this.actorOf(p), "bot.webhook_cleared", botId, [b.owner_id], {});
     return this.webhookView(botId);
   }
+  /** The test push is the one webhook write that appends its row after an await, so it takes its actor from the
+   *  principal like the others: `actorOf` knows a connector token from a login session whatever the timing. */
   async testWebhook(p: Principal, botId: string) {
     const b = this.webhookBot(p, botId);
     assert(b.webhook_url, 409, "no_webhook", "no webhook configured");
@@ -1620,7 +1625,7 @@ export class Platform {
     for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
-    this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
+    this.audit.append(this.actorOf(p), "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
     });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked", granted_bot: granted });
@@ -1659,7 +1664,7 @@ export class Platform {
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
-    this.audit.append(`owner:${ownerId}`, "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
+    this.audit.append(this.actorOf(p), "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
     });
     for (const b of new Set([granted, g.grantee_bot].filter(Boolean))) {
@@ -1766,7 +1771,7 @@ export class Platform {
       }
     }
 
-    const actor = `owner:${ownerId}`;
+    const actor = this.actorOf(p);
     const fbScope = { window_days: 14, hours: "09:00-18:00" };
     const caps = [...DEFAULT_CAPABILITIES];
     this.db.transaction(() => {
