@@ -541,9 +541,11 @@ const ROOM_ST = { candidate: ["Waiting to start", "warn"], open: ["In progress",
 const roomHref = (id) => `#/rooms/${encodeURIComponent(id)}`;
 /** A room code is exactly six digits; the check runs before any request, so a typo never reaches the API. */
 const roomCodeOk = (code) => /^\d{6}$/.test(String(code || "").trim());
-/** The list renders the API's own numbers: room_id, member_count, my_bots and expires_at pass through unchanged; only
- *  a candidate's window is shown, because starting the room voids the number and the deadline with it. */
-const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], expires_at: r.expires_at }));
+/** The list renders the API's own numbers: room_id, member_count, my_bots, brought_bots and expires_at pass through
+ *  unchanged; only a candidate's window is shown, because starting the room voids the number and the deadline with it.
+ *  `my_bots` is the seats this home owns; `brought_bots` is the guests it brought in on a share, which it can still
+ *  see and manage but never speak as. */
+const roomsModel = (rooms) => (rooms || []).map((r) => ({ room_id: r.room_id, href: roomHref(r.room_id), status: r.status, member_count: r.member_count, my_bots: r.my_bots || [], brought_bots: r.brought_bots || [], expires_at: r.expires_at }));
 /** One line per event the server returns: room.message reads as words said, every other type as a platform line. */
 const roomLine = (e) => e.type === "room.message"
   ? { kind: "message", type: e.type, cursor: e.event_cursor, at: e.created_at, handle: e.from?.handle ?? null, name: e.from?.display_name ?? null, text: e.untrusted_content?.text ?? "", typed_by_owner: Boolean(e.typed_by_owner), injection: Boolean(e.security?.injection_suspected) }
@@ -554,6 +556,8 @@ const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status,
 const roomLineHtml = (l, mine) => {
   // `mine` is the room list's own `my_bots` set, normalised exactly as the "Yours" pill does, so the side and the
   // warning cannot disagree: an own Bot gets `class="b me"` and no "peer content · untrusted", a peer row keeps it.
+  // A guest this home brought in is not in `my_bots`: it is the other home's Bot, so it keeps the peer row the wire
+  // already marks (`trust: "peer_untrusted"`), and its seat does not read "Yours" either.
   const own = mine.has(String(l.handle ?? "").replace(/^@/, ""));
   return `<div class="b ${own ? "me" : "peer"}"><div class="bub">${esc(l.text)}</div><div class="meta">${esc(l.handle ?? l.name ?? "Bot")}${l.typed_by_owner ? " · ✍ typed by owner" : ""} · ${fmt(l.at)}${own ? " · your Bot" : ' · <span style="color:var(--warn)">peer content · untrusted</span>'}${l.injection ? ' · <span style="color:var(--bad)">⚠ injection suspected</span>' : ""}</div></div>`;
 };
@@ -574,7 +578,7 @@ PAGES.rooms = async (v) => {
         <div class="row"><button class="btn p" id="join-go">Join room</button><span id="join-err"></span></div></div>`
       : `<div class="empty">First <a href="#/bots">register a Bot</a>; it is the Bot that joins the room.</div>`}
       ${rows.length ? `<div class="list">${rows.map((r) => `<a class="it" href="${r.href}"><div class="grow"><div><b><code>${esc(r.room_id)}</code></b> ${st(ROOM_ST, r.status)}</div>
-        <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${r.my_bots.map((b) => esc(b.handle)).join(", ") || "your Bot left"}${r.status === "candidate" ? ` · until ${fmt(r.expires_at)}` : ""}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
+        <div class="mut">${plural(r.member_count, "Bot", "Bots")} · ${[...r.my_bots, ...r.brought_bots].map((b) => esc(b.handle)).join(", ") || "your Bot left"}${r.status === "candidate" ? ` · until ${fmt(r.expires_at)}` : ""}</div></div><span class="mut">Open →</span></a>`).join("")}</div>` : `<div class="empty">No rooms yet. A room opens when you and another owner enter the same 6-digit code.</div>`}`;
     const go = $("#join-go");
     if (go) go.onclick = async () => {
       clearErrs(go.closest(".card")); formErr($("#join-err"), "");
@@ -590,6 +594,7 @@ PAGES.rooms = async (v) => {
   try { room = await PAGES.rooms.get(id); } catch (e) { v.innerHTML = `<h1>Rooms</h1><div class="empty">${esc(e.human || e.message)} <a href="#/rooms">Back to rooms</a></div>`; return; }
   const d = roomDetailModel(room);
   const row = rooms.find((r) => r.room_id === d.room_id);
+  // Only seats this home owns: a brought guest keeps the peer side and the "Yours" pill is not its label.
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span>${d.status === "candidate" ? `<button class="btn p" id="room-start">Start room</button>` : ""}<button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)}${d.status === "candidate" ? ` · until ${fmt(d.expires_at)}` : ""}</p>
