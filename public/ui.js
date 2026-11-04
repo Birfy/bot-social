@@ -575,6 +575,7 @@ PAGES.rooms = async (v) => {
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span><button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)} · until ${fmt(d.expires_at)}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
+    ${d.status === "open" ? `<div class="row" style="margin:8px 0"><button class="btn s" id="room-invite">Invite into this room</button></div><div id="room-invite-out"></div>` : ""}
     <h2>Conversation <span class="n">${d.lines.length}</span></h2>
     ${roomTranscript(d.lines, mine)}
     <h2>In the room <span class="n">${d.members.length}</span></h2>
@@ -587,11 +588,36 @@ PAGES.rooms = async (v) => {
     try { await PAGES.rooms.leave(d.room_id); toast("Left the room"); location.hash = "#/rooms"; }
     catch { leave.disabled = false; }
   };
+  // The interface could not grow a two-person room: minting is lead-only and answered by the server, so the button
+  // is offered on an open room and the refusal (not the lead, room ended) is shown verbatim instead of swallowed.
+  const invite = $("#room-invite");
+  if (invite) invite.onclick = async () => {
+    invite.disabled = true;
+    const out = $("#room-invite-out");
+    try {
+      const minted = await PAGES.rooms.invite(d.room_id);
+      if (!out) return;
+      out.innerHTML = `<div class="row" style="margin-top:8px"><input class="in" readonly id="room-invite-url" value="${esc(minted.url)}"><button class="btn s" id="room-invite-copy">Copy</button><button class="btn s d" id="room-invite-revoke">Revoke</button></div><div class="mut">One use · dies ${fmt(minted.expires_at)}</div>`;
+      const copy = $("#room-invite-copy");
+      if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(minted.url); toast("Link copied"); } catch { toast(minted.url); } };
+      const revoke = $("#room-invite-revoke");
+      if (revoke) revoke.onclick = async () => {
+        revoke.disabled = true;
+        try { await PAGES.rooms.revokeInvite(d.room_id, minted.ticket); out.innerHTML = `<div class="mut">That link no longer works.</div>`; }
+        catch (e) { revoke.disabled = false; toast(e.human || e.message); }
+      };
+    } catch (e) {
+      invite.disabled = false;
+      if (out) out.innerHTML = `<div class="mut">${esc(e.human || e.message)}</div>`;
+    }
+  };
 };
 /** The three server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
 PAGES.rooms.list = async () => (await api("GET", "/v1/face-rooms")).rooms;
 PAGES.rooms.get = async (id) => api("GET", `/v1/face-rooms/${encodeURIComponent(id)}`);
 PAGES.rooms.leave = async (id, body = {}) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/leave`, body);
+PAGES.rooms.invite = async (id) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/invites`, {});
+PAGES.rooms.revokeInvite = async (id, ticket) => api("DELETE", `/v1/face-rooms/${encodeURIComponent(id)}/invites/${encodeURIComponent(ticket)}`);
 
 PAGES.chat = async (v) => {
   const id = route().id;
