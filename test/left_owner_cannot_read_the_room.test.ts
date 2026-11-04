@@ -95,7 +95,9 @@ test("an owner who only brought a guest in, and never took a seat, can still rea
   const listed = await B.owner.req("GET", "/v1/face-rooms");
   const row = (listed.rooms as any[]).find((r: any) => r.room_id === roomId);
   assert.ok(row, "docs/FACE_ROOMS.md:90 keeps the room list readable to the owner who brought the Bot in");
-  assert.deepEqual(row.my_bots.map((b: any) => b.handle), [A.handle]);
+  // A guest is not a seat of the home that brought it: `my_bots` is what this home owns, `brought_bots` what it brought.
+  assert.deepEqual(row.my_bots, [], "Bob seats no Bot of his own here");
+  assert.deepEqual(row.brought_bots.map((b: any) => b.handle), [A.handle], "the guest Bob brought in stays visible to him");
 
   await A.owner.req("POST", `/v1/face-rooms/${roomId}/start`, {});
   await A.owner.req("PUT", "/v1/presence", { bot_id: A.bot.id, room_id: roomId, state: "thinking", ttl_seconds: 60 });
