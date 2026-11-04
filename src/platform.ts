@@ -3768,10 +3768,13 @@ export class Platform {
       // purpose when the bringer leaves first), so this gate cannot ask whether the usage is open. It asks the
       // rooms: is a guest seat still there in a room this share brought a Bot into? A share with nothing left to
       // give back answers no and is not handed over again. `endGrantRooms` still decides which seats are this
-      // share's — this is a pre-filter, never a policy.
+      // share's — this is a pre-filter, never a policy. When the usage has already ended, only a seat that was
+      // already there before it ended can be this share's; a seat that arrived later belongs to the share that let
+      // it back in (the same grantor/grantee bot/capability row is swept separately).
       if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
           AND (u.ended_at IS NULL OR EXISTS (SELECT 1 FROM face_room_members m
-            WHERE m.room_id = u.room_id AND m.left_at IS NULL AND m.added_by_owner_id != m.owner_id))
+            WHERE m.room_id = u.room_id AND m.left_at IS NULL AND m.added_by_owner_id != m.owner_id
+              AND m.joined_at <= u.ended_at))
           LIMIT 1`, g.id)) ended.push(g.id);
     }
     if (ended.length) this.endGrantRooms(ended, "platform");
