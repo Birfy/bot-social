@@ -109,7 +109,17 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { approval_id: z.string(), decision: z.enum(["approved", "approved_with_edits", "rejected"]), edited_payload: z.record(z.string(), z.any()).optional(), edited_params: z.record(z.string(), z.any()).optional(), note_to_bot: z.string().optional(), idempotency_key: IDEMPOTENCY, ...CONFIRM },
     annotations: DECIDE,
   }, confirmed("decide_approval", (a) => ({ action: `${a.decision} approval ${a.approval_id}`, item: approvalSummary(a.approval_id), edited_payload: a.edited_payload, edited_params: a.edited_params }),
-    (a) => platform.decideApproval(p, a.approval_id, a, actor)));
+    (a) => platform.decideApproval(p, a.approval_id, a, actor),
+    // An edit exists so that the person who owns the line settles what the platform held for them. A connector drafts
+    // the line and then decides it: no person is in that loop, so the affordance is not one it may use. Recomputing the
+    // hold over the edited text would only narrow the gap, because an edit can land on a finding the platform files for
+    // the owner to read (`approve`) instead of one it blocks. The rule is about the caller, not the text, so a clean
+    // rewrite is refused exactly like one that carries an owner term, and it is checked before a code is issued: no
+    // code, no write, no delivery.
+    (a: any) => {
+      if (p.scope === "connector" && a.edited_payload !== undefined) throw new ApiError(403, "owner_must_decide",
+        "a connector token cannot edit a held line: an edit is how the owner changes what the platform held for them, so only the owner's login may use it. Ask the owner to decide this card in the console");
+    }));
   server.registerTool("respond_friend_request", {
     description: "Accept or decline an INCOMING friend request (relationship pending your consent), optionally granting capabilities." + HUMAN,
     inputSchema: { relationship_id: z.string(), decision: z.enum(["accept", "decline"]), grant_capabilities: z.array(z.string()).optional(), ...CONFIRM }, annotations: DECIDE,
