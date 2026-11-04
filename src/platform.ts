@@ -2994,6 +2994,15 @@ export class Platform {
     };
   }
 
+  /** Drafts a Bot has written in the hour ending at `hourAgo + 3600e3`, over both write doors. The budget README
+   *  promises is one per Bot, so a chat draft and a face-room draft spend the same hour: the two tables share no row
+   *  (delivering a room line updates its `face_room_drafts` row and emits, it never inserts into `messages`), so the
+   *  sum is a count of distinct drafts. */
+  private draftsInLastHour(botId: string, hourAgo: number) {
+    return this.get(`SELECT (SELECT COUNT(*) FROM messages WHERE sender_bot = ? AND created_ms > ?)
+      + (SELECT COUNT(*) FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?) n`, botId, hourAgo, botId, hourAgo).n;
+  }
+
   /** `typedByOwner` is internal: set only by sendAsMember after typedByOwner() authorised it, never from the envelope or text. */
   draftMessage(p: Principal, convId: string, env: Envelope, typedByOwner = false, mentions: string[] = [], roomContext: string | null = null) {
     this.verifyEnvelope(p, env, "message.draft");
@@ -3024,7 +3033,7 @@ export class Platform {
     const minuteAgo = Date.now() - 60e3, hourAgo = Date.now() - 3600e3;
     if (this.get("SELECT COUNT(*) n FROM messages WHERE conversation_id = ? AND sender_bot = ? AND created_ms > ?", convId, botId, minuteAgo).n >= LIMITS.ratePerConversationPerMin)
       throw new ApiError(429, "rate_limited", "per-conversation rate limit (6/min)", { retry_after: 60 });
-    if (this.get("SELECT COUNT(*) n FROM messages WHERE sender_bot = ? AND created_ms > ?", botId, hourAgo).n >= LIMITS.ratePerBotPerHour)
+    if (this.draftsInLastHour(botId, hourAgo) >= LIMITS.ratePerBotPerHour)
       throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
     // No turn budget (owner decision 2026-10-19 18:05): a conversation never runs out of turns.
     // Loop detection guards Bot-to-Bot exchanges only. A line the owner typed (typed_by_owner, attested
@@ -4844,7 +4853,7 @@ export class Platform {
     const minuteAgo = this.nowMs() - 60e3, hourAgo = this.nowMs() - 3600e3;
     if (this.get("SELECT COUNT(*) n FROM face_room_drafts WHERE room_id = ? AND sender_bot = ? AND created_ms > ?", roomId, sender.id, minuteAgo).n >= LIMITS.ratePerConversationPerMin)
       throw new ApiError(429, "rate_limited", "per-room rate limit (6/min)", { retry_after: 60 });
-    if (this.get("SELECT COUNT(*) n FROM face_room_drafts WHERE sender_bot = ? AND created_ms > ?", sender.id, hourAgo).n >= LIMITS.ratePerBotPerHour)
+    if (this.draftsInLastHour(sender.id, hourAgo) >= LIMITS.ratePerBotPerHour)
       throw new ApiError(429, "rate_limited", "global bot rate limit (60/h)", { retry_after: 3600 });
     const id = newId("fmd");
     // Only people in the room can be mentioned in it; handles that are not (or no longer) members are dropped.
