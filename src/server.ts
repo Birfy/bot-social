@@ -69,6 +69,19 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     if (!Number.isSafeInteger(n) || n < 0) throw new ApiError(400, "invalid_request", "limit must be a non-negative integer");
     return max === undefined ? n : Math.min(n, max);
   };
+  /**
+   * An optional cursor (`after`): the integer a previous answer ended on, or nothing. It is deliberately stricter
+   * than `intQ` below: that one answers a malformed `since` with the first page, which is published behaviour for
+   * `/v1/events` and stays. A room read cannot do that — "start over" means replaying the whole room window — so a
+   * value that is not a non-negative integer is a 400 here instead of a silent first page or a `seq > 1.5` half-page.
+   */
+  const cursorQ = (raw: unknown) => {
+    const s = raw === undefined || raw === null ? "" : String(raw).trim();
+    if (!s) return undefined;
+    const n = Number(s);
+    if (!Number.isSafeInteger(n) || n < 0) throw new ApiError(400, "invalid_request", "after must be a non-negative integer");
+    return n;
+  };
   // The events cursor is not a page bound: a malformed `since` is answered with the first page, as before.
   const intQ = (raw: unknown, o: { fallback: number; min?: number; max?: number }) => {
     const s = typeof raw === "string" ? raw.trim() : "";
@@ -315,7 +328,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
   app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));
   app.get("/v1/face-rooms", async (req) => platform.listFaceRooms(faceAuth(req)));
-  app.get("/v1/face-rooms/:id", async (req) => platform.getFaceRoom(faceAuth(req), P(req).id, { after: Q(req).after ? Number(Q(req).after) : undefined, as_bot: Q(req).as ?? Q(req).bot ?? Q(req).as_bot }));
+  app.get("/v1/face-rooms/:id", async (req) => platform.getFaceRoom(faceAuth(req), P(req).id, { after: cursorQ(Q(req).after), as_bot: Q(req).as ?? Q(req).bot ?? Q(req).as_bot }));
   app.post("/v1/face-rooms/:id/start", async (req) => platform.startFaceRoom(faceAuth(req), P(req).id));
   app.post("/v1/face-rooms/:id/leave", async (req) => platform.leaveFaceRoom(faceAuth(req), P(req).id, B(req)));
   // Room lead (FlyBot #476): only the room creator's owner token; roles: your own Bots' role labels.

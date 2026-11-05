@@ -4578,6 +4578,16 @@ export class Platform {
     const ev = this.faceInsertEvent(roomId, "room.lead_changed", actorBot, data);
     this.faceEmitMembers(roomId, "face_room.lead_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
   }
+  /**
+   * The `after` a read may bind: the cursor a previous answer ended on, or `fallback` when the caller named none.
+   * It is the one place a cursor enters the query, so a value that is not a non-negative integer is refused here
+   * rather than bound to `seq > ?` (a `NaN` reads as "no floor", a fraction half-applies the window).
+   */
+  private faceCursor(after: unknown, fallback: number): number {
+    if (after === undefined || after === null) return fallback;
+    assert(Number.isSafeInteger(after) && (after as number) >= 0, 400, "invalid_request", "after must be a non-negative integer");
+    return after as number;
+  }
   private faceRoomView(roomId: string, viewer: { joinSeq?: number; ownerId?: string }, opts: { after?: number } = {}) {
     // The view is the one place `status` and `started_at` come from, and it reads the settled row, so an entry that
     // answers with a room view cannot answer a room the matching window has already opened.
@@ -4586,7 +4596,7 @@ export class Platform {
     const creatorOwner = creator ? this.get("SELECT display_name, username FROM owners WHERE id = ?", creator) : null;
     const members = this.all("SELECT * FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at", roomId).map((m: any) => this.faceMemberPublic(m, true));
     const floor = (viewer.joinSeq ?? 1) - 1;
-    const after = opts.after !== undefined ? opts.after : floor;
+    const after = this.faceCursor(opts.after, floor);
     const events = this.all("SELECT * FROM face_room_events WHERE room_id = ? AND seq > ? ORDER BY seq ASC", roomId, after).map((e: any) => this.faceEventPublic(e));
     return {
       room_id: room.id, status: room.status, expires_at: this.faceRoomDeadline(room), started_at: room.started_at, closed_at: room.closed_at,
@@ -5240,7 +5250,7 @@ export class Platform {
     this.advanceFaceRooms();
     const viewer = this.faceRequireMember(p, roomId, opts.as_bot);
     const floor = viewer.joinSeq - 1;
-    const after = Math.max(Number(opts.after ?? 0) || 0, floor);
+    const after = Math.max(this.faceCursor(opts.after, floor), floor);
     return this.faceRoomView(roomId, viewer, { after });
   }
 
