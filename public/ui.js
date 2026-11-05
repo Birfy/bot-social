@@ -16,7 +16,7 @@ const tzOptions = (current) => (TZ_CHOICES.includes(current) ? TZ_CHOICES : [cur
   .map((z) => `<option value="${esc(z)}" ${z === current ? "selected" : ""}>${esc(z)}</option>`).join("");
 /** The account area's picker: every time on every page is read in the zone chosen here. Below it the quiet window:
  *  while it is open the platform holds approval announcements and sends one summary when it ends. */
-const tzControl = () => `<label class="mut" for="tz">Time zone</label><select id="tz" style="margin-top:4px;font-size:12px;padding:4px 6px">${tzOptions(TZ)}</select><label class="mut" for="qstart" style="display:block;margin-top:6px">Quiet hours</label><div style="display:flex;gap:4px;align-items:center"><input id="qstart" type="time" value="${esc(me && me.quiet_start || "")}" style="font-size:12px;padding:3px 4px"><span class="mut">to</span><input id="qend" type="time" value="${esc(me && me.quiet_end || "")}" style="font-size:12px;padding:3px 4px"></div>`;
+const tzControl = () => `<label class="mut" for="tz">Time zone</label><select id="tz" style="margin-top:4px;font-size:12px;padding:4px 6px">${tzOptions(TZ)}</select><label class="mut" for="qstart" style="display:block;margin-top:6px">Quiet hours</label><div style="display:flex;gap:4px;align-items:center"><input id="qstart" type="time" value="${esc(me && me.quiet_start || "")}" style="font-size:12px;padding:3px 4px"><span class="mut">to</span><input id="qend" type="time" value="${esc(me && me.quiet_end || "")}" style="font-size:12px;padding:3px 4px">${me && me.quiet_start ? `<a href="#" id="qoff" class="mut" style="font-size:11.5px">Turn off</a>` : ""}</div><div class="hint" id="qhint"></div>`;
 /** fmt(iso) → "19/10, 08:21 GMT+8"; { time: true } drops the date; { zone: false } drops the label. */
 const zoneName = () => { try { return new Intl.DateTimeFormat("en-GB", { timeZone: TZ, timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value || TZ; } catch { return TZ; } };
 /** Read a datetime-local value ("2026-10-21T10:00") as wall-clock time in TZ and return the ISO instant; null when TZ has no such wall time (a spring-forward gap, #237). */
@@ -166,13 +166,25 @@ async function saveTimezone(zone) {
     const picker = $("#tz"); if (picker) picker.value = before;
   }
 }
-/** Save the quiet window picked in the account area. The server takes both ends or neither: one clock alone is a
- *  refusal that keeps the window already stored, so the inputs are put back to it. */
+/** Save the quiet window picked in the account area. The server takes both ends or neither: one clock alone is not
+ *  a window, so the console names the missing end and sends nothing instead of a body the server must refuse. A
+ *  refused save still keeps the window already stored, so the inputs are put back to it. */
 async function saveQuietHours(start, end) {
+  const s = start || null, e = end || null;
+  const hint = $("#qhint");
+  if (!!s !== !!e) {
+    if (hint) hint.textContent = "Set both ends, or turn quiet hours off.";
+    return;
+  }
+  if (hint) hint.textContent = "";
   const before = { start: me && me.quiet_start || null, end: me && me.quiet_end || null };
   try {
-    const r = await api("PATCH", "/v1/me", { quiet_start: start || null, quiet_end: end || null });
-    me = r; toast(start && end ? `Quiet hours ${start} to ${end}` : "Quiet hours off"); render();
+    const r = await api("PATCH", "/v1/me", { quiet_start: s, quiet_end: e });
+    me = r; toast(s && e ? `Quiet hours ${s} to ${e}` : "Quiet hours off");
+    const qs = $("#qstart"), qe = $("#qend");
+    if (qs) qs.value = r.quiet_start || "";
+    if (qe) qe.value = r.quiet_end || "";
+    render();
   } catch {
     const qs = $("#qstart"), qe = $("#qend");
     if (qs) qs.value = before.start || "";
@@ -250,6 +262,7 @@ function shell() {
   const picker = $("#tz"); if (picker) picker.onchange = () => saveTimezone(picker.value);
   const qstart = $("#qstart"), qend = $("#qend");
   if (qstart && qend) { const save = () => saveQuietHours(qstart.value, qend.value); qstart.onchange = save; qend.onchange = save; }
+  const qoff = $("#qoff"); if (qoff) qoff.onclick = (e) => { e.preventDefault(); saveQuietHours(null, null); };
   bindSearch();
 }
 /** The sidebar's search box: typing runs one query, Enter runs it now, and a hit is a plain link to its page. */
