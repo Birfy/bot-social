@@ -1448,7 +1448,11 @@ export class Platform {
   setWebhook(p: Principal, botId: string, body: any) {
     const b = this.webhookBot(p, botId);
     const rawUrl = body?.url !== undefined ? body.url : body?.webhook_url;
+    // An empty URL is the clear door, and taking reach away stays allowed; hanging a new outlet on a revoked
+    // identity does not (#177: revocation is final, and removeHomeMember's own comment says a revoked identity
+    // must not keep receiving metadata through its webhook).
     if (rawUrl === null || rawUrl === "") return this.clearWebhook(p, botId);
+    assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     const url = validateUrl(rawUrl);
     const headers = body?.headers === undefined ? J(b.webhook_headers, []) : validateHeaders(body.headers ?? []);
     this.run("UPDATE bots SET webhook_url = ?, webhook_headers = ?, webhook_updated_at = ? WHERE id = ?", url, JSON.stringify(headers), nowIso(), botId);
@@ -1465,6 +1469,7 @@ export class Platform {
    *  principal like the others: `actorOf` knows a connector token from a login session whatever the timing. */
   async testWebhook(p: Principal, botId: string) {
     const b = this.webhookBot(p, botId);
+    assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     assert(b.webhook_url, 409, "no_webhook", "no webhook configured");
     const d = await this.webhooks.test(botId);
     this.audit.append(this.actorOf(p), "bot.webhook_tested", botId, [b.owner_id], { delivery_id: d.delivery_id, status: d.status, response_status: d.response_status });
