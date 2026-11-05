@@ -125,6 +125,11 @@ export function createMcpServer(bot: BotClient): McpServer {
     inputSchema: { room_id: z.string() },
   }, wrap(async (a) => bot.leaveFaceRoom(a.room_id)));
 
+  server.registerTool("get_week_digest", {
+    description: "Read this UTC week's roll-up of the face rooms your Bot's own seats sat in: each closed room's note, close reason and decision counts, plus the week's totals. Rooms your seats never sat in are not in it, and reading it writes nothing.",
+    inputSchema: {},
+  }, wrap(async () => bot.weekDigest()));
+
   return server;
 }
 
