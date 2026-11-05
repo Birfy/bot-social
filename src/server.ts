@@ -227,6 +227,10 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     return platform.authenticate(h?.startsWith("Bearer ") ? h.slice(7) : undefined);
   };
   const faceIp = (req: FastifyRequest) => req.ip;
+  // Console search: the sidebar finds a chat or a face room by its title face. Owner login, connector token or a
+  // Bot's own token; each answers only what that caller's list routes answer, so a hit is always something the
+  // caller could have scrolled to.
+  app.get("/v1/search", async (req) => platform.searchConsole(faceAuth(req), Q(req).q));
   app.post("/v1/face-rooms/join", async (req, reply) => reply.status(200).send(platform.joinFaceRoom(faceAuth(req), B(req), { ip: faceIp(req) })));
   // Invites into an established room (#39): mint, revoke, preview (public), join by ticket.
   app.post("/v1/face-rooms/:id/invites", async (req, reply) => reply.status(201).send(platform.mintFaceRoomInvite(faceAuth(req), P(req).id, { ip: faceIp(req) })));
