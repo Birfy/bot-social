@@ -6,6 +6,9 @@ import { limitFromEnv } from "./policy.js";
 export const FACE_ROOM_NAME_MAX = 60;
 /** A member Bot's role label in a room roster (FlyBot #476): plain text, untrusted. */
 export const FACE_ROOM_ROLE_MAX = 80;
+/** Why a room ended, as its recap says it: the last seat left on its own, a seat was taken back, or the share that
+ *  paid for it lapsed. */
+export type FaceRoomCloseReason = "room_left" | "room_closed" | "expired";
 
 export interface FaceRoomLimits {
   ttlMs: number;
@@ -171,7 +174,8 @@ CREATE TABLE IF NOT EXISTS face_rooms (
   closed_at TEXT,
   created_by_owner_id TEXT,
   lead_bot_id TEXT,
-  note TEXT
+  note TEXT,
+  recap TEXT
 );
 CREATE TABLE IF NOT EXISTS face_room_codes (
   code TEXT PRIMARY KEY,

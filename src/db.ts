@@ -41,6 +41,10 @@ export function openDb(path: string): Database.Database {
     db.exec("UPDATE approval_notifications SET delivered_at = created_at");
   }
   db.exec(FACE_ROOM_SCHEMA);
+  // The recap a closed room leaves its members: counts and names, written once by the close door. Rows written
+  // before the column existed stay null, and an open room never has one.
+  const frcols = (db.prepare("PRAGMA table_info(face_rooms)").all() as { name: string }[]).map((c) => c.name);
+  if (!frcols.includes("recap")) db.exec("ALTER TABLE face_rooms ADD COLUMN recap TEXT");
   db.exec(LOCAL_ROOM_INVITE_SCHEMA);
   // Who ended a local-room claim: the minting owner ending it (removing that guest) must outlast the release,
   // so the same link does not seat that home again. Rows written before the column existed stay null.
