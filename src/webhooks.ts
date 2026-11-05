@@ -66,14 +66,56 @@ export function validateUrl(u: unknown): string {
   assert(!url.username && !url.password, 400, "invalid_request", "put credentials in a header, not the url");
   return url.toString();
 }
+/** The existing IPv4 rule: loopback, "this network", RFC 1918, link-local, CGNAT. */
+function isPrivateV4(ip: string): boolean {
+  const [a, b] = ip.split(".").map(Number);
+  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+/**
+ * The sixteen bytes of an IPv6 literal (a zone id is ignored), or null when it is not one.
+ * The only text→number step: every prefix below is read from these bytes, because `new URL()`
+ * rewrites `[::ffff:127.0.0.1]` to `::ffff:7f00:1` and no spelling-based rule survives that.
+ */
+function ipv6Bytes(ip: string): Uint8Array | null {
+  if (isIP(ip) !== 6) return null;
+  const text = ip.split("%")[0].toLowerCase();
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const words = (s: string): number[] => s === "" ? [] : s.split(":").flatMap((w) => {
+    if (!w.includes(".")) return [parseInt(w, 16)]; // isIP already accepted the literal
+    const [a, b, c, d] = w.split(".").map(Number); // dotted quad in the last group
+    return [(a << 8) | b, (c << 8) | d];
+  });
+  const head = words(halves[0]);
+  const tail = halves.length > 1 ? words(halves[1]) : [];
+  const groups = halves.length > 1 ? [...head, ...new Array(Math.max(0, 8 - head.length - tail.length)).fill(0), ...tail] : head;
+  if (groups.length !== 8) return null;
+  const bytes = new Uint8Array(16);
+  groups.forEach((g, i) => { bytes[i * 2] = (g >> 8) & 0xff; bytes[i * 2 + 1] = g & 0xff; });
+  return bytes;
+}
+/**
+ * True when a webhook target at `ip` is loopback, private, or a spelling this build will not send to.
+ * An IPv6 literal can carry an IPv4 address in its low 32 bits — IPv4-mapped `::ffff:0:0/96`,
+ * NAT64 `64:ff9b::/96` and RFC 8215 `64:ff9b:1::/48` — and those low bytes get the existing IPv4
+ * rule, not a blanket block. IPv4-compatible `::/96` is deprecated and refused whole (`::` and `::1`
+ * included). A host the resolver cannot answer is refused at the call site, before fetch; an address
+ * that parses but is on no private list stays public, exactly as before.
+ */
 function isPrivateAddr(ip: string): boolean {
-  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
-  if (isIP(ip) === 4) {
-    const [a, b] = ip.split(".").map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  const l = ip.toLowerCase();
-  return l === "::1" || l === "::" || l.startsWith("fc") || l.startsWith("fd") || l.startsWith("fe80");
+  if (isIP(ip) === 4) return isPrivateV4(ip);
+  const bytes = ipv6Bytes(ip);
+  if (!bytes) return false;
+  const low = `${bytes[12]}.${bytes[13]}.${bytes[14]}.${bytes[15]}`;
+  const zero = (from: number, to: number) => bytes.slice(from, to).every((b) => b === 0);
+  const mapped = zero(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff; // ::ffff:0:0/96
+  const nat64 = bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && zero(4, 12); // 64:ff9b::/96
+  const nat64local = bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && bytes[4] === 0x00 && bytes[5] === 0x01 && zero(6, 12); // 64:ff9b:1::/48
+  if (mapped || nat64 || nat64local) return isPrivateV4(low);
+  if (zero(0, 12)) return true; // ::/96: unspecified, loopback, and the deprecated IPv4-compatible form
+  if ((bytes[0] & 0xfe) === 0xfc) return true; // fc00::/7 unique local
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
+  return false;
 }
 
 /** Content-free one-line summary of an event (only platform-generated ids, handles, statuses). */
