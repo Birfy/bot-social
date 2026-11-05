@@ -300,7 +300,11 @@ export class Platform {
     assert(body?.username === undefined || typeof body.username === "string", 400, "invalid_request", "username must be a string");
     assert(body?.username && /^[a-z0-9._-]{2,32}$/i.test(body.username), 400, "invalid_request", "username: 2-32 chars [a-z0-9._-]");
     assert(typeof body.password === "string" && body.password.length >= 6, 400, "invalid_request", "password must be >= 6 chars");
-    assert(!this.get("SELECT 1 FROM owners WHERE username = ?", body.username), 409, "username_taken");
+    // A name is one account whatever its spelling: the sign-in budget already folds every spelling onto one
+    // lowercased key, so "frank" and "Frank" must not both register and then share that budget. The comparison is
+    // application-level (SQLite's own `LOWER`, which folds exactly the ASCII this format allows); the schema keeps
+    // its exact-spelling unique index, and no row is rewritten.
+    assert(!this.get("SELECT 1 FROM owners WHERE LOWER(username) = LOWER(?)", body.username), 409, "username_taken");
     assert(body.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
     const displayName = peerDisplayName(body.display_name, body.username);
     // Absent timezone keeps today's default; a supplied one must be a zone Intl can use (P5).
