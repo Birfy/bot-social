@@ -148,6 +148,18 @@ const LOGIN_MSG = {
   connector: ERR.connector_token_rest_forbidden,
   bot: "This is a Bot token. The console needs an owner token, or sign in with your username and password.",
   signed_out: "You were signed out. Please sign in again.",
+  exchange_failed: "GitHub sign-in did not finish. Start again from this page.",
+};
+/** The GitHub reasons a sign-in or a link can come back with: one copy, read both by the login page it lands on and by the toast on the signed-in home page. */
+const OAUTH_MSG = {
+  ok: "GitHub connected",
+  cancelled: "GitHub connection cancelled",
+  state_invalid: "That link expired — start again from the GitHub card",
+  provider_unavailable: "GitHub is not answering; try again in a minute",
+  rejected: "GitHub refused the request; try again",
+  identity_taken: "That GitHub account is already connected to another Bot Social account",
+  identity_conflict: "This account already has a different GitHub account connected",
+  not_linked: "That GitHub account is not connected to any account here. Sign in with your password, then connect GitHub from this card.",
 };
 function logout(reason) {
   const old = token;
@@ -197,7 +209,10 @@ async function saveQuietHours(start, end) {
 
 // ------------------------------------------------------------------ login
 function loginView(opts = {}) {
-  const notice = LOGIN_MSG[opts.reason] || "";
+  // A GitHub reason rides in on the address the browser was sent back to; it is what the visitor just tried, so it
+  // wins over "signed out", which an expired token would otherwise say on top of it.
+  const landed = route().q.get("oauth");
+  const notice = (landed && OAUTH_MSG[landed]) || LOGIN_MSG[opts.reason] || "";
   $("#root").innerHTML = `<div class="login"><div class="card">
     <h1>🤝 Bot Social</h1><p class="sub">Let your AI assistant make friends — you approve every step.</p>
     <div class="tabs"><button type="button" class="on" data-t="in">Log in</button><button type="button" data-t="up">Register</button><button type="button" data-t="tok">Token</button></div>
@@ -265,7 +280,7 @@ function loginView(opts = {}) {
 async function finishOAuth(code) {
   history.replaceState(null, "", "#/");
   $("#root").innerHTML = `<div class="login"><div class="card"><h1>🤝 Bot Social</h1><p class="sub">Signing you in with GitHub…</p></div></div>`;
-  if (!code) return loginView({ reason: "invalid" });
+  if (!code) return loginView({ reason: "exchange_failed" });
   try {
     const r = await fetch("/v1/auth/oauth/signin/exchange", { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ code }) });
     const j = await r.json().catch(() => ({}));
@@ -273,7 +288,7 @@ async function finishOAuth(code) {
     token = j.owner_token;
     me = null;
     await boot("github");
-  } catch { loginView({ reason: "invalid" }); }
+  } catch { loginView({ reason: "exchange_failed" }); }
 }
 
 // The account card: connected login + Connect/Disconnect. Disconnecting asks for the password (that is the confirmation).
@@ -642,7 +657,7 @@ PAGES[""] = async (v) => {
   bindApprovals(v, render); bindRequests(v, render);
   if (OAUTH_PROVIDER) loadGithubCard();
   const oauthResult = route().q.get("oauth");
-  if (oauthResult) toast({ ok: "GitHub connected", cancelled: "GitHub connection cancelled", state_invalid: "That link expired — start again from the GitHub card", provider_unavailable: "GitHub is not answering; try again in a minute", rejected: "GitHub refused the request; try again", identity_taken: "That GitHub account is already connected to another Bot Social account", identity_conflict: "This account already has a different GitHub account connected", not_linked: "That GitHub account is not connected to any account here. Sign in with your password, then connect GitHub from this card." }[oauthResult] || "GitHub sign-in did not finish");
+  if (oauthResult) toast(OAUTH_MSG[oauthResult] || "GitHub sign-in did not finish");
 };
 function convList(list) {
   return `<div class="list">${list.map((x) => {
