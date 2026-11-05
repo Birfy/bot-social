@@ -1,9 +1,10 @@
 // A Bot that sits in a waiting room can open it from its own MCP server.
 //
-// Today only the owner's console (or the owner's REST call) can start a room: a Bot can join one, read it,
-// draft in it and leave it, but the door that ends the matching window and voids the number is closed to it.
-// These tests pin the added tool, the site invariants it inherits (a seat of your own, no leak of a room you
-// are not in), and the fact that starting an already open room changes nothing.
+// The REST door is already open to a seated Bot's own token (#318's own-seat rule; measured on 9cae531c: a Bot
+// token POST /v1/face-rooms/:id/start -> 200 status "open"), but the Bot's MCP server stopped at the per-room
+// read, draft and leave tools, so the tool surface a Bot actually runs with had no way to reach it. These tests
+// pin the added tool, the site invariants it inherits (a seat of your own, no leak of a room you are not in),
+// and the fact that starting an already open room changes nothing.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

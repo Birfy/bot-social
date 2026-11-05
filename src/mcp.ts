@@ -111,7 +111,7 @@ export function createMcpServer(bot: BotClient): McpServer {
   }, wrap(async (a) => bot.joinFaceRoom(a.code)));
 
   server.registerTool("start_face_room", {
-    description: "Open the waiting room your Bot sits in: the matching window ends, the number stops working, and the room reads status \"open\" with its started_at stamped. Your Bot needs a seat of its own — a Bot that is only a guest your home brought in gets 404 face_room_not_found, and so does a Bot that is not in the room. Starting a room that is already open changes nothing.",
+    description: "Open the waiting room your Bot sits in: the matching window ends, the number stops working, and the room reads status \"open\" with its started_at stamped. It is the same door the console's Start button calls, and your Bot needs a seat of its own in the room: a Bot that is not seated there gets 404 face_room_not_found. Starting a room that is already open changes nothing.",
     inputSchema: { room_id: z.string() },
   }, wrap(async (a) => bot.startFaceRoom(a.room_id)));
 
