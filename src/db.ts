@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { FACE_ROOM_SCHEMA } from "./face-rooms.js";
 import { LOCAL_ROOM_INVITE_SCHEMA } from "./local-room-invites.js";
+import { OAUTH_SCHEMA } from "./oauth.js";
 
 export function openDb(path: string): Database.Database {
   const db = new Database(path);
@@ -46,6 +47,8 @@ export function openDb(path: string): Database.Database {
   const frcols = (db.prepare("PRAGMA table_info(face_rooms)").all() as { name: string }[]).map((c) => c.name);
   if (!frcols.includes("recap")) db.exec("ALTER TABLE face_rooms ADD COLUMN recap TEXT");
   db.exec(LOCAL_ROOM_INVITE_SCHEMA);
+  // GitHub OAuth (#76): four additive tables and their indexes. Empty and inert until the feature is configured.
+  db.exec(OAUTH_SCHEMA);
   // Who ended a local-room claim: the minting owner ending it (removing that guest) must outlast the release,
   // so the same link does not seat that home again. Rows written before the column existed stay null.
   const lrcols = (db.prepare("PRAGMA table_info(local_room_invite_claims)").all() as { name: string }[]).map((c) => c.name);
@@ -55,6 +58,9 @@ export function openDb(path: string): Database.Database {
   if (!tcols.includes("label")) db.exec("ALTER TABLE tokens ADD COLUMN label TEXT");
   if (!tcols.includes("scope")) db.exec("ALTER TABLE tokens ADD COLUMN scope TEXT");
   if (!tcols.includes("last_used_at")) db.exec("ALTER TABLE tokens ADD COLUMN last_used_at TEXT");
+  // How a session was obtained: 'password' (every row that predates this column) or 'oauth:github'. A constant
+  // default does not rewrite the table; unbind revokes `via='oauth:github'` sessions only.
+  if (!tcols.includes("via")) db.exec("ALTER TABLE tokens ADD COLUMN via TEXT NOT NULL DEFAULT 'password'");
   // typed_by_owner attestation: only tokens held by a trusted owner host (login, or a connector token minted for FlyBot) may stamp it.
   if (!tcols.includes("attest_typed")) {
     db.exec("ALTER TABLE tokens ADD COLUMN attest_typed INTEGER NOT NULL DEFAULT 0");

@@ -73,6 +73,8 @@ const searchResultsHtml = (d) => {
   return `<div style="display:flex;flex-direction:column;gap:2px;max-height:340px;overflow:auto">${hits.map((h) => `<a href="${h.href}" style="display:block;padding:6px 8px;border-radius:8px;color:#e2e8f0;background:#1e293b"><b>${esc(h.title)}</b> <span style="font-size:11px;color:#94a3b8">${esc(h.kind)}</span><div style="font-size:11.5px;color:#94a3b8">${esc(h.sub)} · ${esc(ago(h.at))}</div></a>`).join("")}</div>`;
 };
 
+// GitHub OAuth (#76) is announced by exactly one meta tag in /ui. No tag, no button, no request.
+const OAUTH_PROVIDER = (document.querySelector('meta[name="bs-oauth"]') || {}).content || "";
 let token = localStorage.getItem("bs_owner_token");
 let me = null;
 let badges = { approvals: 0, requests: 0 };
@@ -196,6 +198,7 @@ function loginView(opts = {}) {
       <div id="lerr">${notice ? `<div class="ferr" role="alert">${esc(notice)}</div>` : ""}</div>
       <button class="btn p" style="width:100%;justify-content:center;margin-top:8px" id="go">Log in</button>
     </form>
+    ${OAUTH_PROVIDER ? `<div style="margin-top:12px"><button type="button" class="btn" id="gh-login" style="width:100%;justify-content:center">Continue with GitHub</button><p class="mut" style="margin-top:6px;font-size:12px">An extra way in — your username and password always work.</p></div>` : ""}
     <p class="mut" style="margin-top:16px">New here? Register above, or ask your assistant to set you up from <a href="/setup">${esc(location.origin)}/setup</a>.<br><a href="/connect">Connect assistant</a> · <a href="/guide">Agent guide</a></p>
   </div></div>`;
   let mode = "in";
@@ -230,6 +233,62 @@ function loginView(opts = {}) {
       const msg = err.human || ERR.network;
       if (err.code === "username_taken") fieldErr($("#u"), msg); else formErr($("#lerr"), msg);
     }
+  };
+  const gh = $("#gh-login");
+  if (gh) gh.onclick = async () => {
+    gh.disabled = true;
+    try {
+      const r = await fetch(`/v1/auth/oauth/${OAUTH_PROVIDER}/signin`, { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.authorize_url) throw new Error();
+      location.href = j.authorize_url;
+    } catch {
+      gh.disabled = false;
+      formErr($("#lerr"), "GitHub sign-in is not available right now. Sign in with your password instead.");
+    }
+  };
+}
+
+// The callback sends the browser here with a one-time code in the fragment; it is used once, then replaced away.
+async function finishOAuth(code) {
+  history.replaceState(null, "", "#/");
+  $("#root").innerHTML = `<div class="login"><div class="card"><h1>🤝 Bot Social</h1><p class="sub">Signing you in with GitHub…</p></div></div>`;
+  if (!code) return loginView({ reason: "invalid" });
+  try {
+    const r = await fetch("/v1/auth/oauth/signin/exchange", { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ code }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.owner_token) throw new Error();
+    token = j.owner_token;
+    me = null;
+    await boot("github");
+  } catch { loginView({ reason: "invalid" }); }
+}
+
+// The account card: connected login + Connect/Disconnect. Disconnecting asks for the password (that is the confirmation).
+async function loadGithubCard() {
+  const el = $("#gh-body");
+  if (!el) return;
+  let identity = null;
+  try { const d = await api("GET", "/v1/me/identities", null, true); identity = (d.identities || [])[0] || null; }
+  catch { el.innerHTML = `<span class="mut">GitHub settings are unavailable right now.</span>`; return; }
+  el.innerHTML = identity
+    ? `<div class="row" style="margin-top:6px"><span class="grow">Connected as <b>@${esc(identity.login)}</b></span><button class="btn s d" id="gh-unlink">Disconnect</button></div>
+       <p class="mut" style="font-size:12px;margin-top:6px">Unlinking stops Bot Social from trusting this GitHub account. It does not revoke GitHub's authorization — remove that under GitHub → Settings → Applications.</p>`
+    : `<div class="row" style="margin-top:6px"><span class="grow">Not connected. Connect it to sign in with GitHub as well as your password.</span><button class="btn s" id="gh-link">Connect GitHub</button></div>`;
+  const link = $("#gh-link");
+  if (link) link.onclick = async () => {
+    const pw = prompt("Enter your Bot Social password to connect GitHub — this adds a way to sign in.");
+    if (pw === null) return;
+    const r = await api("POST", `/v1/auth/oauth/${OAUTH_PROVIDER}/start`, { current_password: pw });
+    location.href = r.authorize_url;
+  };
+  const un = $("#gh-unlink");
+  if (un) un.onclick = async () => {
+    const pw = prompt("Enter your Bot Social password to disconnect GitHub.");
+    if (pw === null) return;
+    await api("DELETE", `/v1/me/identities/${OAUTH_PROVIDER}`, { current_password: pw });
+    toast("GitHub disconnected");
+    loadGithubCard();
   };
 }
 
@@ -276,6 +335,7 @@ function bindSearch() {
   box.onkeydown = (e) => { if (e.key === "Enter") { clearTimeout(box.__t); run(); } };
 }
 async function render() {
+  if (route().page === "oauth") return finishOAuth(route().q.get("code") || "");
   if (!token) return loginView();
   if (!me) return boot();
   shell();
@@ -304,6 +364,7 @@ let rebind = () => {};
 window.addEventListener("hashchange", render);
 /** source: "load" (token from storage), "token" (pasted on the Token tab) or "password" (fresh login). */
 async function boot(source = "load") {
+  if (route().page === "oauth") return finishOAuth(route().q.get("code") || "");
   let r, j;
   try { r = await fetch("/v1/me", { headers: { authorization: "Bearer " + token } }); j = await r.json().catch(() => ({})); }
   catch {
@@ -558,6 +619,7 @@ PAGES[""] = async (v) => {
     ${hasBot ? "" : `<div class="card cta"><b>🚀 Set up your first Bot</b><p style="margin:6px 0 10px">Tell your assistant: “Set me up with Bot Social following <a href="/setup" target="_blank">${esc(location.origin)}/setup</a>”. Or register a Bot yourself under My Bots.</p><a class="btn p" href="#/bots">Go to My Bots</a></div>`}
     <div class="stats"><a class="stat ${a.approvals.length ? "hot" : ""}" href="#/"><b>${a.approvals.length}</b><span>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"}</span></a><a class="stat ${incoming.length ? "hot" : ""}" href="#/friends"><b>${incoming.length}</b><span>${incoming.length === 1 ? "Friend request" : "Friend requests"}</span></a>
       <a class="stat" href="#/chats"><b>${live.length}</b><span>${live.length === 1 ? "Active chat" : "Active chats"}</span></a><a class="stat" href="#/friends"><b>${friends.length}</b><span>${friends.length === 1 ? "Friend" : "Friends"}</span></a></div>
+    ${OAUTH_PROVIDER ? `<div class="card" style="margin-top:14px"><b>GitHub</b><div id="gh-body" class="mut">Loading…</div></div>` : ""}
     <h2>${a.approvals.length === 1 ? "Pending approval" : "Pending approvals"} <span class="n">${a.approvals.length}</span></h2>${a.approvals.length ? a.approvals.map(approvalCard).join("") : `<div class="empty">Nothing pending 🎉</div>`}
     ${lapsed.length ? `<h2>Expired <span class="n">${lapsed.length}</span></h2><p class="sub">Nothing went out. These approvals ran out before anyone decided, so the message was never sent.</p>${lapsed.map(expiredCard).join("")}` : ""}
     ${recent.length ? `<h2>Recently cancelled <span class="n">${recent.length}</span></h2>${recent.map(cancelledCard).join("")}` : ""}
@@ -565,6 +627,9 @@ PAGES[""] = async (v) => {
     ${weekRoomsCard(digest)}
     <h2>Recent chats</h2>${live.length || c.conversations.length ? convList(c.conversations.slice(0, 5)) : `<div class="empty">No chats yet</div>`}`;
   bindApprovals(v, render); bindRequests(v, render);
+  if (OAUTH_PROVIDER) loadGithubCard();
+  const oauthResult = route().q.get("oauth");
+  if (oauthResult) toast({ ok: "GitHub connected", cancelled: "GitHub connection cancelled", state_invalid: "That link expired — start again from the GitHub card", provider_unavailable: "GitHub is not answering; try again in a minute", rejected: "GitHub refused the request; try again", identity_taken: "That GitHub account is already connected to another Bot Social account", identity_conflict: "This account already has a different GitHub account connected", not_linked: "That GitHub account is not connected to any account here. Sign in with your password, then connect GitHub from this card." }[oauthResult] || "GitHub sign-in did not finish");
 };
 function convList(list) {
   return `<div class="list">${list.map((x) => {
@@ -985,6 +1050,7 @@ PAGES.bots = async (v) => {
 // Audit rows as sentences: "<who> <did what>". Unknown actions fall back to the raw name.
 const AUDIT_LABEL = {
   "owner.registered": "created this account", "owner.login": "signed in", "owner.logout": "signed out", "owner.password_changed": "changed the password", "owner.settings_updated": "updated account settings",
+  "oauth.identity_linked": "connected a GitHub account", "oauth.identity_unlinked": "disconnected a GitHub account", "oauth.signin": "signed in with GitHub",
   "bot.registered": "registered a Bot", "bot.profile_updated": "updated a Bot's profile", "bot.key_added": "added a signing key", "bot.key_revoked": "revoked a signing key",
   "bot.emergency_stop": "emergency-stopped a Bot", "bot.resumed": "resumed a Bot", "bot.token_rotated": "issued a new Bot token",
   "bot.webhook_set": "set up push", "bot.webhook_cleared": "turned off push", "bot.webhook_tested": "sent a test push",

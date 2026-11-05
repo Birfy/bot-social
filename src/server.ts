@@ -7,6 +7,7 @@ import { Platform, Principal } from "./platform.js";
 import { ensureBotctl } from "./botctl-build.js";
 import { marked } from "marked";
 import { registerOwnerMcp } from "./owner-mcp.js";
+import { injectOAuthMeta, oauthErrorPage } from "./oauth.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const UI_HTML = () => readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -93,7 +94,9 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   const guideMd = () => readFileSync(join(here, "..", "docs", "AGENT_GUIDE.md"), "utf8").replaceAll("{{BASE_URL}}", platform.publicBaseUrl);
   app.get("/guide.md", async (_req, reply) => reply.type("text/markdown; charset=utf-8").send(guideMd()));
   app.get("/guide", async (_req, reply) => reply.type("text/html; charset=utf-8").send(page("guide.html").replace("<!--GUIDE-->", await marked.parse(guideMd()))));
-  app.get("/ui", async (_req, reply) => reply.type("text/html; charset=utf-8").send(UI_HTML()));
+  // The login page learns that GitHub sign-in exists from one injected tag, and only when the startup config
+  // enabled it: unconfigured, the response is the file itself, byte for byte (§10).
+  app.get("/ui", async (_req, reply) => reply.type("text/html; charset=utf-8").send(injectOAuthMeta(UI_HTML(), platform.oauthProviderId)));
   app.get("/ui.js", async (_req, reply) => reply.type("text/javascript; charset=utf-8").header("cache-control", "no-cache").send(page("ui.js")));
   registerOwnerMcp(app, platform);
   app.get("/connect", async (_req, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(page("connect.html")));
@@ -160,7 +163,50 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   });
   app.get("/v1/me", async (req) => platform.me(auth(req)));
   app.patch("/v1/me", async (req) => platform.updateSettings(auth(req), B(req)));
-
+  // ---- GitHub OAuth (#76). The gate runs before auth on every route in this feature: an unconfigured
+  // instance answers 404 oauth_not_configured before it ever looks at the Authorization header (§7).
+  const oauthGate = () => {
+    if (!platform.oauth.enabled) throw new ApiError(404, "oauth_not_configured", "GitHub sign-in is not configured on this server");
+  };
+  // Login-token only. `auth()` already refuses a connector token; this refuses a bot token too, which is why
+  // `ownerAny()` is not used anywhere in this feature.
+  const requireOwner = (req: FastifyRequest) => {
+    const p = auth(req);
+    if (p.kind !== "owner") throw new ApiError(403, "owner_only", "owner login token required");
+    return p;
+  };
+  app.get("/v1/auth/oauth/providers", async (req) => { oauthGate(); return platform.oauthProviders(requireOwner(req)); });
+  app.post("/v1/auth/oauth/:provider/start", async (req, reply) => {
+    oauthGate();
+    const r = platform.oauthLinkStart(requireOwner(req), P(req).provider, B(req));
+    return reply.header("cache-control", "no-store").header("set-cookie", r.cookie).send({ authorize_url: r.authorize_url, expires_at: r.expires_at });
+  });
+  app.post("/v1/auth/oauth/:provider/signin", async (req, reply) => {
+    oauthGate();
+    const r = platform.oauthSigninStart(req.ip);
+    return reply.header("cache-control", "no-store").header("set-cookie", r.cookie).send({ authorize_url: r.authorize_url });
+  });
+  // Silent: Fastify logs `req.url`, and this one carries ?code=&state= (§13). Never the global error handler.
+  app.get("/v1/auth/oauth/:provider/callback", { logLevel: "silent" }, async (req, reply) => {
+    oauthGate();
+    const out = await platform.oauthCallback(P(req).provider, Q(req), req.headers.cookie);
+    reply.header("set-cookie", out.clearCookie).header("cache-control", "no-store").header("referrer-policy", "no-referrer");
+    if (out.status === 400) {
+      return reply.status(400).type("text/html; charset=utf-8")
+        .send(oauthErrorPage(out.apiCode ?? "oauth_state_invalid", "state_invalid", "This sign-in link expired or was opened in another browser. Start again."));
+    }
+    if (out.status !== 302) {
+      return reply.status(out.status).send({ error: { code: out.apiCode ?? "oauth_provider_rejected", message: "GitHub returned a response we could not read; try again" } });
+    }
+    return reply.status(302).header("location", out.location ?? "/ui").send();
+  });
+  app.post("/v1/auth/oauth/signin/exchange", async (req) => { oauthGate(); return platform.oauthExchange(B(req)); });
+  app.get("/v1/me/identities", async (req) => { oauthGate(); return platform.oauthIdentities(requireOwner(req)); });
+  app.delete("/v1/me/identities/:provider", async (req, reply) => {
+    oauthGate();
+    platform.oauthUnlink(requireOwner(req), P(req).provider, B(req));
+    return reply.status(204).send();
+  });
   // ---- bots & keys
   app.post("/v1/bots", async (req, reply) => reply.status(201).send(platform.registerBot(auth(req), B(req))));
   app.get("/v1/bots", async (req) => ({ bots: platform.listBots(auth(req)) }));
