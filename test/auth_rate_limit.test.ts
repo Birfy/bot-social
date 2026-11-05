@@ -33,9 +33,9 @@ test("the default account budget lets the fifth attempt through and refuses the 
   const S = await startServer();
   try {
     const login = () => post(`${S.base}/v1/auth/login`, { username: "burst", password: "wrong-pw" });
-    // Sign-up and login share the account bucket: this is the fifth attempt for `burst`.
+    // A successful sign-up leaves the new account's bucket empty, so the five failures below are the whole budget.
     assert.equal((await post(`${S.base}/v1/owners`, { username: "burst", password: "secret-pw" })).status, 201);
-    for (let i = 2; i <= 5; i++) assert.equal((await login()).status, 401, `attempt ${i} passes the limiter`);
+    for (let i = 1; i <= 5; i++) assert.equal((await login()).status, 401, `failed attempt ${i} passes the limiter`);
     const blocked = await login();
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.error.code, "rate_limited");

@@ -14,9 +14,9 @@ async function post(base: string, path: string, body: unknown): Promise<{ status
 test("a refused account burst says how long the wait is and that it is the account's", async () => {
   const S = await startServer();
   try {
-    // Sign-up and login share the account bucket: this is the fifth attempt for `burst`.
+    // A successful sign-up leaves the new account's bucket empty, so the five failures below are the whole budget.
     assert.equal((await post(S.base, "/v1/owners", { username: "burst", password: "secret-pw" })).status, 201);
-    for (let i = 2; i <= 5; i++) assert.equal((await post(S.base, "/v1/auth/login", { username: "burst", password: "wrong-pw" })).status, 401, `attempt ${i} passes the limiter`);
+    for (let i = 1; i <= 5; i++) assert.equal((await post(S.base, "/v1/auth/login", { username: "burst", password: "wrong-pw" })).status, 401, `failed attempt ${i} passes the limiter`);
     const blocked = await post(S.base, "/v1/auth/login", { username: "burst", password: "wrong-pw" });
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.error.code, "rate_limited");

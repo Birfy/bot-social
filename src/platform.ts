@@ -309,6 +309,9 @@ export class Platform {
     this.run("INSERT INTO owners (id, username, display_name, password_hash, timezone, created_at) VALUES (?,?,?,?,?,?)",
       id, body.username, displayName, hashPassword(body.password), timezone, nowIso());
     this.audit.append(`owner:${id}`, "owner.registered", id, [id], { username: body.username });
+    // The sign-up is not a failed attempt against the account it just created: a brand-new owner starts its window
+    // with nothing spent, so the first wrong passwords after it are judged on their own count.
+    this.authLimiter.forgiveAccount(body.username);
     return { owner_id: id, owner_token: this.issueToken("owner", id) };
   }
 
@@ -331,6 +334,9 @@ export class Platform {
     const ok = checkPassword(String(body?.password ?? ""), o?.password_hash ?? DUMMY_PASSWORD_HASH);
     if (!o || !ok) throw new ApiError(401, "invalid_credentials");
     this.audit.append(`owner:${o.id}`, "owner.login", o.id, [o.id]);
+    // The door accepted this name and its secret, so the failed attempts before it are not a reason to refuse the next
+    // correct one. Only the account bucket is cleared: the address bucket keeps counting the burst (see forgiveAccount).
+    this.authLimiter.forgiveAccount(body.username);
     return { owner_id: o.id, owner_token: this.issueToken("owner", o.id) };
   }
 
