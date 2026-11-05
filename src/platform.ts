@@ -4995,6 +4995,55 @@ export class Platform {
     };
   }
 
+  /**
+   * One week of face rooms, read-only: the rooms the caller sat in whose `closed_at` falls in the current UTC week
+   * (Monday 00:00 → next Monday 00:00), one line each, all of it taken from the recap the close already wrote
+   * (#428). Never the transcript and never an approval row: the recap is counts, names and the room's own note.
+   *
+   * The caller decides the scope, not the account: an owner sees every room one of their seats sat in, a Bot sees
+   * only its own seats, so a recap can never reach a home that was not in the room. Reading writes nothing, so the
+   * same week answers the same object every time — an empty week included, as the same shape with zeroes.
+   */
+  weekDigest(p: Principal) {
+    const start = Math.floor((this.nowMs() - 4 * 864e5) / (7 * 864e5)) * 7 * 864e5 + 4 * 864e5;
+    const startIso = new Date(start).toISOString();
+    const endIso = new Date(start + 7 * 864e5).toISOString();
+    const seat = p.kind === "owner"
+      ? { sql: "EXISTS (SELECT 1 FROM face_room_members m WHERE m.room_id = r.id AND m.owner_id = ?)", args: [p.ownerId] as unknown[] }
+      : { sql: "EXISTS (SELECT 1 FROM face_room_members m WHERE m.room_id = r.id AND m.bot_id = ?)", args: [p.botId] as unknown[] };
+    const rows = this.all(`SELECT r.id, r.recap FROM face_rooms r
+      WHERE r.status = 'closed' AND r.recap IS NOT NULL AND r.closed_at >= ? AND r.closed_at < ? AND ${seat.sql}
+      ORDER BY r.closed_at, r.id`, startIso, endIso, ...seat.args);
+    const counts = { rooms: 0, approved: 0, rejected: 0, cancelled: 0, expired: 0 };
+    const rooms: any[] = [];
+    for (const row of rows) {
+      let recap: any;
+      try { recap = J(row.recap); } catch { continue; } // a row this build cannot read is left out, never guessed at
+      if (!recap) continue;
+      const decisions = {
+        approved: Number(recap.decisions?.approved ?? 0),
+        rejected: Number(recap.decisions?.rejected ?? 0),
+        cancelled: Number(recap.decisions?.cancelled ?? 0),
+        expired: Number(recap.decisions?.expired ?? 0),
+      };
+      rooms.push({
+        room_id: String(recap.room_id ?? row.id),
+        closed_at: recap.closed_at ?? null,
+        reason: recap.reason ?? null,
+        note: recap.note ?? null,
+        decisions,
+        members: (Array.isArray(recap.members) ? recap.members : [])
+          .map((m: any) => ({ handle: String(m?.handle ?? ""), owner_name: String(m?.owner_name ?? "") })),
+      });
+      counts.rooms += 1;
+      counts.approved += decisions.approved;
+      counts.rejected += decisions.rejected;
+      counts.cancelled += decisions.cancelled;
+      counts.expired += decisions.expired;
+    }
+    return { digest_version: 1, week: startIso.slice(0, 10), period: { start: startIso, end: endIso }, rooms, counts };
+  }
+
   startFaceRoom(p: Principal, roomId: string) {
     this.advanceFaceRooms();
     // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its

@@ -298,6 +298,10 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   }, wrap((a) => tagged(() => platform.joinFaceRoom(p, a, { ip: extras.ip }))));
   server.registerTool("list_face_rooms", { description: "List face-to-face rooms you currently belong to.", inputSchema: {}, annotations: READ },
     wrap(() => platform.listFaceRooms(p)));
+  server.registerTool("get_week_digest", {
+    description: "What your Bots decided in face rooms this week: the rooms that ended this week (UTC Monday to Monday) among the ones you sat in, one line each from the room's recap — the reason it ended, its note, one count per decision and who was in it — plus the totals. Counts and names only, never the transcript. Empty week: the same shape with zeroes.",
+    inputSchema: {}, annotations: READ,
+  }, wrap(() => platform.weekDigest(p)));
   server.registerTool("get_face_room", {
     description: "Members and events of a face-to-face room. History is windowed: you only see events from your join point. Pass after to poll." + PEER,
     inputSchema: { room_id: z.string(), after: z.number().int().optional(), as_bot: z.string().optional() }, annotations: READ,

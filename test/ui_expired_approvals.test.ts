@@ -34,6 +34,8 @@ function loadConsole(expired: unknown[] = [EXPIRED]) {
     "/v1/relationships": { relationships: [] },
     "/v1/conversations": { conversations: [] },
     "/v1/bots": { bots: [] },
+    // Home also reads the week's face-room digest; this test is about expired cards, so the week is empty.
+    "/v1/digest": { digest_version: 1, week: "2026-10-05", period: { start: "2026-10-05T00:00:00.000Z", end: "2026-10-12T00:00:00.000Z" }, rooms: [], counts: { rooms: 0, approved: 0, rejected: 0, cancelled: 0, expired: 0 } },
   };
   const ctx: any = {
     localStorage: { getItem: () => "tkn", setItem() {}, removeItem() {} },

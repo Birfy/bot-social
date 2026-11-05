@@ -218,6 +218,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   // ---- events & audit
   app.get("/v1/events", async (req) => platform.listEvents(auth(req), intQ(Q(req).since, { fallback: 0 }), limitQ(Q(req).limit, 100, 500)));
   app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: limitQ(Q(req).limit, 1000) }));
+  // One week of face rooms, read-only: the caller's own seats decide the scope, the recap carries every field.
+  app.get("/v1/digest", async (req) => platform.weekDigest(auth(req)));
 
   // ---- face-to-face rooms (FlyBot #83). Accepts owner login tokens, connector tokens
   // (the same Bearer FlyBot already stores from /v1/onboard/flybot), and bot tokens
