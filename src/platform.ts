@@ -4126,6 +4126,8 @@ export class Platform {
       room_id: room.id, status: room.status, expires_at: this.faceRoomDeadline(room), started_at: room.started_at, closed_at: room.closed_at,
       created_by: creatorOwner ? { owner_name: peerOwnerName(creatorOwner, "Owner") } : null,
       created_by_me: Boolean(creator && viewer.ownerId === creator),
+      // Room metadata outside the floor rule: a member who joined after the note was written still reads it.
+      note: room.note ?? null,
       ...this.faceLeadFields(roomId),
       members, event_cursor: events.length ? events[events.length - 1].event_cursor : after, events,
     };
@@ -4871,6 +4873,22 @@ export class Platform {
       this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", viewer.botIds[0] ?? null)).immediate();
       this.audit.append(this.actorOf(p), "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
     }
+    return this.faceRoomView(roomId, viewer);
+  }
+
+  /**
+   * What the room is for, one sentence its lead writes for everyone: room metadata, not a transcript line, so reading
+   * it never depends on when a member joined and writing it never moves a cursor. Trimmed, 1-500 characters.
+   */
+  setFaceRoomNote(p: Principal, roomId: string, body: any = {}) {
+    this.advanceFaceRooms();
+    const viewer = this.faceRequireMember(p, roomId);
+    const room = this.faceRequireLead(p, roomId, "set the room note");
+    if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    const raw = body?.note;
+    const note = typeof raw === "string" ? raw.trim() : "";
+    assert(note.length >= 1 && note.length <= 500, 400, "invalid_note", "note must be 1-500 characters");
+    this.run("UPDATE face_rooms SET note = ? WHERE id = ?", note, roomId);
     return this.faceRoomView(roomId, viewer);
   }
 

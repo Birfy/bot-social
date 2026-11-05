@@ -549,7 +549,7 @@ const roomLine = (e) => e.type === "room.message"
   ? { kind: "message", type: e.type, cursor: e.event_cursor, at: e.created_at, handle: e.from?.handle ?? null, name: e.from?.display_name ?? null, text: e.untrusted_content?.text ?? "", typed_by_owner: Boolean(e.typed_by_owner), injection: Boolean(e.security?.injection_suspected) }
   : { kind: "system", type: e.type, cursor: e.event_cursor, at: e.created_at, text: e.text ?? "" };
 /** The detail shows what was said in the room, then who is in it; members keep the server's labels and handles verbatim. */
-const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
+const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, note: room.note ?? null, lead_handle: room.effective_lead_bot_handle ?? null, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
 /** One spoken line: a message names its speaker; the platform's warning belongs to the other side only. All text is escaped. */
 const roomLineHtml = (l, mine) => {
   // `mine` is the room list's own `my_bots` set, normalised exactly as the "Yours" pill does, so the side and the
@@ -591,9 +591,11 @@ PAGES.rooms = async (v) => {
   const d = roomDetailModel(room);
   const row = rooms.find((r) => r.room_id === d.room_id);
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
+  const isLead = Boolean(d.lead_handle) && mine.has(String(d.lead_handle).replace(/^@/, ""));
   v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span>${d.status === "candidate" ? `<button class="btn p" id="room-start">Start room</button>` : ""}<button class="btn s d" id="room-leave">Leave room</button></div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)}${d.status === "candidate" ? ` · until ${fmt(d.expires_at)}` : ""}</p>
     <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
+    ${d.note || isLead ? `<div class="card" style="margin:8px 0"><b>What this room is for</b><div id="room-note" class="mut" style="white-space:pre-wrap;margin-top:4px">${d.note ? esc(d.note) : "No note yet."}</div>${isLead ? `<div class="row" style="margin-top:6px"><button class="btn s" id="room-note-edit">${d.note ? "Edit note" : "Add note"}</button></div><div id="room-note-out"></div>` : ""}</div>` : ""}
     ${d.status === "open" ? `<div class="row" style="margin:8px 0"><button class="btn s" id="room-invite">Invite into this room</button></div><div id="room-invite-out"></div>` : ""}
     <h2>Conversation <span class="n">${d.lines.length}</span></h2>
     ${roomTranscript(d.lines, mine)}
@@ -612,6 +614,18 @@ PAGES.rooms = async (v) => {
     leave.disabled = true;
     try { await PAGES.rooms.leave(d.room_id); toast("Left the room"); location.hash = "#/rooms"; }
     catch { leave.disabled = false; }
+  };
+  const noteEdit = $("#room-note-edit");
+  if (noteEdit) noteEdit.onclick = () => {
+    const out = $("#room-note-out");
+    out.innerHTML = `<div class="field"><label for="room-note-input">What this room is for</label><textarea id="room-note-input" rows="3" maxlength="500" placeholder="One sentence the other side reads before it starts">${esc(d.note ?? "")}</textarea></div><div class="row"><button class="btn p" id="room-note-save">Save note</button><button class="btn s" id="room-note-cancel">Cancel</button></div>`;
+    const save = $("#room-note-save");
+    save.onclick = async () => {
+      save.disabled = true;
+      try { await PAGES.rooms.setNote(d.room_id, $("#room-note-input").value); toast("Note saved"); render(); }
+      catch (e) { save.disabled = false; toast(e.human || e.message); }
+    };
+    $("#room-note-cancel").onclick = () => { out.innerHTML = ""; };
   };
   // The interface could not grow a two-person room: minting is lead-only and answered by the server, so the button
   // is offered on an open room and the refusal (not the lead, room ended) is shown verbatim instead of swallowed.
@@ -637,9 +651,10 @@ PAGES.rooms = async (v) => {
     }
   };
 };
-/** The five server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
+/** The six server calls this page makes; tests call these exact functions instead of re-implementing the URLs. */
 PAGES.rooms.list = async () => (await api("GET", "/v1/face-rooms")).rooms;
 PAGES.rooms.get = async (id) => api("GET", `/v1/face-rooms/${encodeURIComponent(id)}`);
+PAGES.rooms.setNote = async (id, note) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/note`, { note });
 PAGES.rooms.join = async (code, bots) => api("POST", "/v1/face-rooms/join", { code, bots });
 PAGES.rooms.start = async (id) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/start`);
 PAGES.rooms.leave = async (id, body = {}) => api("POST", `/v1/face-rooms/${encodeURIComponent(id)}/leave`, body);

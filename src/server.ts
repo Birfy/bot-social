@@ -259,6 +259,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/face-rooms/:id/leave", async (req) => platform.leaveFaceRoom(faceAuth(req), P(req).id, B(req)));
   // Room lead (FlyBot #476): only the room creator's owner token; roles: your own Bots' role labels.
   app.post("/v1/face-rooms/:id/lead", async (req) => platform.setFaceRoomLead(faceAuth(req), P(req).id, B(req)));
+  app.post("/v1/face-rooms/:id/note", async (req) => platform.setFaceRoomNote(faceAuth(req), P(req).id, B(req)));
   app.put("/v1/face-rooms/:id/roles", async (req) => platform.setFaceRoomRoles(faceAuth(req), P(req).id, B(req)));
   app.post("/v1/face-rooms/:id/messages", async (req, reply) => reply.status(202).send(platform.draftFaceRoomMessage(faceAuth(req), P(req).id, B(req))));
 
