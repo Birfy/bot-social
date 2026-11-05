@@ -21,6 +21,7 @@ import {
   newOAuthSecret, newPkceVerifier, oauthBindingCookie, oauthClearCookie, oauthConfigFrom, pkceChallenge,
   readOAuthCookie, subjectFingerprint, timingSafeEqualString,
 } from "./oauth.js";
+import { AuthRateBlock, AuthRateLimiter, AuthRateLimits, loadAuthRateLimits } from "./auth-limit.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
 
@@ -59,7 +60,7 @@ const pickByHandle = <T extends { handle?: string | null }>(rows: T[], ref: unkn
  */
 export type Relationship = { id: string; requester_bot: string; target_bot: string; requester_owner: string; target_owner: string; status: string; created_at: string; updated_at: string; [column: string]: any };
 
-export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
+export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits>; authRateLimit?: Partial<AuthRateLimits> }
 
 /** GitHub OAuth (#76) is configured through the constructor like every other option, but the declaration is
  *  kept separate from the line above so the auth work in flight does not collide with it textually. */
@@ -110,6 +111,10 @@ function checkPassword(pw: string, stored: string): boolean {
   const got = scryptSync(pw, Buffer.from(salt, "hex"), 32);
   return timingSafeEqual(got, Buffer.from(hash, "hex"));
 }
+
+/** A salted scrypt hash of a throwaway password. An unknown username is checked against it so that it costs
+ *  the same work as a known one: the reply time must not tell a client whether the account exists. */
+const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(16).toString("hex"));
 
 /**
  * The core platform: identity, relationships, grants, conversations, approvals,
@@ -175,6 +180,8 @@ export class Platform {
   /** GitHub OAuth (#76), decided once at startup. `enabled` is the constant every gate and the /ui meta read. */
   readonly oauth: OAuthConfig;
   readonly oauthProviderId: string | null;
+  readonly authRateLimits: AuthRateLimits;
+  private readonly authLimiter: AuthRateLimiter;
   /** Ephemeral "thinking" signals (memory only, see presence.ts). */
   readonly presence = new PresenceStore();
   nowMs: () => number;
@@ -182,6 +189,8 @@ export class Platform {
     this.attachmentLimits = { ...DEFAULT_ATTACHMENT_LIMITS, ...Object.fromEntries(Object.entries(opts.attachments ?? {}).filter(([, v]) => typeof v === "number" && v > 0)) };
     this.faceRoomLimits = loadFaceRoomLimits(opts.faceRooms);
     this.nowMs = opts.now ?? (() => Date.now());
+    this.authRateLimits = loadAuthRateLimits(opts.authRateLimit);
+    this.authLimiter = new AuthRateLimiter(this.authRateLimits, () => this.nowMs());
     this.db = openDb(opts.dbPath ?? ":memory:");
     this.audit = new AuditLog(opts.auditPath ?? ":memory:");
     this.publicBaseUrl = opts.publicBaseUrl ?? "http://localhost:8787";
@@ -317,9 +326,18 @@ export class Platform {
     // surface as a 500. An absent username is still the missing field it always was, and keeps answering 401.
     assert(body?.username === undefined || typeof body.username === "string", 400, "invalid_request", "username must be a string");
     const o = this.get("SELECT * FROM owners WHERE username = ?", body?.username);
-    if (!o || !checkPassword(String(body.password ?? ""), o.password_hash)) throw new ApiError(401, "invalid_credentials");
+    // The password check runs before the existence branch on purpose: an unknown name pays for one scrypt
+    // hash against a fixed dummy, so its timing matches a known name with a wrong password.
+    const ok = checkPassword(String(body?.password ?? ""), o?.password_hash ?? DUMMY_PASSWORD_HASH);
+    if (!o || !ok) throw new ApiError(401, "invalid_credentials");
     this.audit.append(`owner:${o.id}`, "owner.login", o.id, [o.id]);
     return { owner_id: o.id, owner_token: this.issueToken("owner", o.id) };
+  }
+
+  /** One attempt at a password door (login, sign-up, onboarding). Returns a refusal when the client address
+   *  or the named account has used up its window; a refused attempt is not counted again. */
+  authAttempt(keys: { ip?: string | null; account?: string | null }): AuthRateBlock | null {
+    return this.authLimiter.take(keys);
   }
 
   /** Revoke the login token that made this request. The console's "Log out" used to forget the token locally

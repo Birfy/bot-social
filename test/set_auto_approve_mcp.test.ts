@@ -2,10 +2,10 @@ import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { approveAll, friends, startServer } from "./helpers.js";
+import { approveAll, bulkAuth, friends, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer(bulkAuth); });
 after(async () => { await S.stop(); });
 
 const connect = async (token: string) => {

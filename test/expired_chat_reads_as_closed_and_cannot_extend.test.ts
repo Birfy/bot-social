@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { friends, startServer } from "./helpers.js";
+import { bulkAuth, friends, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer(bulkAuth); });
 after(async () => { await S.stop(); });
 
 const intent = () => ({ type: "schedule_meeting", summary: "sync", params: {} });

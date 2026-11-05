@@ -3,10 +3,10 @@ import { after, before, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer, UNTRUSTED_BEGIN } from "../src/mcp.js";
-import { ownerWithBot, startServer } from "./helpers.js";
+import { bulkAuth, ownerWithBot, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer(bulkAuth); });
 after(async () => { await S.stop(); });
 
 async function req(base: string, method: string, path: string, token?: string, body?: unknown) {

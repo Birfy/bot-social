@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { joinSystemText, loadFaceRoomLimits, memberLabel, parseFaceCode, sanitizePeerName } from "../src/face-rooms.js";
-import { ownerWithBot, startServer } from "./helpers.js";
+import { bulkAuth, ownerWithBot, startServer } from "./helpers.js";
 
 async function req(base: string, method: string, path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) {
   const r = await fetch(base + path, {
@@ -114,7 +114,7 @@ test("peer-controlled names are sanitized before they are stored or shown", asyn
 });
 
 test("cap of 8 is enforced and no second room is opened (including concurrent joins)", async (t) => {
-  const s = await startServer({ faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 200, createsPerIp: 50, createsPerAccount: 20 } });
+  const s = await startServer({ ...bulkAuth, faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 200, createsPerIp: 50, createsPerAccount: 20 } });
   t.after(s.stop);
   const owners = [];
   for (let i = 0; i < 10; i++) owners.push(await ownerWithBot(s.base, `cap${i}`));
