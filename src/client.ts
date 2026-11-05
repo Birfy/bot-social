@@ -110,4 +110,6 @@ export class BotClient {
     return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/messages`, { ...payload, bot_id: this.id });
   }
   leaveFaceRoom(room_id: string) { return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/leave`, { bot_id: this.id }); }
+  /** One week of the rooms this Bot's own seats sat in, read from the recaps their close already wrote. */
+  weekDigest() { return this.req("GET", "/v1/digest"); }
 }
