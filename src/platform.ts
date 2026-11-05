@@ -1420,10 +1420,11 @@ export class Platform {
     const ownerId = this.requireOwner(p);
     this.ownBot(ownerId, botId);
     // The same key cannot be revoked from this door: the connector would answer 401 invalid_signature on every send.
-    // Custody is the door that takes it back — disabling it returns the key to the owner, who can then revoke it.
+    // Custody is what has to move first, and the reachable way is `enable_custody` in rotate mode: it moves custody to
+    // a fresh key and leaves this one in place, so this door can then revoke it like any other key.
     const custody = this.get("SELECT kid FROM bot_custody WHERE bot_id = ?", botId);
     assert(!custody || custody.kid !== kid, 409, "custody_key_held",
-      "the platform signs this bot's owner-side sends with this key; disable custody first (disable_custody), then revoke it");
+      "the platform signs this bot's owner-side sends with this key; move custody to a new key first (enable_custody, rotate), then revoke this one");
     const r = this.run("UPDATE bot_keys SET status = 'revoked' WHERE bot_id = ? AND kid = ?", botId, kid);
     assert(r.changes, 404, "key_not_found");
     this.audit.append(`owner:${ownerId}`, "bot.key_revoked", botId, [ownerId], { kid });

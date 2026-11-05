@@ -81,7 +81,8 @@ test("the key the platform signs with cannot be revoked from the key door", asyn
     const rev = await req(s.base, "DELETE", `/v1/bots/${A.bot.id}/keys/${custody.kid}`, token(A));
     assert.equal(rev.status, 409, JSON.stringify(rev.body));
     assert.equal(rev.body.code, "custody_key_held", "the refusal names the state it conflicts with");
-    assert.match(String(rev.body.message), /disable_custody/, "and names the door that can take the key back");
+    assert.match(String(rev.body.message), /enable_custody/, "and names the door that can take the key back");
+    assert.doesNotMatch(String(rev.body.message), /disable_custody/, "never a door that is not reachable today");
     assert.equal(keyRows(s, A.bot.id).find((r) => r.kid === custody.kid).status, "active", "the key was not touched");
     assert.equal((await sendAsOwner(s.base, A, B)).status, 202, "and the connector still signs");
 
@@ -98,11 +99,15 @@ test("the key the platform signs with cannot be revoked from the key door", asyn
     assert.equal(elsewhere.status, 404, JSON.stringify(elsewhere.body));
     assert.equal(elsewhere.body.code, "key_not_found", "a kid this Bot never had is still simply missing");
 
-    // Custody off is how the owner takes the key back: then the same door does what it always did.
-    s.platform.disableCustody(owner(A), A.bot.id);
+    // The reachable way out, in the order the refusal names: enable_custody in rotate mode moves custody to a fresh
+    // key and leaves this one in place, so it is now an ordinary key and this door revokes it like any other.
+    const moved = s.platform.enableCustody(owner(A), A.bot.id, {});
+    assert.notEqual(moved.kid, custody.kid, "custody now names a different key");
+    assert.equal(keyRows(s, A.bot.id).find((r) => r.kid === custody.kid).status, "active", "the move does not retire the key it leaves behind");
     const again = await req(s.base, "DELETE", `/v1/bots/${A.bot.id}/keys/${custody.kid}`, token(A));
     assert.equal(again.status, 200, JSON.stringify(again.body));
     assert.equal(keyRows(s, A.bot.id).find((r) => r.kid === custody.kid).status, "revoked");
+    assert.equal((await sendAsOwner(s.base, A, B)).status, 202, "and the new custody key signs from here on");
   } finally { await s.stop(); }
 });
 
