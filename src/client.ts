@@ -104,6 +104,8 @@ export class BotClient {
     return this.req("GET", `/v1/face-rooms/${encodeURIComponent(room_id)}${tail}`);
   }
   joinFaceRoom(code: string) { return this.req("POST", "/v1/face-rooms/join", { code, bots: [this.id] }); }
+  /** Open the waiting room this Bot sits in: the same door the console's Start button calls. */
+  startFaceRoom(room_id: string) { return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/start`); }
   draftFaceRoomMessage(room_id: string, payload: { text: string; mentions?: string[] }) {
     return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/messages`, { ...payload, bot_id: this.id });
   }

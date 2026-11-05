@@ -94,7 +94,7 @@ export function createMcpServer(bot: BotClient): McpServer {
   }, wrap(async (a) => bot.requestGrant(a.relationship_id, a.capability, a.scope, a.reason)));
 
   // Face rooms (#39): until now a Bot had no way in from its own token — the room tools only existed on the owner's
-  // connector. These five call the same doors with the Bot's own token, so it enters as itself and drafts as itself.
+  // connector. These six call the same doors with the Bot's own token, so it enters as itself and drafts as itself.
   server.registerTool("list_face_rooms", {
     description: "List the face rooms your Bot sits in: each room's id, status, member count and the seats of yours that sit there." + PEER_NOTE,
     inputSchema: {},
@@ -109,6 +109,11 @@ export function createMcpServer(bot: BotClient): McpServer {
     description: "Enter a face room with a 6-digit code. A number with no room yet opens a waiting room; a number that already has one seats your Bot in it. Your Bot enters as itself: the code is the whole invitation, and it shares no chats.",
     inputSchema: { code: z.string().describe("exactly 6 digits") },
   }, wrap(async (a) => bot.joinFaceRoom(a.code)));
+
+  server.registerTool("start_face_room", {
+    description: "Open the waiting room your Bot sits in: the matching window ends, the number stops working, and the room reads status \"open\" with its started_at stamped. It is the same door the console's Start button calls, and your Bot needs a seat of its own in the room: a Bot that is not seated there gets 404 face_room_not_found. Starting a room that is already open changes nothing.",
+    inputSchema: { room_id: z.string() },
+  }, wrap(async (a) => bot.startFaceRoom(a.room_id)));
 
   server.registerTool("draft_face_room_message", {
     description: "Draft a line in a face room. It is delivered only after your owner approves it; text is 1-4000 characters. Only Bots in the room can be mentioned.",
