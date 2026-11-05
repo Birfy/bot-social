@@ -13,7 +13,7 @@ import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { clipToDailyHours, ianaTimezone, isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
 import {
-  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerBotName, peerDisplayName, peerOwnerName, sanitizePeerName,
+  FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomCloseReason, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerBotName, peerDisplayName, peerOwnerName, sanitizePeerName,
 } from "./face-rooms.js";
 import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
 
@@ -487,7 +487,7 @@ export class Platform {
       // room keeps writing events (and countersignatures) for a Bot nobody can read.
       for (const room of rooms) {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", room.room_id, m.id);
-        if (member) this.removeFaceMember(room.room_id, member);
+        if (member) this.removeFaceMember(room.room_id, member, "room_closed");
         this.endRoomGrantsForBots(room.room_id, [m.id]);
       }
       // #90: the local-room tickets this identity minted are reach of its own. Withdraw them and end every claim
@@ -1996,7 +1996,7 @@ export class Platform {
   }
 
   /** End room usages for these grants and remove the granted bot from those rooms when we added it. */
-  private endGrantRooms(grantIds: string[], actor: string): string[] {
+  private endGrantRooms(grantIds: string[], actor: string, reason: FaceRoomCloseReason = "room_closed"): string[] {
     if (!grantIds.length) return [];
     const now = nowIso();
     const removed: string[] = [];
@@ -2027,7 +2027,7 @@ export class Platform {
         if (!live && !seated) continue;
         if (live) this.run("UPDATE grant_rooms SET ended_at = ? WHERE grant_id = ? AND room_id = ?", now, gid, u.room_id);
         if (seated) {
-          this.removeFaceMember(u.room_id, member);
+          this.removeFaceMember(u.room_id, member, reason);
           this.settleHeldRoomCards(u.room_id, granted);
           this.endRoomGrantsForBots(u.room_id, [granted]);
         }
@@ -2041,7 +2041,7 @@ export class Platform {
         const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", g.room_id, granted);
         const seated = !!member && member.added_by_owner_id === granteeOwner && member.added_by_owner_id !== member.owner_id;
         if (seated) {
-          this.removeFaceMember(g.room_id, member);
+          this.removeFaceMember(g.room_id, member, reason);
           this.settleHeldRoomCards(g.room_id, granted);
           this.endRoomGrantsForBots(g.room_id, [granted]);
           if (!removed.includes(g.room_id)) removed.push(g.room_id);
@@ -3840,7 +3840,7 @@ export class Platform {
       this.insertGrant(id, b.owner_id, a.id, cap, { kind: "room", room_id: roomId }, undefined, actor, { roomId });
     }
   }
-  private removeFaceMember(roomId: string, m: any) {
+  private removeFaceMember(roomId: string, m: any, reason: FaceRoomCloseReason) {
     if (m.left_at) return;
     const leadBefore = this.faceEffectiveLeadId(roomId);
     const now = this.ts();
@@ -3858,7 +3858,7 @@ export class Platform {
       this.faceSetLead(roomId, null, "lead_left", m.bot_id);
       announced = true;
     }
-    this.faceCloseIfEmpty(roomId);
+    this.faceCloseIfEmpty(roomId, reason);
     // The seat ends here for every door that takes one (a Bot's own `leave`, an owner taking a guest seat back, a
     // revoked share or home member). A line this Bot left waiting in this room can never be delivered: the
     // delivery door refuses it as `not_a_member`, so the card would sit in its owner's queue for 24 hours and then
@@ -3888,10 +3888,15 @@ export class Platform {
     }
     this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?) AND NOT EXISTS (SELECT 1 FROM grants g2 WHERE g2.relationship_id = relationships.id AND g2.status = 'active')", now, roomId);
   }
-  private faceCloseIfEmpty(roomId: string) {
+  /** Why a room ended, as the recap says it: the last seat left on its own, someone took its seat back, or the
+   *  share that paid for it lapsed. */
+  private faceCloseIfEmpty(roomId: string, reason: FaceRoomCloseReason) {
     if (this.get("SELECT COUNT(*) n FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).n) return;
     const now = this.ts();
-    this.run("UPDATE face_rooms SET status = 'closed', closed_at = ?, code = NULL WHERE id = ?", now, roomId);
+    // One closure only: the claim is the UPDATE itself, so a second call (the same door again, or a sweep racing the
+    // last seat out) neither re-settles the room nor hands out a second recap.
+    const claim = this.run("UPDATE face_rooms SET status = 'closed', closed_at = ?, code = NULL WHERE id = ? AND status != 'closed'", now, roomId);
+    if (!claim.changes) return;
     this.run("DELETE FROM face_room_codes WHERE room_id = ?", roomId);
     // A line still waiting here is dropped by the closure, and its Bot must be told: cancelling the rows by hand
     // left it with a card that changed under it and no `approval.decided` to say why. The canceller every other
@@ -3905,6 +3910,36 @@ export class Platform {
     }
     this.run("UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL", now, roomId);
     this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)", now, roomId);
+    // The room is gone: it is not listed any more and its transcript is behind the join floor, so the recap is what
+    // a member keeps. Written after the cancellations above, so the lines the closure dropped are counted, and handed
+    // to every seat the room ever had — one identical payload each, nothing trimmed by arrival and nothing per
+    // recipient. A member that was never seated by the room cannot read it.
+    const recap = this.faceCloseRecap(this.get("SELECT * FROM face_rooms WHERE id = ?", roomId), reason);
+    this.run("UPDATE face_rooms SET recap = ? WHERE id = ?", JSON.stringify(recap), roomId);
+    for (const m of this.all("SELECT DISTINCT bot_id FROM face_room_members WHERE room_id = ? ORDER BY bot_id", roomId)) {
+      this.emit(m.bot_id, "face_room.recap", recap);
+    }
+  }
+  /** The recap of a closed room: counts and names only. Never a line's text, and never per recipient — the same object
+   *  goes to every member, so two members cannot disagree about what the room decided. */
+  private faceCloseRecap(room: any, reason: FaceRoomCloseReason) {
+    const decisions: Record<string, number> = { approved: 0, rejected: 0, cancelled: 0, expired: 0 };
+    for (const row of this.all(`SELECT a.status, COUNT(*) n FROM approvals a
+        WHERE a.kind = 'face_room_message' AND a.subject_id IN (SELECT id FROM face_room_drafts WHERE room_id = ?)
+        GROUP BY a.status`, room.id)) {
+      if (Object.hasOwn(decisions, row.status)) decisions[row.status] = row.n;
+    }
+    return {
+      recap_version: 1,
+      room_id: room.id as string,
+      reason,
+      note: (room.note ?? null) as string | null,
+      started_at: (room.started_at ?? null) as string | null,
+      closed_at: room.closed_at as string,
+      members: this.all("SELECT bot_id, handle, owner_name FROM face_room_members WHERE room_id = ? ORDER BY joined_at, bot_id", room.id)
+        .map((m: any) => ({ handle: "@" + String(m.handle).replace(/^@/, ""), owner_name: m.owner_name })),
+      decisions,
+    };
   }
   /**
    * The matching-window deadline is the candidate's alone: `open` means the number is void, and the room then ends
@@ -3991,7 +4026,7 @@ export class Platform {
             LIMIT 1`, id)) ended.add(id);
       }
     }
-    if (ended.size) this.endGrantRooms([...ended], "platform");
+    if (ended.size) this.endGrantRooms([...ended], "platform", "expired");
   }
   private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
@@ -4847,7 +4882,7 @@ export class Platform {
       assert(leaving.length, 404, "bot_not_found", "none of your Bots are in this room");
     }
     this.db.transaction(() => {
-      for (const m of leaving) this.removeFaceMember(roomId, m);
+      for (const m of leaving) this.removeFaceMember(roomId, m, "room_left");
       this.endRoomGrantsForBots(roomId, leaving.map((m: any) => m.bot_id));
     }).immediate();
     // The members still here, plus the one leaving: an owner who left earlier is no longer a member, so later
