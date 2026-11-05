@@ -480,8 +480,20 @@ function bindRequests(root, after) {
 
 // ------------------------------------------------------------------ pages
 const PAGES = {};
+// The reason a room ended, as its recap says it; an unknown reason is printed as it arrived rather than hidden.
+const ROOM_END = { room_left: "Everyone left", room_closed: "The room was closed", expired: "Its share expired" };
+/** This week's face rooms as one card: one line per room that ended, from its recap. Counts and names only. */
+function weekRoomsCard(d) {
+  const rooms = d?.rooms ?? [], c = d?.counts ?? {};
+  if (!rooms.length) return `<h2>Face rooms this week</h2><div class="empty">No room ended this week.</div>`;
+  return `<h2>Face rooms this week <span class="n">${rooms.length}</span></h2>
+    <p class="sub">Rooms that ended between ${fmt(d.period.start)} and ${fmt(d.period.end)}. ${c.approved} approved · ${c.rejected} rejected · ${c.cancelled} cancelled · ${c.expired} expired.</p>
+    <div class="list">${rooms.map((x) => `<div class="it"><div class="grow"><div><b>${esc(ROOM_END[x.reason] || x.reason || "Room ended")}</b>${x.note ? ` · <span class="mut">${esc(x.note)}</span>` : ""}</div>
+      <div class="mut">${(x.members || []).map((m) => esc(m.handle)).join(", ") || "no members on record"} · ${fmt(x.closed_at)}</div></div>
+      <div class="mut small" style="text-align:right">${x.decisions.approved} approved<br>${x.decisions.rejected} rejected${x.decisions.cancelled ? `<br>${x.decisions.cancelled} cancelled` : ""}${x.decisions.expired ? `<br>${x.decisions.expired} expired` : ""}</div></div>`).join("")}</div>`;
+}
 PAGES[""] = async (v) => {
-  const [a, r, c, bots, cancelled, expired] = await Promise.all([api("GET", "/v1/approvals?status=pending"), api("GET", "/v1/relationships"), api("GET", "/v1/conversations"), api("GET", "/v1/bots"), api("GET", "/v1/approvals?status=cancelled"), api("GET", "/v1/approvals?status=expired")]);
+  const [a, r, c, bots, cancelled, expired, digest] = await Promise.all([api("GET", "/v1/approvals?status=pending"), api("GET", "/v1/relationships"), api("GET", "/v1/conversations"), api("GET", "/v1/bots"), api("GET", "/v1/approvals?status=cancelled"), api("GET", "/v1/approvals?status=expired"), api("GET", "/v1/digest")]);
   const incoming = r.relationships.filter((x) => x.status === "pending_target" && x.direction === "incoming");
   const friends = r.relationships.filter((x) => x.status === "active");
   const live = c.conversations.filter((x) => x.status !== "closed");
@@ -499,6 +511,7 @@ PAGES[""] = async (v) => {
     ${lapsed.length ? `<h2>Expired <span class="n">${lapsed.length}</span></h2><p class="sub">Nothing went out. These approvals ran out before anyone decided, so the message was never sent.</p>${lapsed.map(expiredCard).join("")}` : ""}
     ${recent.length ? `<h2>Recently cancelled <span class="n">${recent.length}</span></h2>${recent.map(cancelledCard).join("")}` : ""}
     ${incoming.length ? `<h2>${incoming.length === 1 ? "Friend request" : "Friend requests"} <span class="n">${incoming.length}</span></h2>${incoming.map(requestCard).join("")}` : ""}
+    ${weekRoomsCard(digest)}
     <h2>Recent chats</h2>${live.length || c.conversations.length ? convList(c.conversations.slice(0, 5)) : `<div class="empty">No chats yet</div>`}`;
   bindApprovals(v, render); bindRequests(v, render);
 };
