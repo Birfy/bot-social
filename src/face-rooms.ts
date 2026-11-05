@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS face_rooms (
   started_at TEXT,
   closed_at TEXT,
   created_by_owner_id TEXT,
-  lead_bot_id TEXT
+  lead_bot_id TEXT,
+  note TEXT
 );
 CREATE TABLE IF NOT EXISTS face_room_codes (
   code TEXT PRIMARY KEY,

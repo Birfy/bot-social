@@ -94,6 +94,8 @@ export function openDb(path: string): Database.Database {
   const fr = (db.prepare("PRAGMA table_info(face_rooms)").all() as { name: string }[]).map((c) => c.name);
   if (!fr.includes("created_by_owner_id")) db.exec("ALTER TABLE face_rooms ADD COLUMN created_by_owner_id TEXT");
   if (!fr.includes("lead_bot_id")) db.exec("ALTER TABLE face_rooms ADD COLUMN lead_bot_id TEXT");
+  // What the room is for, written by its lead; room metadata, so it survives the floor rule that hides older lines.
+  if (!fr.includes("note")) db.exec("ALTER TABLE face_rooms ADD COLUMN note TEXT");
   return db;
 }
 
