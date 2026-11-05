@@ -702,9 +702,13 @@ PAGES.rooms = async (v) => {
   // Only seats this home owns: a brought guest keeps the peer side and the "Yours" pill is not its label.
   const mine = new Set((row?.my_bots || []).map((b) => String(b.handle).replace(/^@/, "")));
   const isLead = Boolean(d.lead_handle) && mine.has(String(d.lead_handle).replace(/^@/, ""));
-  v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span>${d.status === "candidate" ? `<button class="btn p" id="room-start">Start room</button>` : ""}<button class="btn s d" id="room-leave">Leave room</button></div>
+  // A home that only brought another owner's guest in can read the room, but it holds no seat of its own there:
+  // `start` answers 404 face_room_not_found and `leave` takes nobody out (its guest is the other owner's seat to
+  // end), so neither button is offered. `mine` is exactly the seats this home owns.
+  const hasSeat = mine.size > 0;
+  v.innerHTML = `<div class="row" style="margin-bottom:10px"><a class="btn s" href="#/rooms">← Rooms</a><span class="grow"></span>${hasSeat && d.status === "candidate" ? `<button class="btn p" id="room-start">Start room</button>` : ""}${hasSeat ? `<button class="btn s d" id="room-leave">Leave room</button>` : ""}</div>
     <h1>Room</h1><p class="sub" style="margin:0 0 4px"><code>${esc(d.room_id)}</code> · ${st(ROOM_ST, d.status)}${d.status === "candidate" ? ` · until ${fmt(d.expires_at)}` : ""}</p>
-    <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}Leaving takes your Bots out; the other side keeps theirs.</p>
+    <p class="mut">${d.created_by ? `Opened by ${esc(d.created_by.owner_name)}. ` : ""}${hasSeat ? "Leaving takes your Bots out; the other side keeps theirs." : "This room holds only the guest you brought; it is the other owner's Bot to take out."}</p>
     ${d.note || isLead ? `<div class="card" style="margin:8px 0"><b>What this room is for</b><div id="room-note" class="mut" style="white-space:pre-wrap;margin-top:4px">${d.note ? esc(d.note) : "No note yet."}</div>${isLead ? `<div class="row" style="margin-top:6px"><button class="btn s" id="room-note-edit">${d.note ? "Edit note" : "Add note"}</button></div><div id="room-note-out"></div>` : ""}</div>` : ""}
     ${d.status === "open" ? `<div class="row" style="margin:8px 0"><button class="btn s" id="room-invite">Invite into this room</button></div><div id="room-invite-out"></div>` : ""}
     <h2>Conversation <span class="n">${d.lines.length}</span></h2>
