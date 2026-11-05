@@ -949,13 +949,13 @@ export class Platform {
       // #44: `home` is the owner's FlyBot home Bot in the "@handle" spelling used by event.from / item.peer, so a
       // connector never has to parse connector_identity or reconcile the two spellings. `bots[].handle` stays bare.
       const home = this.get("SELECT handle, display_name FROM bots WHERE owner_id = ? AND integration_type = 'flybot-home' ORDER BY created_at LIMIT 1", p.ownerId);
-      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, notify_bot_id: o.notify_bot_id ?? null, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
+      return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, notify_bot_id: o.notify_bot_id ?? null, quiet_start: o.quiet_start ?? null, quiet_end: o.quiet_end ?? null, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
     return { kind: "bot", ...this.publicBot(b, true), status: b.status };
   }
 
-  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean; notify_bot_id?: string | null }) {
+  updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean; notify_bot_id?: string | null; quiet_start?: string | null; quiet_end?: string | null }) {
     const ownerId = this.requireOwner(p);
     // A refused field must not leave the other fields of the same request written: validate first.
     let displayName: string | undefined;
@@ -980,6 +980,23 @@ export class Platform {
         notifyBotId = outlet.id;
       }
     }
+    // Quiet hours are the owner's own wall clock: `HH:MM` read in their zone, so the pair is what makes a window.
+    // One without the other, a malformed clock, or a window that starts where it ends is refused before any write;
+    // both null clears the window and turns the immediate announcement back on.
+    let quiet: { start: string | null; end: string | null } | undefined;
+    if (body?.quiet_start !== undefined || body?.quiet_end !== undefined) {
+      assert(body?.quiet_start !== undefined && body?.quiet_end !== undefined, 400, "invalid_request", "quiet_start and quiet_end must be set together");
+      const clock = (v: unknown, field: string): string | null => {
+        if (v === null) return null;
+        assert(typeof v === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(v), 400, "invalid_request", `${field} must be HH:MM (24-hour) or null`);
+        return v;
+      };
+      const start = clock(body.quiet_start, "quiet_start");
+      const end = clock(body.quiet_end, "quiet_end");
+      assert((start === null) === (end === null), 400, "invalid_request", "quiet_start and quiet_end must both be a time or both be null");
+      assert(start === null || start !== end, 400, "invalid_request", "quiet_start and quiet_end must differ");
+      quiet = { start, end };
+    }
     // Validate before any write, so a bad zone cannot leave the rest of the patch behind it half-applied.
     const timezone = body.timezone ? this.validateTimezone(body.timezone) : undefined;
     // The words are matched against message text verbatim, so a coerced number or object is a word nobody typed; refuse
@@ -995,6 +1012,7 @@ export class Platform {
     if (displayName !== undefined) { this.run("UPDATE owners SET display_name = ? WHERE id = ?", displayName, ownerId); changed.push("display_name"); }
     if (typeof body.auto_approve_face_rooms === "boolean") { this.run("UPDATE owners SET auto_approve_face_rooms = ? WHERE id = ?", body.auto_approve_face_rooms ? 1 : 0, ownerId); changed.push("auto_approve_face_rooms"); }
     if (notifyBotId !== undefined) { this.run("UPDATE owners SET notify_bot_id = ? WHERE id = ?", notifyBotId, ownerId); changed.push("notify_bot_id"); }
+    if (quiet) { this.run("UPDATE owners SET quiet_start = ?, quiet_end = ? WHERE id = ?", quiet.start, quiet.end, ownerId); changed.push("quiet_start", "quiet_end"); }
     // `fields` alone cannot tell a switch turned on from one turned off: both rows would read alike. Record the value
     // where the value is the point — the auto-approve flag, and how many sensitive words were set, never the words
     // themselves, which are the owner's secrets. Every other field stays a name only.
@@ -2554,19 +2572,61 @@ export class Platform {
    * so the owner needs no page open and the platform needs no mail or push service. The event carries no text: the
    * card id, its kind, how many cards wait and when this one expires. One ledger row per card makes a second
    * announcement (a retried or replayed path) a no-op.
+   *
+   * Quiet hours: inside the owner's window the row is still written (that is what makes the announcement once-only)
+   * but nothing is emitted; the cards it holds leave together as one summary at the first delivery moment after the
+   * window ends (`announceHeldApprovals`), so a night of cards wakes the Bot once instead of once per card.
    */
   notifyOwnerOfApproval(approvalId: string): boolean {
-    const a = this.get("SELECT a.id, a.owner_id, a.kind, a.expires_at, o.notify_bot_id FROM approvals a JOIN owners o ON o.id = a.owner_id WHERE a.id = ?", approvalId);
+    const a = this.get("SELECT a.id, a.owner_id, a.kind, a.expires_at, o.notify_bot_id, o.timezone, o.quiet_start, o.quiet_end FROM approvals a JOIN owners o ON o.id = a.owner_id WHERE a.id = ?", approvalId);
     if (!a?.notify_bot_id) return false;
     // Defense in depth: a setting written before the revocation checks above can still name a revoked identity.
     // Its queue is refused (#177 ③), so an announcement there would be write-only. A frozen outlet is fine: the
     // queue is read again after resume.
     const outlet = this.get("SELECT status FROM bots WHERE id = ?", a.notify_bot_id);
     if (!outlet || outlet.status === "revoked") return false;
-    const ins = this.run("INSERT OR IGNORE INTO approval_notifications (approval_id, owner_id, bot_id, created_at) VALUES (?,?,?,?)", a.id, a.owner_id, a.notify_bot_id, nowIso());
+    const quiet = this.inQuietHours(a);
+    // Outside the window the cards held overnight go out first, as one summary, so the new card's own event is not
+    // folded into a batch the Bot already heard about.
+    if (!quiet) this.announceHeldApprovals(a.owner_id, a.notify_bot_id);
+    const ins = this.run(
+      "INSERT OR IGNORE INTO approval_notifications (approval_id, owner_id, bot_id, created_at, delivered_at) VALUES (?,?,?,?,?)",
+      a.id, a.owner_id, a.notify_bot_id, nowIso(), quiet ? null : nowIso(),
+    );
     if (!ins.changes) return false;
+    if (quiet) return false;
     const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", a.owner_id).n;
     this.emit(a.notify_bot_id, "approval.created", { approval_id: a.id, kind: a.kind, pending_count, expires_at: a.expires_at });
+    return true;
+  }
+
+  /** The owner's wall clock now, as `HH:MM`, read in their own zone; a legacy zone Intl refuses reads as UTC. */
+  private ownerClock(o: { timezone?: string | null }): string {
+    const fmt = (zone: string) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hour12: false });
+    try { return fmt(o.timezone || "Asia/Shanghai").format(new Date(this.nowMs())); }
+    catch { return fmt("UTC").format(new Date(this.nowMs())); }
+  }
+
+  /** Is the owner's quiet window open? The window is `[start, end)` and may cross midnight (22:00–07:00 means the
+   *  evening and the night, not the day between); an unset pair is no window. */
+  private inQuietHours(o: { timezone?: string | null; quiet_start?: string | null; quiet_end?: string | null }): boolean {
+    if (!o.quiet_start || !o.quiet_end || o.quiet_start === o.quiet_end) return false;
+    const now = this.ownerClock(o);
+    return o.quiet_start < o.quiet_end
+      ? now >= o.quiet_start && now < o.quiet_end
+      : now >= o.quiet_start || now < o.quiet_end;
+  }
+
+  /** One summary for every card that waited through quiet hours, then mark the batch delivered so the same cards are
+   *  never announced twice. The summary names the count and the few earliest cards, never their text. */
+  private announceHeldApprovals(ownerId: string, botId: string): boolean {
+    const outlet = this.get("SELECT status FROM bots WHERE id = ?", botId);
+    if (!outlet || outlet.status === "revoked") return false;
+    const held = this.all("SELECT approval_id FROM approval_notifications WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL ORDER BY rowid ASC", ownerId, botId);
+    if (!held.length) return false;
+    const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", ownerId).n;
+    this.emit(botId, "approval.digest", { count: held.length, approval_ids: held.slice(0, 5).map((r: any) => r.approval_id), pending_count });
+    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL", nowIso(), ownerId, botId);
     return true;
   }
 
@@ -2700,6 +2760,10 @@ export class Platform {
   listApprovals(p: Principal, status = "pending") {
     const ownerId = this.requireOwner(p);
     this.expireStale();
+    // Opening the queue is a delivery moment too: a batch held through quiet hours goes out here once the window is
+    // over, so the Bot hears about it without waiting for the next card to be created.
+    const o = this.owner(ownerId);
+    if (o.notify_bot_id && !this.inQuietHours(o)) this.announceHeldApprovals(ownerId, o.notify_bot_id);
     const rows = status === "all" ? this.all("SELECT * FROM approvals WHERE owner_id = ? ORDER BY created_at DESC", ownerId) : this.all("SELECT * FROM approvals WHERE owner_id = ? AND status = ? ORDER BY created_at ASC", ownerId, status);
     return rows.map((a) => this.approvalCard(a));
   }
