@@ -6,7 +6,8 @@
 //
 // The rule pinned here: a key the platform signs with is excluded from the retirement sweep (it is the platform's
 // signing identity, not an old key of the caller's) and cannot be revoked from the key door, which answers 409 and
-// names `disable_custody` — turning custody off is the supported way to take the key back. Everything a bot whose
+// names `enable_custody` in rotate mode — moving custody to a fresh key is the reachable way to take the old one
+// back. Everything a bot whose
 // key the platform does NOT hold could do stays exactly as it was: both the positive and the negative cases are
 // below, because the exclusion must not widen the door for anyone else.
 import assert from "node:assert/strict";
