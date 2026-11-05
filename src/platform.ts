@@ -5,7 +5,7 @@ import { openDb } from "./db.js";
 import { ApiError, assert } from "./errors.js";
 import { newId, randomToken } from "./ids.js";
 import { seal, unseal, publicRawFromPrivatePem } from "./custody.js";
-import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToken, jcs, payloadDigest, signString, verifyString, webhookSignature, publicKeyFromRaw } from "./crypto.js";
+import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToken, jcs, payloadDigest, sha256Hex as sha256Text, signString, verifyString, webhookSignature, publicKeyFromRaw } from "./crypto.js";
 import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan } from "./policy.js";
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
@@ -16,8 +16,22 @@ import {
   FACE_ROOM_NAME_MAX, FACE_ROOM_ROLE_MAX, FaceRoomCloseReason, FaceRoomLimits, isFaceCode, isInviteTicket, joinSystemText, leadSystemText, leaveSystemText, loadFaceRoomLimits, memberLabel, newInviteTicket, peerBotName, peerDisplayName, peerOwnerName, sanitizePeerName,
 } from "./face-rooms.js";
 import { LOCAL_INVITE_MAX_BOTS, LOCAL_INVITE_NO_DEADLINE, isLocalInviteTicket, isLocalRoomId, newLocalInviteTicket } from "./local-room-invites.js";
+import {
+  GITHUB_PROVIDER, OAuthConfig, OAuthExchangeError, OAuthOptions, OAuthProfile,
+  newOAuthSecret, newPkceVerifier, oauthBindingCookie, oauthClearCookie, oauthConfigFrom, pkceChallenge,
+  readOAuthCookie, subjectFingerprint, timingSafeEqualString,
+} from "./oauth.js";
 
 export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; tokenId?: string; attestTyped?: boolean } | { kind: "bot"; botId: string; ownerId: string };
+
+/** One callback turn, as the route needs it: a redirect, the HTML page, or a 502 — always with the cookie clear. */
+export interface OAuthCallbackResult {
+  status: number;
+  location?: string;
+  /** The API-side code; the console fragment uses its own namespace (§13). */
+  apiCode?: string;
+  clearCookie: string;
+}
 
 /** Comparison key for a Bot handle: surrounding spaces and an optional leading `@` removed, lowercased.
  *  Writes store this form; lookups compare `LOWER(handle)` with it, so `@Zed.Bot` and `@zed.bot` are one Bot. */
@@ -46,6 +60,10 @@ const pickByHandle = <T extends { handle?: string | null }>(rows: T[], ref: unkn
 export type Relationship = { id: string; requester_bot: string; target_bot: string; requester_owner: string; target_owner: string; status: string; created_at: string; updated_at: string; [column: string]: any };
 
 export interface PlatformOptions { kmsKey?: Buffer; dbPath?: string; auditPath?: string; publicBaseUrl?: string; fetchImpl?: typeof fetch; webhooks?: WebhookOptions; attachments?: Partial<AttachmentLimits>; now?: () => number; faceRooms?: Partial<FaceRoomLimits> }
+
+/** GitHub OAuth (#76) is configured through the constructor like every other option, but the declaration is
+ *  kept separate from the line above so the auth work in flight does not collide with it textually. */
+export interface PlatformOptions { oauth?: OAuthOptions }
 
 /**
  * Why a held send waits (#49), so a client branches on one field instead of reading `policy.reasons`.
@@ -154,6 +172,9 @@ export class Platform {
   private kmsKey: Buffer;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
+  /** GitHub OAuth (#76), decided once at startup. `enabled` is the constant every gate and the /ui meta read. */
+  readonly oauth: OAuthConfig;
+  readonly oauthProviderId: string | null;
   /** Ephemeral "thinking" signals (memory only, see presence.ts). */
   readonly presence = new PresenceStore();
   nowMs: () => number;
@@ -167,6 +188,8 @@ export class Platform {
     this.kmsKey = opts.kmsKey ?? randomBytes(32);
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.webhooks = new WebhookPusher(this.db, this.fetchImpl, () => this.publicBaseUrl, opts.webhooks);
+    this.oauth = oauthConfigFrom(process.env, opts.oauth);
+    this.oauthProviderId = this.oauth.enabled ? GITHUB_PROVIDER.id : null;
     this.audit.append("platform", "platform.started", null, [], { policy_version: POLICY_VERSION, platform_kid: this.platformKid, platform_public_key: this.platformKey.publicKey });
   }
   private ts() { return new Date(this.nowMs()).toISOString(); }
@@ -313,9 +336,9 @@ export class Platform {
     return { ok: true };
   }
 
-  private issueToken(kind: "owner" | "bot", subject: string) {
+  private issueToken(kind: "owner" | "bot", subject: string, via: "password" | "oauth:github" = "password") {
     const t = randomToken(kind === "owner" ? "otk" : "btk");
-    this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at) VALUES (?,?,?,?)", hashToken(t), kind, subject, nowIso());
+    this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at, via) VALUES (?,?,?,?,?)", hashToken(t), kind, subject, nowIso(), via);
     return t;
   }
 
@@ -1038,6 +1061,235 @@ export class Platform {
       ...(Array.isArray(body.sensitive_terms) ? { sensitive_terms: body.sensitive_terms.length } : {}),
     });
     return this.me(p);
+  }
+
+  // ================================================================ GitHub OAuth (#76)
+  private oauthReady() {
+    assert(this.oauth.enabled, 404, "oauth_not_configured", "GitHub sign-in is not configured on this server");
+  }
+  private oauthProviderOr404(providerId: unknown) {
+    this.oauthReady();
+    const id = typeof providerId === "string" ? providerId : "";
+    assert(id === GITHUB_PROVIDER.id, 404, "unknown_provider", "unknown identity provider");
+    return GITHUB_PROVIDER;
+  }
+  /** `signin` counts starts; `connect`/`unbind` count failures. One window shape: 5 failures / 15 min. */
+  private oauthAttempts(action: "signin" | "connect" | "unbind", key: string, windowMs: number): number {
+    const since = new Date(this.nowMs() - windowMs).toISOString();
+    return (this.get("SELECT COUNT(*) n FROM oauth_attempts WHERE action = ? AND attempt_key = ? AND created_at > ?", action, key, since) as any).n as number;
+  }
+  private oauthLocked(action: "connect" | "unbind", ownerId: string): boolean {
+    return this.oauthAttempts(action, ownerId, 15 * 60_000) >= 5;
+  }
+  private oauthRecordFailure(action: "connect" | "unbind", ownerId: string) {
+    this.run("INSERT INTO oauth_attempts (action, attempt_key, created_at) VALUES (?,?,?)", action, ownerId, this.ts());
+    this.run("DELETE FROM oauth_attempts WHERE created_at <= ?", new Date(this.nowMs() - 24 * 3600_000).toISOString());
+  }
+  private oauthClearFailures(action: "connect" | "unbind", ownerId: string) {
+    this.run("DELETE FROM oauth_attempts WHERE action = ? AND attempt_key = ?", action, ownerId);
+  }
+
+  /**
+   * One state row and the browser binding that goes with it. The state and the cookie are stored only as
+   * sha256; the verifier is stored because the token exchange needs it, and the callback nulls it on consume.
+   */
+  private oauthMintState(mode: "link" | "signin", ownerId: string | null) {
+    const cfg = this.oauth;
+    const now = this.nowMs();
+    this.run("DELETE FROM oauth_states WHERE expires_at <= ?", new Date(now).toISOString());
+    if (ownerId) {
+      const pending = (this.get("SELECT COUNT(*) n FROM oauth_states WHERE owner_id = ? AND consumed_at IS NULL AND expires_at > ?", ownerId, new Date(now).toISOString()) as any).n;
+      if (pending >= 5) throw new ApiError(429, "oauth_too_many_pending", "too many GitHub sign-ins are waiting; finish one or wait for them to expire");
+    }
+    const state = newOAuthSecret();
+    const verifier = newPkceVerifier(); // base64url(32 bytes) = 43 chars: the CHECK's floor
+    const cookie = newOAuthSecret();
+    const expiresAt = new Date(now + 10 * 60_000).toISOString();
+    this.run(`INSERT INTO oauth_states (state_hash, provider, mode, owner_id, cookie_hash, code_verifier, redirect_uri, created_at, expires_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`,
+      sha256Text(state), GITHUB_PROVIDER.id, mode, ownerId, sha256Text(cookie), verifier, cfg.redirectUri!, new Date(now).toISOString(), expiresAt);
+    const authorize_url = GITHUB_PROVIDER.authorizeUrl({
+      state, redirectUri: cfg.redirectUri!, codeChallenge: pkceChallenge(verifier), clientId: cfg.clientId!,
+      ...(mode === "signin" ? { prompt: "select_account" } : {}),
+    });
+    return { authorize_url, expires_at: expiresAt, cookie: oauthBindingCookie(cookie, cfg) };
+  }
+
+  oauthProviders(p: Principal) {
+    this.oauthReady();
+    this.requireOwner(p);
+    const provider = GITHUB_PROVIDER;
+    return { providers: [{ id: provider.id, label: provider.label, scopes: [...provider.scopes] }] };
+  }
+
+  /** Link start: owner login token + the account password (D4 + E1 = (a), the `connect` bucket). */
+  oauthLinkStart(p: Principal, providerId: unknown, body: any) {
+    this.oauthProviderOr404(providerId);
+    const ownerId = this.requireOwner(p);
+    if (this.oauthLocked("connect", ownerId)) throw new ApiError(429, "oauth_too_many_attempts", "too many wrong passwords; try again later");
+    const o = this.owner(ownerId);
+    let ok = false;
+    if (typeof body?.current_password === "string" && typeof o.password_hash === "string" && o.password_hash) {
+      try { ok = checkPassword(body.current_password, o.password_hash); } catch { ok = false; }
+    }
+    if (!ok) {
+      this.oauthRecordFailure("connect", ownerId);
+      throw new ApiError(401, "invalid_credentials", "current password is wrong");
+    }
+    this.oauthClearFailures("connect", ownerId);
+    const minted = this.oauthMintState("link", ownerId);
+    return { authorize_url: minted.authorize_url, expires_at: minted.expires_at, cookie: minted.cookie };
+  }
+
+  /** Sign-in start: no auth, no body, no password. The address half of the budget is a courtesy (§12 T8). */
+  oauthSigninStart(ip: string | undefined) {
+    this.oauthReady();
+    const key = ip || "unknown";
+    if (this.oauthAttempts("signin", key, 10 * 60_000) >= 20) throw new ApiError(429, "oauth_too_many_attempts", "too many GitHub sign-ins from this address; try again later");
+    const hourAgo = new Date(this.nowMs() - 3600_000).toISOString();
+    if ((this.get("SELECT COUNT(*) n FROM oauth_attempts WHERE action = 'signin' AND created_at > ?", hourAgo) as any).n >= 200) {
+      throw new ApiError(429, "oauth_too_many_attempts", "too many GitHub sign-ins right now; try again later");
+    }
+    this.run("INSERT INTO oauth_attempts (action, attempt_key, created_at) VALUES (?,?,?)", "signin", key, this.ts());
+    this.run("DELETE FROM oauth_attempts WHERE created_at <= ?", new Date(this.nowMs() - 24 * 3600_000).toISOString());
+    const minted = this.oauthMintState("signin", null);
+    return { authorize_url: minted.authorize_url, cookie: minted.cookie };
+  }
+
+  /**
+   * The callback. Burn the state first (single atomic UPDATE, verifier read before and nulled by it), then
+   * talk to GitHub. Every return path carries the cookie-clearing header; the route decides page vs redirect.
+   */
+  async oauthCallback(providerId: unknown, query: Record<string, unknown>, cookieHeader: string | undefined): Promise<OAuthCallbackResult> {
+    const clearCookie = oauthClearCookie(this.oauth);
+    const invalid = (): OAuthCallbackResult => ({ status: 400, apiCode: "oauth_state_invalid", clearCookie });
+    this.oauthReady();
+    if (providerId !== GITHUB_PROVIDER.id) return invalid();
+    // Presence is optional; singularity is not. An array (repeated key) or a nested value is never coerced.
+    const one = (v: unknown) => v === undefined || typeof v === "string";
+    if (!one(query?.code) || !one(query?.state) || !one(query?.error)) return invalid();
+    const state = typeof query?.state === "string" ? query.state : "";
+    const code = typeof query?.code === "string" ? query.code : "";
+    const providerError = typeof query?.error === "string" ? query.error : "";
+    if (!state || (!code && !providerError)) return invalid();
+
+    const row = this.get("SELECT * FROM oauth_states WHERE state_hash = ?", sha256Text(state));
+    if (!row || row.consumed_at || Date.parse(row.expires_at) <= this.nowMs()) return invalid();
+    const cookie = readOAuthCookie(cookieHeader);
+    if (!cookie || !row.cookie_hash || !timingSafeEqualString(sha256Text(cookie), row.cookie_hash)) return invalid();
+
+    const verifier = row.code_verifier;
+    const consumed = this.run("UPDATE oauth_states SET consumed_at = ?, code_verifier = NULL WHERE state_hash = ? AND consumed_at IS NULL", this.ts(), row.state_hash);
+    if (consumed.changes === 0) return invalid();
+
+    if (providerError) {
+      return { status: 302, location: `/ui#/login?oauth=${providerError === "access_denied" ? "cancelled" : "rejected"}`, clearCookie };
+    }
+
+    let profile: OAuthProfile;
+    try {
+      profile = await GITHUB_PROVIDER.exchange({
+        code,
+        codeVerifier: String(verifier ?? ""),
+        redirectUri: row.redirect_uri,
+        clientId: this.oauth.clientId!,
+        clientSecret: this.oauth.clientSecret!,
+      }, this.fetchImpl);
+    } catch (e) {
+      const kind = e instanceof OAuthExchangeError ? e.kind : "provider_unavailable";
+      if (kind === "bad_profile") return { status: 502, apiCode: "oauth_provider_rejected", clearCookie };
+      return { status: 302, location: `/ui#/login?oauth=${kind === "rejected" ? "rejected" : "provider_unavailable"}`, clearCookie };
+    }
+
+    if (row.mode === "link") {
+      const ownerId = String(row.owner_id ?? "");
+      const existing = this.get("SELECT * FROM oauth_identities WHERE provider = ? AND subject = ?", GITHUB_PROVIDER.id, profile.subject);
+      if (existing && existing.owner_id !== ownerId) return { status: 302, location: "/ui#/login?oauth=identity_taken", clearCookie };
+      const mine = this.get("SELECT * FROM oauth_identities WHERE provider = ? AND owner_id = ?", GITHUB_PROVIDER.id, ownerId);
+      if (mine && mine.subject !== profile.subject) return { status: 302, location: "/ui#/login?oauth=identity_conflict", clearCookie };
+      try {
+        this.db.transaction(() => {
+          if (existing) this.run("UPDATE oauth_identities SET login = ? WHERE provider = ? AND subject = ?", profile.login, GITHUB_PROVIDER.id, profile.subject);
+          else this.run("INSERT INTO oauth_identities (provider, subject, owner_id, login, created_at) VALUES (?,?,?,?,?)", GITHUB_PROVIDER.id, profile.subject, ownerId, profile.login, this.ts());
+          this.audit.append(`owner:${ownerId}`, "oauth.identity_linked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(profile.subject) });
+        })();
+      } catch {
+        return { status: 302, location: "/ui#/login?oauth=identity_conflict", clearCookie };
+      }
+      return { status: 302, location: "/ui#/settings?oauth=ok", clearCookie };
+    }
+
+    // Sign-in: resolve the subject, refuse an unknown one, mint the one-time code the browser reads.
+    const identity = this.get("SELECT * FROM oauth_identities WHERE provider = ? AND subject = ?", GITHUB_PROVIDER.id, profile.subject);
+    if (!identity) return { status: 302, location: "/ui#/login?oauth=not_linked", clearCookie };
+    const now = this.nowMs();
+    this.run("DELETE FROM oauth_step_codes WHERE expires_at <= ?", new Date(now).toISOString());
+    const stepCode = newOAuthSecret();
+    this.run("INSERT INTO oauth_step_codes (code_hash, provider, owner_id, created_at, expires_at) VALUES (?,?,?,?,?)",
+      sha256Text(stepCode), GITHUB_PROVIDER.id, identity.owner_id, this.ts(), new Date(now + 60_000).toISOString());
+    return { status: 302, location: `/ui#/oauth?code=${stepCode}`, clearCookie };
+  }
+
+  /** Redeem the step code: consume, re-check the identity, mint the token — one transaction (§6.3). */
+  oauthExchange(body: any) {
+    this.oauthReady();
+    const code = typeof body?.code === "string" ? body.code : "";
+    const invalid = () => new ApiError(400, "oauth_code_invalid", "this sign-in code is invalid or expired; sign in with GitHub again");
+    if (!code) throw invalid();
+    const row = this.get("SELECT * FROM oauth_step_codes WHERE code_hash = ?", sha256Text(code));
+    let token = "";
+    this.db.transaction(() => {
+      if (!row) throw invalid();
+      if (Date.parse(row.expires_at) <= this.nowMs()) throw invalid();
+      const consumed = this.run("UPDATE oauth_step_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL", this.ts(), row.code_hash);
+      if (consumed.changes === 0) throw invalid();
+      const still = this.get("SELECT 1 AS ok FROM oauth_identities WHERE provider = ? AND owner_id = ?", row.provider, row.owner_id);
+      if (!still) throw invalid();
+      token = this.issueToken("owner", row.owner_id, "oauth:github");
+      this.audit.append(`owner:${row.owner_id}`, "oauth.signin", row.owner_id, [row.owner_id], { provider: row.provider });
+    })();
+    return { owner_token: token };
+  }
+
+  oauthIdentities(p: Principal) {
+    this.oauthReady();
+    const ownerId = this.requireOwner(p);
+    return { identities: this.all("SELECT provider, login, created_at FROM oauth_identities WHERE owner_id = ? ORDER BY created_at, provider", ownerId) };
+  }
+
+  /**
+   * Unbind: the password gate (D4, the `unbind` bucket), then the last-method predicate, then one transaction
+   * that drops the row, every state for it (consumed included) and the sessions it minted.
+   */
+  oauthUnlink(p: Principal, providerId: unknown, body: any) {
+    this.oauthProviderOr404(providerId);
+    const ownerId = this.requireOwner(p);
+    const o = this.owner(ownerId);
+    const hasPassword = typeof o.password_hash === "string" && o.password_hash.length > 0;
+    const identity = this.get("SELECT * FROM oauth_identities WHERE provider = ? AND owner_id = ?", GITHUB_PROVIDER.id, ownerId);
+    if (hasPassword) {
+      if (this.oauthLocked("unbind", ownerId)) throw new ApiError(429, "too_many_attempts", "too many wrong passwords; try again later");
+      let ok = false;
+      if (typeof body?.current_password === "string") {
+        try { ok = checkPassword(body.current_password, o.password_hash); } catch { ok = false; }
+      }
+      if (!ok) {
+        this.oauthRecordFailure("unbind", ownerId);
+        throw new ApiError(401, "invalid_credentials", "current password is wrong");
+      }
+      this.oauthClearFailures("unbind", ownerId);
+    }
+    assert(identity, 404, "oauth_not_linked", "this account has no such identity linked");
+    const others = (this.get("SELECT COUNT(*) n FROM oauth_identities WHERE owner_id = ? AND provider <> ?", ownerId, GITHUB_PROVIDER.id) as any).n;
+    if (!hasPassword && others === 0) {
+      throw new ApiError(409, "last_signin_method", "connect another way to sign in, or set a password, before removing this one");
+    }
+    this.db.transaction(() => {
+      this.run("DELETE FROM oauth_identities WHERE provider = ? AND owner_id = ?", GITHUB_PROVIDER.id, ownerId);
+      this.run("DELETE FROM oauth_states WHERE owner_id = ? AND provider = ?", ownerId, GITHUB_PROVIDER.id);
+      this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'owner' AND subject_id = ? AND via = 'oauth:github' AND revoked_at IS NULL", this.ts(), ownerId);
+      this.audit.append(`owner:${ownerId}`, "oauth.identity_unlinked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(String(identity!.subject)) });
+    })();
   }
 
   // ================================================================ bots & keys

@@ -23,6 +23,7 @@ const platform = new Platform({ kmsKey, dbPath, auditPath, webhooks: {
   maxBytes: Number(process.env.BOTSOCIAL_ATTACHMENT_MAX_MB ?? 20) * 1024 * 1024,
   ttlMs: Number(process.env.BOTSOCIAL_ATTACHMENT_TTL_DAYS ?? 7) * 24 * 3600 * 1000,
 }, publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}` });
+if (platform.oauth.warning) console.warn(platform.oauth.warning);
 const app = buildServer(platform, { logger: process.env.LOG === "1", fixedBaseUrl: !!process.env.PUBLIC_BASE_URL });
 await ensureBotctl().catch((e) => console.warn("botctl build skipped:", e.message));
 await app.listen({ port, host });
