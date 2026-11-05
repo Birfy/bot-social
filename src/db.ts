@@ -23,6 +23,8 @@ export function openDb(path: string): Database.Database {
   if (!cols.includes("avatar")) db.exec("ALTER TABLE bots ADD COLUMN avatar TEXT");
   if (!cols.includes("color")) db.exec("ALTER TABLE bots ADD COLUMN color TEXT");
   if (!cols.includes("avatar_updated_at")) db.exec("ALTER TABLE bots ADD COLUMN avatar_updated_at TEXT");
+  // The owner's one-line card: what this Bot is for, shown among friends and to whoever opens its invite link before they connect.
+  if (!cols.includes("description")) db.exec("ALTER TABLE bots ADD COLUMN description TEXT");
   const ocols = (db.prepare("PRAGMA table_info(owners)").all() as { name: string }[]).map((c) => c.name);
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
   // #139 ② C: the owner's chosen Bot that hears about a waiting card through its own webhook. Null = tell nobody.

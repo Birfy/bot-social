@@ -24,6 +24,8 @@ export type Principal = { kind: "owner"; ownerId: string; scope?: "connector"; t
 const handleKey = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "").toLowerCase();
 /** The handle as the caller spelled it (spaces and one leading `@` removed, case kept). */
 const handleRef = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "");
+/** The owner's one-line card on a Bot: trimmed, 1-280 chars, null when unset. */
+const BOT_DESCRIPTION_MAX = 280;
 /** A reference that names rows differing only by case is refused, never guessed. */
 const ambiguous = (raw: string, n: number) => new ApiError(409, "ambiguous_handle", `"${raw}" matches ${n} Bots that differ only by case; name the exact handle`);
 /** In-memory version of the same rule: exact spelling wins, else the unique case-insensitive match. */
@@ -218,6 +220,12 @@ export class Platform {
   private publicBot(b: any, look = false) {
     const o = this.owner(b.owner_id);
     return { bot_id: b.id, handle: "@" + b.handle, display_name: peerBotName(b), owner_display_name: peerOwnerName(o), owner_verified: true, ...(look ? lookOf(b) : {}) };
+  }
+  /** The Bot as a card: the names every surface already carries, plus the owner's one-line description.
+   *  Kept separate from `publicBot` so events, messages and approval cards keep their existing shape; only
+   *  the surfaces where a person decides whether to connect (own Bots, invite preview, friends, profile) use it. */
+  private botCard(b: any, look = false) {
+    return { ...this.publicBot(b, look), description: b.description ?? null };
   }
   private requireOwner(p: Principal): string {
     if (p.kind !== "owner") throw new ApiError(403, "owner_only", "this operation can only be performed by the owner");
@@ -919,28 +927,36 @@ export class Platform {
     return changed;
   }
 
-  /** Owner (login or connector) changes the display name and/or look. Fields are optional but at least one is required;
-   *  `avatar` / `color` set to null (or "") clear the owner's choice. */
-  updateBotProfile(p: Principal, botId: string | undefined, body: { display_name?: string; avatar?: string | null; color?: string | null }) {
+  /** Owner (login or connector) changes the display name, the look and/or the one-line card. Fields are optional
+   *  but at least one is required; `avatar` / `color` / `description` set to null (or "") clear that field. */
+  updateBotProfile(p: Principal, botId: string | undefined, body: { display_name?: string; avatar?: string | null; color?: string | null; description?: string | null }) {
     const ownerId = this.requireOwner(p);
     const b = botId ? this.ownBot(ownerId, botId) : this.get("SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at LIMIT 1", ownerId);
     assert(b, 404, "bot_not_found");
     const has = (k: string) => body?.[k as keyof typeof body] !== undefined;
-    assert(has("display_name") || has("avatar") || has("color"), 400, "invalid_request", "provide display_name, avatar and/or color");
+    assert(has("display_name") || has("avatar") || has("color") || has("description"), 400, "invalid_request", "provide display_name, avatar, color and/or description");
     let name: string | undefined;
     if (has("display_name")) {
       assert(typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
       name = peerDisplayName(body.display_name, "");
       assert(name.length >= 1, 400, "invalid_request", "display_name: 1-60 chars");
     }
+    let description: string | null | undefined;
+    if (has("description")) {
+      assert(body.description === null || typeof body.description === "string", 400, "invalid_description", "description must be a string or null");
+      const text = String(body.description ?? "").trim();
+      assert(text.length <= BOT_DESCRIPTION_MAX, 400, "invalid_description", `description: 1-${BOT_DESCRIPTION_MAX} chars`);
+      description = text === "" ? null : text;
+    }
     const avatar = has("avatar") ? validateAvatar(body.avatar) : undefined;
     const color = has("color") ? validateColor(body.color) : undefined;
     this.db.transaction(() => {
       if (name !== undefined) this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
+      if (description !== undefined) this.run("UPDATE bots SET description = ? WHERE id = ?", description, b.id);
       const changed = this.applyLook(b.id, { avatar, color });
-      this.audit.append(this.actorOf(p), "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...changed });
+      this.audit.append(this.actorOf(p), "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...(description !== undefined ? { description: description === null ? "cleared" : "set" } : {}), ...changed });
     })();
-    return this.publicBot(this.bot(b.id), true);
+    return this.botCard(this.bot(b.id), true);
   }
 
   me(p: Principal) {
@@ -952,7 +968,7 @@ export class Platform {
       return { kind: "owner", owner_id: o.id, username: o.username, display_name: o.display_name, timezone: o.timezone, sensitive_terms: J(o.sensitive_terms, []), auto_approve_face_rooms: !!o.auto_approve_face_rooms, notify_bot_id: o.notify_bot_id ?? null, quiet_start: o.quiet_start ?? null, quiet_end: o.quiet_end ?? null, home: home ? "@" + home.handle : null, home_name: home ? home.display_name : null, bots: this.listBots(p) };
     }
     const b = this.bot(p.botId);
-    return { kind: "bot", ...this.publicBot(b, true), status: b.status };
+    return { kind: "bot", ...this.botCard(b, true), status: b.status };
   }
 
   updateSettings(p: Principal, body: { sensitive_terms?: string[]; timezone?: string; display_name?: string; auto_approve_face_rooms?: boolean; notify_bot_id?: string | null; quiet_start?: string | null; quiet_end?: string | null }) {
@@ -1077,7 +1093,7 @@ export class Platform {
     const ownerId = this.requireOwner(p);
     // `custodial` is read-only: whether the platform holds this Bot's signing key (`bot_custody`), which is the only
     // thing that decides if the owner's console may send as it (`custodialBot`). Never inferred from integration_type.
-    return this.all("SELECT id, handle, display_name, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at, EXISTS (SELECT 1 FROM bot_custody c WHERE c.bot_id = bots.id) AS custodial FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
+    return this.all("SELECT id, handle, display_name, description, avatar, color, avatar_updated_at, integration_type, webhook_url, status, created_at, EXISTS (SELECT 1 FROM bot_custody c WHERE c.bot_id = bots.id) AS custodial FROM bots WHERE owner_id = ?", ownerId).map((b) => ({
       ...b, custodial: !!b.custodial, ...lookOf(b), webhook_url: redactUrl(b.webhook_url), webhook: { configured: !!b.webhook_url }, keys: this.all("SELECT kid, alg, public_key, status, created_at, expires_at FROM bot_keys WHERE bot_id = ?", b.id),
       draft_budget: this.draftBudget(b.id),
     }));
@@ -2233,7 +2249,7 @@ export class Platform {
       const fmt = (g: any) => ({ grant_id: g.id, capability: g.capability, scope: g.scope, expires_at: g.expires_at, reply_only: !!g.reply_only });
       return {
         relationship_id: r.id, status: r.status, direction: meIsRequester ? "outgoing" : "incoming", side: meIsRequester ? "joiner" : "inviter", my_bot_id: myBot,
-        peer: this.publicBot(this.bot(peerBot), r.status === "active"), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
+        peer: this.botCard(this.bot(peerBot), r.status === "active"), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []),
         created_at: r.created_at, expires_at: r.expires_at, blocked_by_me: r.blocked_by === p.ownerId,
         settings: this.settingsFor(r.id, p.ownerId),
         capabilities: { me_on_peer: grants.filter((g) => g.grantee_bot === myBot).map(fmt), peer_on_me: grants.filter((g) => g.grantee_bot === peerBot).map(fmt) },
@@ -2261,7 +2277,7 @@ export class Platform {
 
   private inviteUrl(code: string) { return `${this.publicBaseUrl.replace(/\/$/, "")}/i/${code}`; }
   private inviteView(i: any) {
-    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.publicBot(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
+    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.botCard(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
   }
   private inviteStatus(i: any) {
     // Stored terminal states win over the clock: a revoked or rejected invite never flips back to expired.
@@ -2517,7 +2533,7 @@ export class Platform {
       const times = [r.updated_at, last?.updated_at, lastMsg].filter(Boolean).sort();
       return {
         relationship_id: r.id, status: r.status, direction: outgoing ? "outgoing" : "incoming", side: outgoing ? "joiner" : "inviter",
-        peer: this.publicBot(this.bot(peerId), r.status === "active"),
+        peer: this.botCard(this.bot(peerId), r.status === "active"),
         connected_at: r.status === "active" || r.status === "revoked" || r.status === "blocked" ? r.updated_at : null,
         requested_at: r.created_at, expires_at: r.expires_at, message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []), settings: this.settingsFor(r.id, selected.owner_id), blocked_by_me: !!r.blocked_by && r.blocked_by === selected.owner_id,
         capabilities: {
@@ -2553,7 +2569,7 @@ export class Platform {
       assert(mine.some((m: any) => this.findActiveRelationship(m.id, target.id) && this.findGrant(target.owner_id, m.id, "profile.read", target.id)), 404, "bot_not_found", "no such bot");
     }
     const o = this.owner(target.owner_id);
-    return { ...this.publicBot(target, true), owner_timezone: o.timezone };
+    return { ...this.botCard(target, true), owner_timezone: o.timezone };
   }
 
   // ================================================================ approvals
