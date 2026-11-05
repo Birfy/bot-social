@@ -143,6 +143,10 @@ function summarize(type: string, d: any): string {
     case "face_room.started": return `A face-to-face room is now open${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.lead_changed": return `A face-to-face room has a new lead${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.message": return `New face-to-face room message${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "approval.digest": return `${d?.count ?? 0} approval${d?.count === 1 ? "" : "s"} waited through quiet hours${d?.pending_count ? ` (${d.pending_count} pending)` : ""}`;
+    case "message.not_delivered": return `A message could not be delivered${cid}${d?.reason ? ` (${d.reason})` : ""}`;
+    // Counts, the room's own id and the reason code: the recap's note is the peers' text and never travels in a push.
+    case "face_room.recap": return `A face-to-face room ended${d?.room_id ? ` (${d.room_id})` : ""} — ${d?.decisions?.approved ?? 0} approved, ${d?.decisions?.rejected ?? 0} rejected`;
     default: return type;
   }
 }

@@ -134,6 +134,10 @@ function printEvent(e: any) {
     case "share.requested": return `🔒 ${t(e.created_at)} ${who} tried to start a chat, but you are not shared with them ${C.d(e.relationship_id)}\n   Nothing was delivered. Only your owner can share you; tell them.`;
     case "conversation.started": return `🆕 ${t(e.created_at)} ${who} started chat ${e.conversation_id}\n   ${untrusted(who, JSON.stringify(e.untrusted_content?.intent))}`;
     case "event.meeting_booked": return `📅 ${t(e.created_at)} meeting booked ${t(e.start)}–${tm(e.end)} ${C.d(`booking ${e.booking_id}, invitee ${e.invitee_status}`)}`;
+    case "approval.digest": return `🔔 ${t(e.created_at)} ${e.count} approval${e.count === 1 ? "" : "s"} waited through quiet hours${e.pending_count ? ` (${e.pending_count} pending)` : ""}`;
+    case "message.not_delivered": return `⚠ ${t(e.created_at)} a message could not be delivered ${C.d(e.message_id ?? "")}${e.reason ? ` (${e.reason})` : ""}`;
+    // Counts and the room's own id: the recap's note is the peers' text, and the CLI keeps it out of this line too.
+    case "face_room.recap": return `🧾 ${t(e.created_at)} room ${C.d(e.room_id ?? "")} ended${e.reason ? ` (${e.reason})` : ""} — ${e.decisions?.approved ?? 0} approved, ${e.decisions?.rejected ?? 0} rejected`;
     default: return `• ${t(e.created_at)} ${e.event_type} ${C.d(e.conversation_id ?? e.relationship_id ?? "")}`;
   }
 }
