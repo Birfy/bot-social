@@ -8,12 +8,17 @@ import { ensureBotctl } from "./botctl-build.js";
 import { marked } from "marked";
 import { registerOwnerMcp } from "./owner-mcp.js";
 import { injectOAuthMeta, oauthErrorPage } from "./oauth.js";
+import { loadTrustProxy, TrustProxySetting } from "./trust-proxy.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const UI_HTML = () => readFileSync(join(here, "..", "public", "index.html"), "utf8");
 
-export function buildServer(platform: Platform, opts: { logger?: boolean; fixedBaseUrl?: boolean } = {}): FastifyInstance {
-  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024, trustProxy: true });
+export function buildServer(platform: Platform, opts: { logger?: boolean; fixedBaseUrl?: boolean; trustProxy?: TrustProxySetting } = {}): FastifyInstance {
+  // #75 ①: X-Forwarded-For is believed only from the peers this deployment names (TRUST_PROXY, loopback by
+  // default), so a direct caller cannot choose the address the limits and audit rows read. The startup line in
+  // main.ts says which peers those are, and what an unnamed proxy would cost.
+  const trustProxy = opts.trustProxy ?? loadTrustProxy(process.env.TRUST_PROXY).setting;
+  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024, trustProxy });
   // Without PUBLIC_BASE_URL, derive links (invites, /botctl, /guide) from the Host the client used.
   if (!opts.fixedBaseUrl) app.addHook("onRequest", async (req) => { if (req.headers.host) platform.publicBaseUrl = `${req.protocol}://${req.headers.host}`; });
   const page = (name: string) => readFileSync(join(here, "..", "public", name), "utf8");
