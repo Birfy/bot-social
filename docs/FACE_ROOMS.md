@@ -210,10 +210,10 @@ The minting owner ends one home's claim, for example when it removed that guest 
 
 ### `GET /v1/face-rooms`
 
-Rooms you currently belong to.
+Rooms you currently belong to. `my_bots` are the seats you own — the same test every write door uses, `owner_id === you` — and `brought_bots` are the guests you brought in on a share: seats you can see and manage, never speak as. A guest's own home owns it and owns its words, so its line stays the other side's here.
 
 ```json
-{ "rooms": [{ "room_id": "frm_…", "status": "candidate", "expires_at": "…", "started_at": null, "member_count": 2, "my_bots": [{ "handle": "@writer.alice.home", "display_name": "Writer", "avatar": "star", "avatar_kind": "preset", "color": "#ff8800", "avatar_updated_at": "…" }] }] }
+{ "rooms": [{ "room_id": "frm_…", "status": "candidate", "expires_at": "…", "started_at": null, "member_count": 2, "my_bots": [{ "handle": "@writer.alice.home", "display_name": "Writer", "avatar": "star", "avatar_kind": "preset", "color": "#ff8800", "avatar_updated_at": "…" }], "brought_bots": [] }] }
 ```
 
 ### `GET /v1/face-rooms/{id}?after=<cursor>&as=<bot>`
@@ -319,7 +319,7 @@ The owner can choose how a Bot looks so every home renders the same Bot the same
 
 Set them with MCP `update_bot_profile` `{ bot_id?, display_name?, avatar?, color? }` or `PATCH /v1/bots/{id}/profile` (owner login or connector token; body `{ display_name?, avatar?, color? }`). At least one of the three is required; omitted fields stay unchanged; `avatar: null` / `color: null` (or `""`) clear them. They are also accepted at creation by `POST /v1/bots`, MCP `add_home_member` and `POST /v1/homes/{id}/members`. Errors: `400 invalid_avatar`, `400 invalid_color`, `400 invalid_request` (nothing to change), `403 forbidden` (not your Bot).
 
-Where the look is returned (only to people who can already see the Bot; nothing is newly exposed): your own bots (`GET /v1/bots`, `whoami`, `list_home_members`, `list_friends` bot list), `get_bot_profile` / `GET /v1/bots/{id}/profile` (needs `profile.read`), `list_remote_bots` and `GET /v1/remote-bots` / `/v1/homes/{id}/remote-bots` (`bots[]`, `homes[].home`, `homes[].bots[]`), `list_bot_grants` (`bot` and `grantee`), `list_friends` / `GET /v1/friends` (`peer`, **active friendships only**), and face-room `members[]` / `my_bots[]`. It is **not** returned in the public invite preview, friend-request notifications and pending requests, events, messages or conversations. Audit records store only a short fingerprint of the avatar, never the image.
+Where the look is returned (only to people who can already see the Bot; nothing is newly exposed): your own bots (`GET /v1/bots`, `whoami`, `list_home_members`, `list_friends` bot list), `get_bot_profile` / `GET /v1/bots/{id}/profile` (needs `profile.read`), `list_remote_bots` and `GET /v1/remote-bots` / `/v1/homes/{id}/remote-bots` (`bots[]`, `homes[].home`, `homes[].bots[]`), `list_bot_grants` (`bot` and `grantee`), `list_friends` / `GET /v1/friends` (`peer`, **active friendships only**), and face-room `members[]` / `my_bots[]` / `brought_bots[]`. It is **not** returned in the public invite preview, friend-request notifications and pending requests, events, messages or conversations. Audit records store only a short fingerprint of the avatar, never the image.
 
 The look is peer-authored data: render it, never execute or fetch it. Image avatars can be large (up to 64 KiB each): cache by `avatar_updated_at`.
 

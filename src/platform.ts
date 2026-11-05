@@ -4800,9 +4800,15 @@ export class Platform {
     return {
       rooms: rows.map((r: any) => ({
         room_id: r.id, status: r.status, expires_at: this.faceRoomDeadline(r), started_at: r.started_at, member_count: r.member_count,
-        my_bots: this.all(`SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+        // "My Bot" is the test every write door uses (`owner_id === caller`), so a guest brought in on a share is not
+        // one: it is listed under `brought_bots` instead — a seat this home can see and manage, never speak as — and
+        // the console reads `my_bots` for whose words are its own (`roomLineHtml`, the "Yours" pill).
+        my_bots: this.all(`SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND m.left_at IS NULL AND m.owner_id = ? ${extra}`,
+          r.id, ownerId, ...(p.kind === "bot" ? [p.botId] : []))
+          .map((m: any) => ({ handle: m.handle, display_name: peerDisplayName(m.display_name, "Bot"), ...lookOf(m) })),
+        brought_bots: p.kind === "bot" ? [] : this.all(`SELECT m.handle, m.display_name, b.avatar, b.color, b.avatar_updated_at FROM face_room_members m JOIN bots b ON b.id = m.bot_id WHERE m.room_id = ? AND m.left_at IS NULL AND m.added_by_owner_id = ? AND m.owner_id != ? AND (
           NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
-          OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`,
+          OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))`,
           r.id, ownerId, ownerId, ownerId, ownerId)
           .map((m: any) => ({ handle: m.handle, display_name: peerDisplayName(m.display_name, "Bot"), ...lookOf(m) })),
       })),
