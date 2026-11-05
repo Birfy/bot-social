@@ -9,6 +9,13 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const browserTZ = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; } };
 let TZ = browserTZ();
 function setTZ(zone) { try { new Intl.DateTimeFormat("en-GB", { timeZone: zone }); TZ = zone || browserTZ(); } catch { TZ = browserTZ(); } }
+// The zones the account can be saved with. The list is the common ones; a zone the account already carries —
+// from a Bot, an older console or another device — is added in front so the picker never hides the current choice.
+const TZ_CHOICES = ["UTC", "Europe/London", "Europe/Berlin", "Asia/Shanghai", "Asia/Tokyo", "America/New_York", "America/Los_Angeles", "Australia/Sydney"];
+const tzOptions = (current) => (TZ_CHOICES.includes(current) ? TZ_CHOICES : [current, ...TZ_CHOICES]).filter(Boolean)
+  .map((z) => `<option value="${esc(z)}" ${z === current ? "selected" : ""}>${esc(z)}</option>`).join("");
+/** The account area's picker: every time on every page is read in the zone chosen here. */
+const tzControl = () => `<label class="mut" for="tz">Time zone</label><select id="tz" style="margin-top:4px;font-size:12px;padding:4px 6px">${tzOptions(TZ)}</select>`;
 /** fmt(iso) → "19/10, 08:21 GMT+8"; { time: true } drops the date; { zone: false } drops the label. */
 const zoneName = () => { try { return new Intl.DateTimeFormat("en-GB", { timeZone: TZ, timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value || TZ; } catch { return TZ; } };
 /** Read a datetime-local value ("2026-10-21T10:00") as wall-clock time in TZ and return the ISO instant; null when TZ has no such wall time (a spring-forward gap, #237). */
@@ -94,6 +101,8 @@ const USERNAME_RE = /^[a-z0-9._-]{2,32}$/i, HANDLE_RE = /^[a-z0-9._-]{2,40}$/i;
 const usernameError = (u) => !u ? "Enter a username." : USERNAME_RE.test(u) ? "" : "Username: 2–32 characters, using a–z, 0–9, and . _ -";
 const passwordError = (p, isNew) => !p ? "Enter a password." : isNew && p.length < 6 ? "Password: at least 6 characters." : "";
 const handleError = (h) => { h = String(h || "").trim().replace(/^@/, ""); return !h ? "Handle is required." : HANDLE_RE.test(h) ? "" : "Handle: 2–40 characters, using a–z, 0–9, and . _ -"; };
+/** The account to create: the browser's zone rides along, so a new owner's times are their own from the first page. */
+const newOwnerBody = (f) => ({ username: f.username, password: f.password, ...(f.display_name ? { display_name: f.display_name } : {}), timezone: browserTZ() });
 /** A signing key can sign a request today only while it is active and not past its expires_at (#243). */
 const usableKey = (k) => k.status === "active" && (!k.expires_at || Date.parse(k.expires_at) > Date.now());
 /** The first key_<n> the Bot does not already have, so the Add key form's first submit is not a 409. */
@@ -120,6 +129,17 @@ function logout(reason) {
   if (reason) loginView({ reason }); else render();
 }
 const copy = async (text) => { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { prompt("Copy:", text); } };
+/** Save the zone picked in the account area and re-read the page in it. A refused zone keeps the one already shown. */
+async function saveTimezone(zone) {
+  const before = TZ;
+  try {
+    const r = await api("PATCH", "/v1/me", { timezone: zone });
+    me = r; setTZ(r.timezone); toast(`Times now show in ${TZ}`); render();
+  } catch {
+    setTZ(before);
+    const picker = $("#tz"); if (picker) picker.value = before;
+  }
+}
 
 // ------------------------------------------------------------------ login
 function loginView(opts = {}) {
@@ -163,7 +183,7 @@ function loginView(opts = {}) {
     if (bad.some(Boolean)) return;
     $("#go").disabled = true;
     try {
-      token = (await api("POST", mode === "up" ? "/v1/owners" : "/v1/auth/login", { username, password, display_name: $("#d").value.trim() || undefined }, true)).owner_token;
+      token = (await api("POST", mode === "up" ? "/v1/owners" : "/v1/auth/login", mode === "up" ? newOwnerBody({ username, password, display_name: $("#d").value.trim() || undefined }) : { username, password }, true)).owner_token;
       boot("password");
     } catch (err) {
       token = null; $("#go").disabled = false;
@@ -181,10 +201,11 @@ function shell() {
   const bd = (k) => k === "" && badges.approvals + badges.requests ? `<span class="bd">${badges.approvals + badges.requests}</span>` : "";
   $("#root").innerHTML = `<div class="top-m">🤝 Bot Social<span style="flex:1"></span><a href="#" id="lo2" style="color:#a5b4fc;font-weight:400;font-size:13px">Log out</a></div>
   <div class="app"><aside class="side"><div class="logo">🤝 Bot Social</div><nav class="nav">${NAV.map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>
-    <div class="foot">${esc(me.display_name)}<br><span class="mut">@${esc(me.username)}</span><br><a href="/connect">Connect assistant</a> · <a href="/guide" target="_blank">Agent guide</a> · <a href="#" id="lo">Log out</a></div></aside>
+    <div class="foot">${esc(me.display_name)}<br><span class="mut">@${esc(me.username)}</span><br>${tzControl()}<br><a href="/connect">Connect assistant</a> · <a href="/guide" target="_blank">Agent guide</a> · <a href="#" id="lo">Log out</a></div></aside>
   <main class="main" id="view"></main></div>
   <nav class="tabbar">${NAV.filter((n) => n[0] !== "audit").map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>`;
   $("#lo").onclick = $("#lo2").onclick = (e) => { e.preventDefault(); logout(); };
+  const picker = $("#tz"); if (picker) picker.onchange = () => saveTimezone(picker.value);
 }
 async function render() {
   if (!token) return loginView();
