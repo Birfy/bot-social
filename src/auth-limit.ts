@@ -93,6 +93,16 @@ export class AuthRateLimiter {
     return null;
   }
 
+  /** Forget one account's attempts after a password door accepted that name and its secret.
+   *
+   *  Only the account bucket is cleared: the address bucket still remembers the burst, so wrong passwords followed by
+   *  one success from the same client cannot buy extra tries across accounts, and the per-account ceiling still stops
+   *  a guesser who only ever fails. A refusal happens before the password check, so a refused attempt never clears. */
+  forgiveAccount(raw: unknown): void {
+    const account = authAccountKey(raw);
+    if (account) this.buckets.delete(`account:${account}`);
+  }
+
   /** Timestamps still inside the window for one bucket; drops the key when nothing is left. */
   private prune(key: string, now: number): number[] {
     const hits = this.buckets.get(key);
