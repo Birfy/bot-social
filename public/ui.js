@@ -14,8 +14,9 @@ function setTZ(zone) { try { new Intl.DateTimeFormat("en-GB", { timeZone: zone }
 const TZ_CHOICES = ["UTC", "Europe/London", "Europe/Berlin", "Asia/Shanghai", "Asia/Tokyo", "America/New_York", "America/Los_Angeles", "Australia/Sydney"];
 const tzOptions = (current) => (TZ_CHOICES.includes(current) ? TZ_CHOICES : [current, ...TZ_CHOICES]).filter(Boolean)
   .map((z) => `<option value="${esc(z)}" ${z === current ? "selected" : ""}>${esc(z)}</option>`).join("");
-/** The account area's picker: every time on every page is read in the zone chosen here. */
-const tzControl = () => `<label class="mut" for="tz">Time zone</label><select id="tz" style="margin-top:4px;font-size:12px;padding:4px 6px">${tzOptions(TZ)}</select>`;
+/** The account area's picker: every time on every page is read in the zone chosen here. Below it the quiet window:
+ *  while it is open the platform holds approval announcements and sends one summary when it ends. */
+const tzControl = () => `<label class="mut" for="tz">Time zone</label><select id="tz" style="margin-top:4px;font-size:12px;padding:4px 6px">${tzOptions(TZ)}</select><label class="mut" for="qstart" style="display:block;margin-top:6px">Quiet hours</label><div style="display:flex;gap:4px;align-items:center"><input id="qstart" type="time" value="${esc(me && me.quiet_start || "")}" style="font-size:12px;padding:3px 4px"><span class="mut">to</span><input id="qend" type="time" value="${esc(me && me.quiet_end || "")}" style="font-size:12px;padding:3px 4px"></div>`;
 /** fmt(iso) → "19/10, 08:21 GMT+8"; { time: true } drops the date; { zone: false } drops the label. */
 const zoneName = () => { try { return new Intl.DateTimeFormat("en-GB", { timeZone: TZ, timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value || TZ; } catch { return TZ; } };
 /** Read a datetime-local value ("2026-10-21T10:00") as wall-clock time in TZ and return the ISO instant; null when TZ has no such wall time (a spring-forward gap, #237). */
@@ -140,6 +141,20 @@ async function saveTimezone(zone) {
     const picker = $("#tz"); if (picker) picker.value = before;
   }
 }
+/** Save the quiet window picked in the account area. The server takes both ends or neither: one clock alone is a
+ *  refusal that keeps the window already stored, so the inputs are put back to it. */
+async function saveQuietHours(start, end) {
+  const before = { start: me && me.quiet_start || null, end: me && me.quiet_end || null };
+  try {
+    const r = await api("PATCH", "/v1/me", { quiet_start: start || null, quiet_end: end || null });
+    me = r; toast(start && end ? `Quiet hours ${start} to ${end}` : "Quiet hours off"); render();
+  } catch {
+    const qs = $("#qstart"), qe = $("#qend");
+    if (qs) qs.value = before.start || "";
+    if (qe) qe.value = before.end || "";
+    toast("Could not save quiet hours");
+  }
+}
 
 // ------------------------------------------------------------------ login
 function loginView(opts = {}) {
@@ -206,6 +221,8 @@ function shell() {
   <nav class="tabbar">${NAV.filter((n) => n[0] !== "audit").map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>`;
   $("#lo").onclick = $("#lo2").onclick = (e) => { e.preventDefault(); logout(); };
   const picker = $("#tz"); if (picker) picker.onchange = () => saveTimezone(picker.value);
+  const qstart = $("#qstart"), qend = $("#qend");
+  if (qstart && qend) { const save = () => saveQuietHours(qstart.value, qend.value); qstart.onchange = save; qend.onchange = save; }
 }
 async function render() {
   if (!token) return loginView();

@@ -27,6 +27,17 @@ export function openDb(path: string): Database.Database {
   if (!ocols.includes("auto_approve_face_rooms")) db.exec("ALTER TABLE owners ADD COLUMN auto_approve_face_rooms INTEGER NOT NULL DEFAULT 0");
   // #139 ② C: the owner's chosen Bot that hears about a waiting card through its own webhook. Null = tell nobody.
   if (!ocols.includes("notify_bot_id")) db.exec("ALTER TABLE owners ADD COLUMN notify_bot_id TEXT");
+  // The owner's local quiet hours (`HH:MM` in their own zone): a card created inside the window is announced once
+  // when it ends instead of waking the Bot during it. Both null = no quiet window.
+  if (!ocols.includes("quiet_start")) db.exec("ALTER TABLE owners ADD COLUMN quiet_start TEXT");
+  if (!ocols.includes("quiet_end")) db.exec("ALTER TABLE owners ADD COLUMN quiet_end TEXT");
+  // Rows written before this column existed were announced one by one, so they are delivered already; only a card
+  // held through a quiet window stays undelivered for the summary.
+  const ancols = (db.prepare("PRAGMA table_info(approval_notifications)").all() as { name: string }[]).map((c) => c.name);
+  if (!ancols.includes("delivered_at")) {
+    db.exec("ALTER TABLE approval_notifications ADD COLUMN delivered_at TEXT");
+    db.exec("UPDATE approval_notifications SET delivered_at = created_at");
+  }
   db.exec(FACE_ROOM_SCHEMA);
   db.exec(LOCAL_ROOM_INVITE_SCHEMA);
   // Who ended a local-room claim: the minting owner ending it (removing that guest) must outlast the release,
@@ -199,8 +210,10 @@ CREATE TABLE IF NOT EXISTS approvals (
   status TEXT NOT NULL DEFAULT 'pending', decision TEXT, note TEXT, created_at TEXT NOT NULL, expires_at TEXT, decided_at TEXT
 );
 -- #139 ② C: one row per card the owner has already been told about, so a replayed announcement is a no-op.
+-- delivered_at is when the Bot was actually told: a card created inside the owner's quiet hours is recorded at
+-- once with no delivery and joins the one summary announced when the window ends.
 CREATE TABLE IF NOT EXISTS approval_notifications (
-  approval_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, bot_id TEXT NOT NULL, created_at TEXT NOT NULL
+  approval_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, bot_id TEXT NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, bot_id TEXT NOT NULL, type TEXT NOT NULL,
