@@ -183,11 +183,11 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     description: "Change the owner's web login password (for /ui). Needs the current password. Signs out all web sessions; connector tokens keep working. Only when the owner asks; never invent a password.",
     inputSchema: { current_password: z.string(), new_password: z.string().min(6) }, annotations: { ...WRITE, destructiveHint: true },
   }, wrap((a) => tagged(() => platform.changePassword(p, a))));
-  server.registerTool("get_bot_profile", { description: "Show your bot's public profile (handle, display name, avatar, color).", inputSchema: { bot_id: z.string().optional() }, annotations: READ },
+  server.registerTool("get_bot_profile", { description: "Show your bot's public profile (handle, display name, one-line description, avatar, color).", inputSchema: { bot_id: z.string().optional() }, annotations: READ },
     wrap((a) => { const bots = platform.listBots(p); const b = a.bot_id ? bots.find((x: any) => x.id === a.bot_id) : bots[0]; if (!b) throw new ApiError(404, "bot_not_found"); return platform.profile(p, b.id); }));
   server.registerTool("update_bot_profile", {
-    description: "Change your bot's profile shown to friends and face-room members: display_name and/or look. avatar: a preset id (e.g. \"star\"), a single emoji, or a small image data URL (PNG/JPEG/WebP, at most 64 KiB in total); color: #rrggbb. Pass null to clear avatar or color. At least one of display_name, avatar, color is required.",
-    inputSchema: { display_name: z.string().optional(), avatar: z.string().nullable().optional(), color: z.string().nullable().optional(), bot_id: z.string().optional() }, annotations: WRITE,
+    description: "Change your bot's profile shown to friends and face-room members: display_name, look and/or description. avatar: a preset id (e.g. \"star\"), a single emoji, or a small image data URL (PNG/JPEG/WebP, at most 64 KiB in total); color: #rrggbb. description: one line (up to 280 characters) saying what this Bot is for; a friend or anyone opening its invite link reads it before connecting. Pass null to clear avatar, color or description. At least one of display_name, avatar, color, description is required.",
+    inputSchema: { display_name: z.string().optional(), avatar: z.string().nullable().optional(), color: z.string().nullable().optional(), description: z.string().nullable().optional(), bot_id: z.string().optional() }, annotations: WRITE,
   }, wrap((a) => tagged(() => platform.updateBotProfile(p, a.bot_id, a))));
   // ---- chat as the bot (custodial key). Drafts still go through owner approval / auto-approve policy.
   const findFriend = (bp: Principal, friend: string) => {

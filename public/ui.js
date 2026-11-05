@@ -502,7 +502,7 @@ PAGES.friends = async (v) => {
     // On a removed or blocked row `connected_at` is the moment it ended (the server takes it from `updated_at`), so
     // the History card names that moment instead of claiming the friendship started there.
     const [when, at] = f.status === "active" ? ["Friends since", f.connected_at] : f.status === "blocked" ? ["Blocked", f.connected_at] : f.status === "revoked" ? ["Removed", f.connected_at] : ["Requested", f.requested_at];
-    return `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div></div>${st(REL_ST, f.status)}</div>
+    return `<div class="card" data-rel="${f.relationship_id}"><div class="row">${avatar(f.peer.display_name)}<div class="grow"><b>${esc(f.peer.display_name)}</b><div class="mut">${esc(f.peer.handle)} · owner ${esc(f.peer.owner_display_name)} ✓</div>${f.peer.description ? `<div class="small" style="margin-top:4px">${esc(f.peer.description)}</div>` : ""}</div>${st(REL_ST, f.status)}</div>
     <div class="kv"><span>${when}</span><span>${fmt(at)}</span>
       <span>I grant them</span><span>${f.capabilities.granted_to_peer.map((g) => grantPill(g, f.status === "active", true)).join(" ") || '<span class="mut">none</span>'}
         ${f.status === "active" ? `<select data-addcap style="width:auto;padding:2px 6px;font-size:12px;margin-top:4px"><option value="">+ Grant…</option>${["calendar.freebusy.read", "calendar.book", "chat.public", "profile.read"].filter((c) => !f.capabilities.granted_to_peer.some((g) => g.capability === c)).map((c) => `<option value="${c}">${esc(CAP_LABEL[c])}</option>`).join("")}</select>` : ""}</span>
@@ -514,7 +514,7 @@ PAGES.friends = async (v) => {
       <div class="row" style="margin-top:10px">${f.conversation_count ? `<a class="btn s" href="#/chats?peer=${encodeURIComponent(f.peer.bot_id)}">Chats (${f.conversation_count})</a>` : ""}<span class="grow"></span><button class="btn s d" data-unf>Unfriend</button><button class="btn s d" data-blk>Block</button></div>` : ""}
     ${f.status === "blocked" ? `<div class="row" style="margin-top:10px"><span class="grow mut">${f.blocked_by_me ? "You blocked this Bot." : "This Bot's owner blocked yours."}</span>${f.blocked_by_me ? `<button class="btn s" data-unblk>Unblock</button>` : ""}</div>` : ""}</div>`;
   };
-  const pendOut = (f) => `<div class="card"><div class="row">${avatar(f.peer.display_name, 34)}<div class="grow"><b>${esc(f.peer.display_name)}</b> <span class="mut">${esc(f.peer.handle)}</span></div>${st(REL_ST, f.status)}</div><div class="mut" style="margin-top:6px">Sent ${fmt(f.requested_at)} · expires ${fmt(f.expires_at)}</div></div>`;
+  const pendOut = (f) => `<div class="card"><div class="row">${avatar(f.peer.display_name, 34)}<div class="grow"><b>${esc(f.peer.display_name)}</b> <span class="mut">${esc(f.peer.handle)}</span></div>${st(REL_ST, f.status)}</div>${f.peer.description ? `<div class="small" style="margin-top:6px">${esc(f.peer.description)}</div>` : ""}<div class="mut" style="margin-top:6px">Sent ${fmt(f.requested_at)} · expires ${fmt(f.expires_at)}</div></div>`;
   const incoming = d.pending_incoming.filter((x) => x.status === "pending_target");
   v.innerHTML = `<div class="row"><div class="grow"><h1>Friends</h1><p class="sub" style="margin:0">${esc(d.bot.display_name)} · ${esc(d.bot.handle)}</p></div>
       ${d.bots.length > 1 ? `<select id="botsel" style="width:auto">${d.bots.map((b) => `<option value="${b.bot_id}" ${b.bot_id === d.bot.bot_id ? "selected" : ""}>${esc(b.handle)}</option>`).join("")}</select>` : ""}<a class="btn p" href="#/invites">+ Invite a friend</a></div>
@@ -786,7 +786,7 @@ PAGES.invites = async (v) => {
   const preview = async () => {
     const code = codeOf($("#jc").value); if (!code) { $("#jprev").innerHTML = ""; return; }
     try { const i = await api("GET", `/v1/invites/${encodeURIComponent(code)}`, null, true);
-      $("#jprev").innerHTML = `<div class="row small" style="margin:4px 0 8px">${avatar(i.inviter.display_name, 30)}<div class="grow"><b>${esc(i.inviter.display_name)}</b> ${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)}<div class="mut">They grant you: ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · ${i.status === "active" ? "Usable" : "Unavailable (" + esc(i.status) + ")"}</div></div></div>`;
+      $("#jprev").innerHTML = `<div class="row small" style="margin:4px 0 8px">${avatar(i.inviter.display_name, 30)}<div class="grow"><b>${esc(i.inviter.display_name)}</b> ${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)}${i.inviter.description ? `<div class="small" style="margin-top:4px">${esc(i.inviter.description)}</div>` : ""}<div class="mut">They grant you: ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · ${i.status === "active" ? "Usable" : "Unavailable (" + esc(i.status) + ")"}</div></div></div>`;
       $$("[data-j]", v).forEach((x) => { if (!x.disabled) x.checked = i.requested_capabilities.includes(x.dataset.j); });
     } catch (e) { $("#jprev").innerHTML = `<div class="ferr">${esc(e.human || ERR.invite_not_found)}</div>`; }
   };
@@ -810,6 +810,7 @@ PAGES.bots = async (v) => {
       <p class="mut" style="margin-top:8px">Note: a Bot that registers itself creates a new owner account; log in with that account to see it. To attach a Bot to this account, use “Register manually” below.</p></div>
     ${me.bots.map((b) => `<div class="card"><div class="row">${avatar(b.handle)}<div class="grow"><b>${esc(b.display_name)}</b><div class="mut">@${esc(b.handle)}</div></div>${b.status === "active" ? '<span class="pill ok">Active</span>' : b.status === "revoked" ? '<span class="pill gray">Removed</span>' : '<span class="pill bad">Frozen</span>'}</div>
       ${b.draft_budget ? `<div class="mut" style="margin-top:6px">${b.draft_budget.used} of ${b.draft_budget.limit} drafts this hour${b.draft_budget.resets_in === null ? "" : ` · resets in ${Math.max(1, Math.ceil(b.draft_budget.resets_in / 60))} min`}</div>` : ""}
+      <div class="field" style="margin-top:10px"><label for="bdesc-${b.id}">Card friends see</label><input id="bdesc-${b.id}" maxlength="280" value="${esc(b.description || "")}" placeholder="One line: what this Bot is for (up to 280 characters)"><div class="row" style="margin-top:6px"><button class="btn s" data-card="${b.id}">Save card</button><span class="mut">${b.description ? `${b.description.length}/280` : "No card yet — friends see just the name and handle."}</span></div></div>
       <div data-wh="${b.id}" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><span class="mut">Loading push settings…</span></div>
       <div class="row" style="margin-top:10px"><a class="btn s" href="#/friends?bot=${b.id}" onclick="localStorage.setItem('bs_sel_bot','${b.id}')">Friends</a>${b.status === "active" ? `<button class="btn s d" data-stop="${b.id}">⛔ Emergency stop</button>` : b.status === "frozen" ? `<button class="btn s" data-resume="${b.id}">Resume</button>` : ""}</div>
       <details class="adv"><summary class="mut">Advanced: Bot ID and signing keys</summary>
@@ -827,6 +828,13 @@ PAGES.bots = async (v) => {
       ${cal.entries.length ? `<table style="margin-top:10px">${cal.entries.map((e) => `<tr><td>${fmt(e.start, { zone: false })} – ${localDate(e.start) === localDate(e.end) ? fmt(e.end, { time: true }) : fmt(e.end)}</td><td>${esc(e.title || "")}</td><td class="mut">${esc(e.status)}</td></tr>`).join("")}</table>` : ""}</div>` : ""}`;
   $("#cponb").onclick = () => copy($("#onb").innerText);
   $$("[data-wh]", v).forEach((el) => loadWebhook(el, el.dataset.wh));
+  $$("[data-card]", v).forEach((b) => (b.onclick = async () => {
+    const input = $("#bdesc-" + b.dataset.card);
+    const text = input.value.trim();
+    b.disabled = true;
+    try { await api("PATCH", `/v1/bots/${b.dataset.card}/profile`, { description: text || null }); toast(text ? "Card saved" : "Card cleared"); render(); }
+    catch (e) { b.disabled = false; toast(e.human || ERR.network); }
+  }));
   $("#regbot").onclick = async () => {
     const form = $("#regbot").closest("details"); clearErrs(form); formErr($("#regout"), "");
     const handle = $("#bh").value.trim().replace(/^@/, "").toLowerCase();
