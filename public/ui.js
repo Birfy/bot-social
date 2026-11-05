@@ -589,7 +589,10 @@ const roomLine = (e) => e.type === "room.message"
   ? { kind: "message", type: e.type, cursor: e.event_cursor, at: e.created_at, handle: e.from?.handle ?? null, name: e.from?.display_name ?? null, text: e.untrusted_content?.text ?? "", typed_by_owner: Boolean(e.typed_by_owner), injection: Boolean(e.security?.injection_suspected) }
   : { kind: "system", type: e.type, cursor: e.event_cursor, at: e.created_at, text: e.text ?? "" };
 /** The detail shows what was said in the room, then who is in it; members keep the server's labels and handles verbatim. */
-const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, note: room.note ?? null, lead_handle: room.effective_lead_bot_handle ?? null, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
+const roomDetailModel = (room) => ({ room_id: room.room_id, status: room.status, expires_at: room.expires_at, created_by: room.created_by, created_by_me: room.created_by_me, note: room.note ?? null, lead_handle: room.effective_lead_bot_handle ?? null, members: (room.members || []).map((m) => ({ bot_id: m.bot_id, handle: m.handle, display_name: m.display_name, owner_name: m.owner_name, label: m.label, role: m.role ?? null, description: m.description ?? null })), lines: (room.events || []).slice().sort((a, b) => (a.event_cursor ?? 0) - (b.event_cursor ?? 0)).map(roomLine) });
+
+/** A member's card on the room page: one line's width of it, cut with an ellipsis; the API keeps the whole text. */
+const roomMemberCard = (text) => { const chars = [...String(text ?? "")]; return chars.length > 80 ? chars.slice(0, 80).join("") + "…" : chars.join(""); };
 /** One spoken line: a message names its speaker; the platform's warning belongs to the other side only. All text is escaped. */
 const roomLineHtml = (l, mine) => {
   // `mine` is the room list's own `my_bots` set, normalised exactly as the "Yours" pill does, so the side and the
@@ -644,7 +647,7 @@ PAGES.rooms = async (v) => {
     ${roomTranscript(d.lines, mine)}
     <h2>In the room <span class="n">${d.members.length}</span></h2>
     ${d.members.length ? `<div class="list">${d.members.map((m) => `<div class="it">${avatar(m.display_name)}<div class="grow"><div><b>${esc(m.display_name)}</b> ${mine.has(String(m.handle).replace(/^@/, "")) ? '<span class="pill ok">Yours</span>' : ""}</div>
-      <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
+      <div class="mut">${esc(m.handle)} · ${esc(m.label)}${m.role ? ` · ${esc(m.role)}` : ""}</div>${m.description ? `<div class="small" data-card="${esc(m.bot_id)}" style="margin-top:2px">${esc(roomMemberCard(m.description))}</div>` : ""}</div></div>`).join("")}</div>` : `<div class="empty">Nobody is in this room.</div>`}`;
   const start = $("#room-start");
   if (start) start.onclick = async () => {
     start.disabled = true;

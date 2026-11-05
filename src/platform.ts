@@ -3740,11 +3740,14 @@ export class Platform {
     // U+2028, a leading @ or more than 60 code points, so clean it on read by the same rule as `publicBot`.
     const display_name = peerDisplayName(m.display_name, "Bot");
     const owner_name = peerDisplayName(m.owner_name, "Owner");
+    // The look and the one-line card come from the Bot's live row: a member who edits either shows the new value on
+    // the room's next read. A Bot without a card reads null, never an empty line.
+    const card = look ? this.get("SELECT avatar, color, avatar_updated_at, description FROM bots WHERE id = ?", m.bot_id) : null;
     return {
       handle: m.handle, display_name, owner_name,
       label: memberLabel(display_name, owner_name), bot_id: m.bot_id,
       ...(look ? { role: m.role ? sanitizePeerName(m.role, "", FACE_ROOM_ROLE_MAX) || null : null } : {}),
-      ...(look ? lookOf(this.get("SELECT avatar, color, avatar_updated_at FROM bots WHERE id = ?", m.bot_id) ?? {}) : {}),
+      ...(look ? { description: card?.description ?? null, ...lookOf(card ?? {}) } : {}),
     };
   }
   private faceSnapshot(b: any) {
