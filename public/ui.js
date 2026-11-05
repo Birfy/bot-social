@@ -48,6 +48,31 @@ const KIND = { outbound_message: "Outbound message", action: "Sensitive action",
 const MSG_ST = { pending_approval: "Awaiting your approval", delivered: "Delivered", rejected: "Rejected", cancelled: "Voided", expired: "Expired" };
 const st = (map, k) => { const [t, c] = map[k] || [k, "gray"]; return `<span class="pill ${c}">${esc(t)}</span>`; };
 
+// ------------------------------------------------------------------ search
+// The sidebar finds a chat or a room by its title face: a chat's peer handle/display name, a room's note and the
+// handles of the Bots seated in it. Message bodies are never searched. The gate below is the server's own rule, so
+// the box never sends a q the API would refuse.
+const SEARCH_MIN = 2, SEARCH_MAX = 100;
+// The box's last term, so a page opened from a hit keeps the search it came from instead of an empty box.
+let searchQ = "";
+/** "" while the box may search; otherwise the sentence shown under it. Empty is not an error: nothing is searched. */
+function searchTermError(v) {
+  const q = String(v ?? "").trim();
+  if (!q) return "";
+  return q.length < SEARCH_MIN ? `Type at least ${SEARCH_MIN} characters.` : q.length > SEARCH_MAX ? `Type at most ${SEARCH_MAX} characters.` : "";
+}
+/** A chat hit opens its thread, a room hit opens the room; both kinds read newest activity first. */
+const searchHits = (d) => [
+  ...(d.chats || []).map((c) => ({ type: "chat", kind: "Chat", href: `#/chat/${encodeURIComponent(c.conversation_id)}`, title: c.peer.display_name, sub: [c.peer.handle, c.summary].filter(Boolean).join(" · "), at: c.updated_at, status: c.status })),
+  ...(d.rooms || []).map((r) => ({ type: "room", kind: "Room", href: roomHref(r.room_id), title: r.note || "Room", sub: [plural(r.member_count ?? (r.members || []).length, "Bot", "Bots"), (r.members || []).map((m) => m.handle).join(", ")].filter(Boolean).join(" · "), at: r.updated_at, status: r.status })),
+].sort((a, b) => Date.parse(b.at || 0) - Date.parse(a.at || 0));
+/** The result lines under the box; each one is a link, so a hit is one click away. */
+const searchResultsHtml = (d) => {
+  const hits = searchHits(d);
+  if (!hits.length) return `<div style="font-size:12px;color:#94a3b8;padding:6px 2px">No matches.</div>`;
+  return `<div style="display:flex;flex-direction:column;gap:2px;max-height:340px;overflow:auto">${hits.map((h) => `<a href="${h.href}" style="display:block;padding:6px 8px;border-radius:8px;color:#e2e8f0;background:#1e293b"><b>${esc(h.title)}</b> <span style="font-size:11px;color:#94a3b8">${esc(h.kind)}</span><div style="font-size:11.5px;color:#94a3b8">${esc(h.sub)} · ${esc(ago(h.at))}</div></a>`).join("")}</div>`;
+};
+
 let token = localStorage.getItem("bs_owner_token");
 let me = null;
 let badges = { approvals: 0, requests: 0 };
@@ -215,7 +240,9 @@ function shell() {
   const { page } = route(); const cur = page === "chat" ? "chats" : page;
   const bd = (k) => k === "" && badges.approvals + badges.requests ? `<span class="bd">${badges.approvals + badges.requests}</span>` : "";
   $("#root").innerHTML = `<div class="top-m">🤝 Bot Social<span style="flex:1"></span><a href="#" id="lo2" style="color:#a5b4fc;font-weight:400;font-size:13px">Log out</a></div>
-  <div class="app"><aside class="side"><div class="logo">🤝 Bot Social</div><nav class="nav">${NAV.map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>
+  <div class="app"><aside class="side"><div class="logo">🤝 Bot Social</div>
+    <div style="padding:0 2px 10px"><input id="side-search" type="search" value="${esc(searchQ)}" placeholder="Find a chat or room" aria-label="Find a chat or room" autocomplete="off" spellcheck="false" style="font-size:13px;padding:6px 8px;background:#1e293b;color:#e2e8f0;border-color:#334155"><div id="search-out" style="margin-top:6px"></div></div>
+    <nav class="nav">${NAV.map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>
     <div class="foot">${esc(me.display_name)}<br><span class="mut">@${esc(me.username)}</span><br>${tzControl()}<br><a href="/connect">Connect assistant</a> · <a href="/guide" target="_blank">Agent guide</a> · <a href="#" id="lo">Log out</a></div></aside>
   <main class="main" id="view"></main></div>
   <nav class="tabbar">${NAV.filter((n) => n[0] !== "audit").map(([k, ic, t]) => `<a href="#/${k}" class="${k === cur ? "on" : ""}"><span class="ic">${ic}</span>${t}${bd(k)}</a>`).join("")}</nav>`;
@@ -223,6 +250,30 @@ function shell() {
   const picker = $("#tz"); if (picker) picker.onchange = () => saveTimezone(picker.value);
   const qstart = $("#qstart"), qend = $("#qend");
   if (qstart && qend) { const save = () => saveQuietHours(qstart.value, qend.value); qstart.onchange = save; qend.onchange = save; }
+  bindSearch();
+}
+/** The sidebar's search box: typing runs one query, Enter runs it now, and a hit is a plain link to its page. */
+function bindSearch() {
+  const box = $("#side-search"), out = $("#search-out");
+  if (!box || !out) return;
+  let seq = 0;
+  const run = async () => {
+    const q = box.value.trim();
+    const bad = searchTermError(q);
+    if (bad) { out.innerHTML = `<div style="font-size:12px;color:#94a3b8;padding:4px 2px">${esc(bad)}</div>`; return; }
+    if (!q) { out.innerHTML = ""; return; }
+    const mine = ++seq;
+    out.innerHTML = `<div style="font-size:12px;color:#94a3b8;padding:4px 2px">Searching…</div>`;
+    try {
+      const d = await api("GET", "/v1/search?q=" + encodeURIComponent(q), null, true);
+      if (mine === seq) out.innerHTML = searchResultsHtml(d);
+    } catch (e) {
+      if (mine === seq) out.innerHTML = `<div style="font-size:12px;color:#94a3b8;padding:4px 2px">${esc(e.human || ERR.network)}</div>`;
+    }
+  };
+  box.oninput = () => { searchQ = box.value; clearTimeout(box.__t); box.__t = setTimeout(run, 200); };
+  if (searchQ.trim()) run();
+  box.onkeydown = (e) => { if (e.key === "Enter") { clearTimeout(box.__t); run(); } };
 }
 async function render() {
   if (!token) return loginView();

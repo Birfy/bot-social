@@ -3460,6 +3460,59 @@ export class Platform {
     return rows.map((c) => ({ conversation_id: c.id, ...this.reportedConvState(c), intent: J(c.intent), initiator: this.publicBot(this.bot(c.initiator_bot)), peer: this.publicBot(this.bot(c.peer_bot)), turn: { count: c.turn_count, max: null }, created_at: c.created_at, updated_at: c.updated_at }));
   }
 
+  /**
+   * Console search: find a chat or a face room by its title face — a chat's peer handle and display name (or, for a
+   * Bot token, the other Bot of its own thread), a room's note and the handles of the Bots seated in it. Message
+   * bodies are never read: no line of a chat, no line said in a room, and a chat's summary is not a title either.
+   * The set is the lists' own set: a closed chat, and a room that closed or that this home has left, are not hits,
+   * so the console never offers something its pages would not show. `q` is trimmed and must be 2–100 characters;
+   * each kind answers at most 20 hits, newest activity first.
+   */
+  searchConsole(p: Principal, q: unknown) {
+    const term = typeof q === "string" ? q.trim() : "";
+    assert(term.length >= 2 && term.length <= 100, 400, "invalid_query", "q must be 2-100 characters");
+    const needle = term.toLowerCase();
+    // Chats: the card's titles are the two handles and display names. A conversation is readable by an owner while
+    // either Bot is theirs, and by a Bot token only for its own threads; a closed thread is gone from the lists.
+    const title = "instr(lower(i.handle), ?) > 0 OR instr(lower(i.display_name), ?) > 0 OR instr(lower(pr.handle), ?) > 0 OR instr(lower(pr.display_name), ?) > 0";
+    const chatRows = p.kind === "owner"
+      ? this.all(`SELECT c.* FROM conversations c JOIN bots i ON i.id = c.initiator_bot JOIN bots pr ON pr.id = c.peer_bot
+          WHERE c.status != 'closed' AND (i.owner_id = ? OR pr.owner_id = ?) AND (${title})
+          ORDER BY c.updated_at DESC LIMIT 20`, p.ownerId, p.ownerId, needle, needle, needle, needle)
+      : this.all(`SELECT c.* FROM conversations c JOIN bots i ON i.id = c.initiator_bot JOIN bots pr ON pr.id = c.peer_bot
+          WHERE c.status != 'closed' AND (c.initiator_bot = ? OR c.peer_bot = ?) AND (${title})
+          ORDER BY c.updated_at DESC LIMIT 20`, p.botId, p.botId, needle, needle, needle, needle);
+    const chats = chatRows.map((c: any) => {
+      const initiator = this.bot(c.initiator_bot), peer = this.bot(c.peer_bot);
+      // The counterpart is the side that is not mine, exactly as the chat card names it; a thread between two of my
+      // own Bots shows the peer side.
+      const other = p.kind === "owner" ? (initiator.owner_id === p.ownerId ? peer : initiator) : (c.initiator_bot === p.botId ? peer : initiator);
+      return { conversation_id: c.id, status: c.status, summary: c.summary ?? null, updated_at: c.updated_at, peer: this.publicBot(other) };
+    });
+    // Rooms: the same seat rule `listFaceRooms` answers with (my own seat, or a guest this home brought in), closed
+    // rooms and seats that were given up left out. The title face is the note plus every seated handle.
+    this.advanceFaceRooms();
+    const ownerId = p.ownerId;
+    const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
+    const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, ownerId, ownerId, p.botId] : [ownerId, ownerId, ownerId, ownerId];
+    const roomRows = this.all(`SELECT r.id, r.status, r.note, r.started_at, r.created_at,
+        COALESCE((SELECT MAX(e.created_at) FROM face_room_events e WHERE e.room_id = r.id), r.started_at, r.created_at) activity_at,
+        (SELECT COUNT(*) FROM face_room_members c WHERE c.room_id = r.id AND c.left_at IS NULL) member_count
+      FROM face_rooms r
+      JOIN face_room_members m ON m.room_id = r.id AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+        NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL)))) ${extra}
+      WHERE r.status != 'closed' AND (instr(lower(COALESCE(r.note, '')), ?) > 0 OR EXISTS (
+        SELECT 1 FROM face_room_members s WHERE s.room_id = r.id AND s.left_at IS NULL AND (instr(lower(s.handle), ?) > 0 OR instr(lower(s.display_name), ?) > 0)))
+      GROUP BY r.id ORDER BY activity_at DESC LIMIT 20`, ...args, needle, needle, needle);
+    const rooms = roomRows.map((r: any) => ({
+      room_id: r.id, status: r.status, note: r.note ?? null, member_count: r.member_count, updated_at: r.activity_at,
+      members: this.all("SELECT handle, display_name FROM face_room_members WHERE room_id = ? AND left_at IS NULL ORDER BY join_seq, handle", r.id)
+        .map((m: any) => ({ handle: "@" + String(m.handle ?? "").replace(/^@/, ""), display_name: m.display_name })),
+    }));
+    return { query: term, chats, rooms };
+  }
+
   /** #57: the room a conversation is bound to, when its door is a room relationship; null for a 1:1 conversation. */
   private roomOfConversation(c: any): string | null {
     const rel = this.get("SELECT status FROM relationships WHERE id = ?", c.relationship_id);
