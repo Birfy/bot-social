@@ -72,11 +72,11 @@ test("leaving a room settles the waiting card of the Bot that left", async (t) =
   assert.equal(pending.status, 200, JSON.stringify(pending.body));
   assert.ok(!(pending.body.approvals as any[]).some((a) => a.approval_id === held.approvalId), "the dead card left the pending queue");
 
-  // Deciding it now says it was settled, not that the sender is no longer a member.
+  // Deciding it now says the seat is gone, not that the sender is no longer a member.
   const decided = await req(s.base, "POST", `/v1/approvals/${held.approvalId}/decision`, A.owner.token, { decision: "approved" });
   assert.equal(decided.status, 409, JSON.stringify(decided.body));
   assert.equal(decided.body.error?.code, "invalid_state", "a settled card is not a `not_a_member` refusal");
-  assert.match(decided.body.error?.message ?? "", /approval is cancelled/);
+  assert.equal(decided.body.error?.message, "the Bot is no longer in the room this draft was for; this draft can no longer be approved");
 
   // The room lives on for the member who stayed.
   const view = await req(s.base, "GET", `/v1/face-rooms/${roomId}`, B.owner.token);

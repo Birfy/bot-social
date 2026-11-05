@@ -2855,13 +2855,22 @@ export class Platform {
         throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
       }
     }
-    // #84 follow-up: a revoked member's card stays as a record, never as a decision. Say why, so the owner
-    // is not left guessing at "approval is cancelled"; every other non-pending row keeps the plain state.
+    // #84 follow-up: a settled card stays as a record, never as a decision. Say why, so the owner is not left
+    // guessing at "approval is cancelled": a revoked sender and a revoked share have their own sentence, and so do
+    // the two ways the room settles a line (its sender walked out, or the room closed while it waited). A reason
+    // this build does not map, and a row that was decided rather than settled, keep the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
     const shareGoneReason = "the share this draft was waiting on was revoked; this draft can no longer be approved";
+    const leftRoomReason = "the Bot is no longer in the room this draft was for; this draft can no longer be approved";
+    const closedRoomReason = "the room closed before this draft was decided; this draft can no longer be approved";
     if (a.status !== "pending") {
       const known = a.status === "cancelled" ? a.decision : null;
-      throw new ApiError(409, "invalid_state", known === "member_revoked" ? revokedReason : known === "grant_revoked" ? shareGoneReason : `approval is ${a.status}`);
+      const sentence = known === "member_revoked" ? revokedReason
+        : known === "grant_revoked" ? shareGoneReason
+        : known === "room_left" ? leftRoomReason
+        : known === "room_closed" ? closedRoomReason
+        : `approval is ${a.status}`;
+      throw new ApiError(409, "invalid_state", sentence);
     }
     // Last line of defence for a stale row an older build left pending after its sender was revoked. Cancel it
     // now (same record the revoke leaves behind) instead of delivering as a Bot that no longer exists.
