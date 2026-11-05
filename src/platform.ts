@@ -1406,7 +1406,11 @@ export class Platform {
     assert(!this.get("SELECT 1 FROM bot_keys WHERE bot_id = ? AND kid = ?", botId, body.kid), 409, "kid_exists");
     // rotation: old keys stay valid for the requested window, one week by default
     const until = new Date(Date.now() + (days as number) * 86400e3).toISOString();
-    this.run("UPDATE bot_keys SET expires_at = ? WHERE bot_id = ? AND status = 'active' AND expires_at IS NULL", until, botId);
+    // The key the platform signs this Bot's owner-side sends with (`bot_custody.kid`) is not one of the caller's old
+    // keys: dating it would answer 401 invalid_signature on every owner-side send once the window closed, so the
+    // sweep retires the caller's keys and leaves the platform's own signing identity alone.
+    this.run(`UPDATE bot_keys SET expires_at = ? WHERE bot_id = ? AND status = 'active' AND expires_at IS NULL
+      AND kid NOT IN (SELECT kid FROM bot_custody WHERE bot_id = ?)`, until, botId, botId);
     this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", botId, body.kid, "Ed25519", body.value, nowIso());
     this.audit.append(`owner:${ownerId}`, "bot.key_added", botId, [ownerId], { kid: body.kid, old_keys_expire_at: until });
     return { bot_id: botId, kid: body.kid, status: "active" };
@@ -1415,6 +1419,11 @@ export class Platform {
   revokeKey(p: Principal, botId: string, kid: string) {
     const ownerId = this.requireOwner(p);
     this.ownBot(ownerId, botId);
+    // The same key cannot be revoked from this door: the connector would answer 401 invalid_signature on every send.
+    // Custody is the door that takes it back — disabling it returns the key to the owner, who can then revoke it.
+    const custody = this.get("SELECT kid FROM bot_custody WHERE bot_id = ?", botId);
+    assert(!custody || custody.kid !== kid, 409, "custody_key_held",
+      "the platform signs this bot's owner-side sends with this key; disable custody first (disable_custody), then revoke it");
     const r = this.run("UPDATE bot_keys SET status = 'revoked' WHERE bot_id = ? AND kid = ?", botId, kid);
     assert(r.changes, 404, "key_not_found");
     this.audit.append(`owner:${ownerId}`, "bot.key_revoked", botId, [ownerId], { kid });
