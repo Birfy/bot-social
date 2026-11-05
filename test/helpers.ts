@@ -12,6 +12,10 @@ export async function startServer(opts: ConstructorParameters<typeof Platform>[0
   return { platform, app, base, stop: async () => { await app.close(); platform.close(); } };
 }
 
+/** Override for fixtures that mint dozens of accounts from one loopback address against one server. That
+ *  traffic is the burst the real sign-up budget refuses on purpose; the limiter's own tests pin the defaults. */
+export const bulkAuth = { authRateLimit: { perIp: 1000, perAccount: 1000 } };
+
 let n = 0;
 export async function ownerWithBot(base: string, name: string, webhook_url?: string) {
   const u = `${name}${++n}`;

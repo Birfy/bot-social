@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { AddressInfo } from "node:net";
 import { signEnvelope, verifyWebhookSignature } from "../src/crypto.js";
-import { approveAll, expectApiError, friends, inDays, ownerWithBot, startServer } from "./helpers.js";
+import { approveAll, bulkAuth, expectApiError, friends, inDays, ownerWithBot, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer(bulkAuth); });
 after(async () => { await S.stop(); });
 
 const meetingIntent = () => ({ type: "schedule_meeting", summary: "sync", params: { duration_minutes: 30, window: { start: inDays(1, 0), end: inDays(8, 23) } } });

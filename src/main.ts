@@ -6,6 +6,7 @@ import { ensureBotctl } from "./botctl-build.js";
 import { Platform } from "./platform.js";
 import { loadKmsKey } from "./custody.js";
 import { buildServer } from "./server.js";
+import { loadTrustProxy, trustProxyStartupLine } from "./trust-proxy.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -24,7 +25,9 @@ const platform = new Platform({ kmsKey, dbPath, auditPath, webhooks: {
   ttlMs: Number(process.env.BOTSOCIAL_ATTACHMENT_TTL_DAYS ?? 7) * 24 * 3600 * 1000,
 }, publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}` });
 if (platform.oauth.warning) console.warn(platform.oauth.warning);
-const app = buildServer(platform, { logger: process.env.LOG === "1", fixedBaseUrl: !!process.env.PUBLIC_BASE_URL });
+const trustProxy = loadTrustProxy(process.env.TRUST_PROXY);
+const app = buildServer(platform, { logger: process.env.LOG === "1", fixedBaseUrl: !!process.env.PUBLIC_BASE_URL, trustProxy: trustProxy.setting });
+console.log(trustProxyStartupLine(trustProxy));
 await ensureBotctl().catch((e) => console.warn("botctl build skipped:", e.message));
 await app.listen({ port, host });
 console.log(`Bot Social listening on http://${host}:${port}  · UI /ui · guide /guide · botctl /botctl · pid ${process.pid}`);

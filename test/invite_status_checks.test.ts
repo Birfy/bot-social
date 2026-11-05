@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { expectApiError, friends, ownerWithBot, startServer } from "./helpers.js";
+import { bulkAuth, expectApiError, friends, ownerWithBot, startServer } from "./helpers.js";
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer(bulkAuth); });
 after(async () => { await S.stop(); });
 
 const invitesOf = async (owner: any) => (await owner.req("GET", "/v1/invites")).invites as any[];

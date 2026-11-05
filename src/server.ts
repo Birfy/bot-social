@@ -8,12 +8,17 @@ import { ensureBotctl } from "./botctl-build.js";
 import { marked } from "marked";
 import { registerOwnerMcp } from "./owner-mcp.js";
 import { injectOAuthMeta, oauthErrorPage } from "./oauth.js";
+import { loadTrustProxy, TrustProxySetting } from "./trust-proxy.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const UI_HTML = () => readFileSync(join(here, "..", "public", "index.html"), "utf8");
 
-export function buildServer(platform: Platform, opts: { logger?: boolean; fixedBaseUrl?: boolean } = {}): FastifyInstance {
-  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024, trustProxy: true });
+export function buildServer(platform: Platform, opts: { logger?: boolean; fixedBaseUrl?: boolean; trustProxy?: TrustProxySetting } = {}): FastifyInstance {
+  // #75 ①: X-Forwarded-For is believed only from the peers this deployment names (TRUST_PROXY, loopback by
+  // default), so a direct caller cannot choose the address the limits and audit rows read. The startup line in
+  // main.ts says which peers those are, and what an unnamed proxy would cost.
+  const trustProxy = opts.trustProxy ?? loadTrustProxy(process.env.TRUST_PROXY).setting;
+  const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 256 * 1024, trustProxy });
   // Without PUBLIC_BASE_URL, derive links (invites, /botctl, /guide) from the Host the client used.
   if (!opts.fixedBaseUrl) app.addHook("onRequest", async (req) => { if (req.headers.host) platform.publicBaseUrl = `${req.protocol}://${req.headers.host}`; });
   const page = (name: string) => readFileSync(join(here, "..", "public", name), "utf8");
@@ -100,13 +105,22 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/ui.js", async (_req, reply) => reply.type("text/javascript; charset=utf-8").header("cache-control", "no-cache").send(page("ui.js")));
   registerOwnerMcp(app, platform);
   app.get("/connect", async (_req, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(page("connect.html")));
-  const onboardHits = new Map<string, number[]>();
-  app.post("/v1/onboard/flybot", async (req, reply) => {
-    const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
-    if (hits.length >= 10) return reply.status(429).send({ error: { code: "rate_limited", message: "too many sign-ups from this address; try again later" } });
-    onboardHits.set(ip, [...hits, now]);
-    return reply.status(201).send(platform.onboardFlybot(B(req)));
-  });
+  // The one name for "the client this request came from". All limiters read it here; which peers are
+  // believed for X-Forwarded-For is decided once by the Fastify trustProxy setting (TRUST_PROXY, #75 ①),
+  // not at each gate.
+  const clientAddress = (req: FastifyRequest) => req.ip;
+  // Login, sign-up and both onboarding gates share one bounded bucket set (#75): a burst against any of them
+  // spends the same per-address / per-username budget, and a refused attempt is not recorded again.
+  const authGate = async (req: FastifyRequest, reply: any) => {
+    const username = (req.body as any)?.username;
+    const block = platform.authAttempt({ ip: clientAddress(req), account: typeof username === "string" ? username : null });
+    if (!block) return;
+    const message = block.scope === "account"
+      ? "too many attempts for this account; try again later"
+      : "too many sign-ups or sign-ins from this address; try again later";
+    return reply.status(429).send({ error: { code: "rate_limited", message, retry_after: block.retry_after } });
+  };
+  app.post("/v1/onboard/flybot", { preHandler: authGate }, async (req, reply) => reply.status(201).send(platform.onboardFlybot(B(req))));
   app.get("/v1/homes/:id/members", async (req) => platform.listHomeMembers(auth(req), P(req).id));
   app.post("/v1/homes/:id/members", async (req, reply) => reply.status(201).send(platform.addHomeMember(auth(req), P(req).id, B(req))));
   app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
@@ -120,12 +134,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   // Recipient side: the grantee removes a grant given to one of their bots (the granting owner's list_bot_grants drops it).
   app.delete("/v1/remote-bots/:grantId", async (req) => platform.declineBotGrant(ownerAny(req), P(req).grantId, Q(req).bot_id || undefined));
   app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
-  app.post("/v1/onboard", async (req, reply) => {
-    const now = Date.now(), ip = req.ip, hits = (onboardHits.get(ip) ?? []).filter((t) => now - t < 3600e3);
-    if (hits.length >= 10) return reply.status(429).send({ error: { code: "rate_limited", message: "too many sign-ups from this address; try again later" } });
-    onboardHits.set(ip, [...hits, now]);
-    return reply.status(201).send(platform.onboard(B(req)));
-  });
+  app.post("/v1/onboard", { preHandler: authGate }, async (req, reply) => reply.status(201).send(platform.onboard(B(req))));
   const setupMd = () => readFileSync(join(here, "..", "docs", "SETUP.md"), "utf8").replaceAll("{{BASE_URL}}", platform.publicBaseUrl);
   app.get("/setup", async (_req, reply) => reply.type("text/markdown; charset=utf-8").header("cache-control", "no-cache").send(setupMd()));
   app.get("/setup.md", async (_req, reply) => reply.type("text/markdown; charset=utf-8").send(setupMd()));
@@ -153,8 +162,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/platform", async () => platform.platformInfo());
 
   // ---- owners
-  app.post("/v1/owners", async (req, reply) => reply.status(201).send(platform.registerOwner(B(req))));
-  app.post("/v1/auth/login", async (req) => platform.login(B(req)));
+  app.post("/v1/owners", { preHandler: authGate }, async (req, reply) => reply.status(201).send(platform.registerOwner(B(req))));
+  app.post("/v1/auth/login", { preHandler: authGate }, async (req) => platform.login(B(req)));
   // Sign out this login token on the server too, not only in localStorage.
   app.post("/v1/auth/logout", async (req) => {
     const h = req.headers.authorization;
