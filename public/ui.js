@@ -97,8 +97,18 @@ const ERR = {
   bot_frozen: "This Bot is emergency-stopped. Resume it under My Bots before sharing it.",
 };
 const sentence = (s) => { s = String(s).trim(); if (!s) return s; s = s[0].toUpperCase() + s.slice(1); return /[.!?]$/.test(s) ? s : s + "."; };
-/** Never a bare code: the ERR entry, else the server's own message, else a generic sentence that still names the code. */
-function errText(code, message, status) {
+/** Never a bare code: the ERR entry, else the server's own message, else a generic sentence that still names the code.
+ *  A rate-limit refusal also carries `retry_after` and which budget ran out (`scope`), so its notice says the wait. */
+function errText(code, message, status, body) {
+  if (code === "rate_limited") {
+    const e = (body && body.error) || body || {};
+    const wait = Number(e.retry_after);
+    const where = e.scope === "account" ? " for this account" : e.scope === "ip" ? " from this network" : "";
+    if (Number.isFinite(wait) && wait > 0) {
+      const mins = Math.max(1, Math.round(wait / 60));
+      return `Too many requests${where}. Try again in about ${mins} minute${mins === 1 ? "" : "s"}.`;
+    }
+  }
   if (code && ERR[code]) return ERR[code];
   const m = message == null ? "" : String(message);
   if (m && m !== code && !/^\d+$/.test(m) && !/^[a-z0-9_]+$/.test(m)) return sentence(m);
@@ -110,7 +120,7 @@ async function api(method, path, body, quiet) {
   catch { const e = new Error(ERR.network); e.code = "network"; e.human = ERR.network; if (!quiet) toast(ERR.network); throw e; }
   const j = await r.json().catch(() => ({}));
   if (r.status === 401 && token) { logout("signed_out"); throw new Error("unauthorized"); }
-  if (!r.ok) { const e = new Error(j.error?.message || String(r.status)); e.code = j.error?.code; e.status = r.status; e.body = j; e.human = errText(j.error?.code, j.error?.message, r.status); if (!quiet) toast(e.human); throw e; }
+  if (!r.ok) { const e = new Error(j.error?.message || String(r.status)); e.code = j.error?.code; e.status = r.status; e.body = j; e.human = errText(j.error?.code, j.error?.message, r.status, j); if (!quiet) toast(e.human); throw e; }
   return j;
 }
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -257,7 +267,8 @@ function loginView(opts = {}) {
       boot("password");
     } catch (err) {
       token = null; $("#go").disabled = false;
-      const msg = err.human || ERR.network;
+      // The whole refusal body, so a 429 can name the wait and the budget instead of "wait a moment".
+      const msg = err.body ? errText(err.code, err.message, err.status, err.body) : (err.human || ERR.network);
       if (err.code === "username_taken") fieldErr($("#u"), msg); else formErr($("#lerr"), msg);
     }
   };

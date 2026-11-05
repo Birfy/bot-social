@@ -118,7 +118,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     const message = block.scope === "account"
       ? "too many attempts for this account; try again later"
       : "too many sign-ups or sign-ins from this address; try again later";
-    return reply.status(429).send({ error: { code: "rate_limited", message, retry_after: block.retry_after } });
+    return reply.status(429).send({ error: { code: "rate_limited", message, retry_after: block.retry_after, scope: block.scope } });
   };
   app.post("/v1/onboard/flybot", { preHandler: authGate }, async (req, reply) => reply.status(201).send(platform.onboardFlybot(B(req))));
   app.get("/v1/homes/:id/members", async (req) => platform.listHomeMembers(auth(req), P(req).id));
