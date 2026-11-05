@@ -2918,11 +2918,14 @@ export class Platform {
   private announceHeldApprovals(ownerId: string, botId: string): boolean {
     const outlet = this.get("SELECT status FROM bots WHERE id = ?", botId);
     if (!outlet || outlet.status === "revoked") return false;
-    const held = this.all("SELECT approval_id FROM approval_notifications WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL ORDER BY rowid ASC", ownerId, botId);
+    // The ledger records the outlet a card was written for; whether the card still waits is the queue's question,
+    // asked now. A card settled during the night (approved, rejected, expired, cancelled) is not named in the
+    // summary, and its line is not marked delivered: the ledger keeps the record, the queue says what is waiting.
+    const held = this.all("SELECT n.approval_id FROM approval_notifications n JOIN approvals a ON a.id = n.approval_id WHERE n.owner_id = ? AND n.bot_id = ? AND n.delivered_at IS NULL AND a.status = 'pending' ORDER BY n.rowid ASC", ownerId, botId);
     if (!held.length) return false;
     const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", ownerId).n;
     this.emit(botId, "approval.digest", { count: held.length, approval_ids: held.slice(0, 5).map((r: any) => r.approval_id), pending_count });
-    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL", nowIso(), ownerId, botId);
+    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL AND EXISTS (SELECT 1 FROM approvals a WHERE a.id = approval_notifications.approval_id AND a.status = 'pending')", nowIso(), ownerId, botId);
     return true;
   }
 
