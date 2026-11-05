@@ -2939,18 +2939,24 @@ export class Platform {
   }
 
   /** One summary for every card that waited through quiet hours, then mark the batch delivered so the same cards are
-   *  never announced twice. The summary names the count and the few earliest cards, never their text. */
+   *  never announced twice. The summary names the count and the few earliest cards, never their text.
+   *
+   *  The batch belongs to the owner, not to the Bot that happened to be the outlet when each card was written: the
+   *  owner may switch outlets while the batch waits (the ledger row keeps the old `bot_id` as the record of that
+   *  moment), and a per-outlet query then looked for the batch under a Bot nobody consults again — the cards waited
+   *  forever, past the promise that they leave when the window ends (#423). Read the batch by owner and send it to
+   *  the outlet of the moment; one owner has one outlet, so two of a home's Bots cannot swallow each other's cards. */
   private announceHeldApprovals(ownerId: string, botId: string): boolean {
     const outlet = this.get("SELECT status FROM bots WHERE id = ?", botId);
     if (!outlet || outlet.status === "revoked") return false;
     // The ledger records the outlet a card was written for; whether the card still waits is the queue's question,
     // asked now. A card settled during the night (approved, rejected, expired, cancelled) is not named in the
     // summary, and its line is not marked delivered: the ledger keeps the record, the queue says what is waiting.
-    const held = this.all("SELECT n.approval_id FROM approval_notifications n JOIN approvals a ON a.id = n.approval_id WHERE n.owner_id = ? AND n.bot_id = ? AND n.delivered_at IS NULL AND a.status = 'pending' ORDER BY n.rowid ASC", ownerId, botId);
+    const held = this.all("SELECT n.approval_id FROM approval_notifications n JOIN approvals a ON a.id = n.approval_id WHERE n.owner_id = ? AND n.delivered_at IS NULL AND a.status = 'pending' ORDER BY n.rowid ASC", ownerId);
     if (!held.length) return false;
     const pending_count = this.get("SELECT COUNT(*) n FROM approvals WHERE owner_id = ? AND status = 'pending'", ownerId).n;
     this.emit(botId, "approval.digest", { count: held.length, approval_ids: held.slice(0, 5).map((r: any) => r.approval_id), pending_count });
-    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE owner_id = ? AND bot_id = ? AND delivered_at IS NULL AND EXISTS (SELECT 1 FROM approvals a WHERE a.id = approval_notifications.approval_id AND a.status = 'pending')", nowIso(), ownerId, botId);
+    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE owner_id = ? AND delivered_at IS NULL AND EXISTS (SELECT 1 FROM approvals a WHERE a.id = approval_notifications.approval_id AND a.status = 'pending')", nowIso(), ownerId);
     return true;
   }
 
