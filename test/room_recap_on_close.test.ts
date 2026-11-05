@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { friends, startServer } from "./helpers.js";
+import { friends, ownerWithBot, startServer } from "./helpers.js";
 
 async function req(base: string, method: string, path: string, token: string, body?: unknown) {
   const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
@@ -176,6 +176,15 @@ test("the recap carries counts and names, never a line's text", async () => {
     for (const forbidden of ["text", "untrusted_content", "transcript", "lines", "events", "payload", "messages"]) {
       assert.ok(!keys.has(forbidden), `the recap has no ${forbidden} field`);
     }
+    // The shape is fixed, not merely free of the names above: a later field cannot smuggle a line in. The note is the
+    // one free-form string the recap carries, and it is room metadata every member already reads, not a transcript.
+    assert.deepEqual(Object.keys(recap).sort(),
+      ["closed_at", "decisions", "members", "note", "reason", "recap_version", "room_id", "started_at"],
+      "the recap is exactly these fields");
+    assert.deepEqual(Object.keys(recap.decisions).sort(), ["approved", "cancelled", "expired", "rejected"],
+      "one number per decision and nothing else");
+    for (const m of recap.members) assert.deepEqual(Object.keys(m).sort(), ["handle", "owner_name"],
+      "a seat is a handle and its home, nothing else");
     const events = await recapEvents(s.base, B.reg.bot_token);
     assert.equal(events.length, 1);
     const wire = JSON.stringify(events[0]);
@@ -215,5 +224,48 @@ test("the recap says why the room ended: a share taken back, or a share that lap
     const lapsedRecap = recapOf(s, second.body.room_id).recap;
     assert.ok(lapsedRecap, "the lapsed share emptied the room");
     assert.equal(lapsedRecap.reason, "expired", "a share that lapsed by time says so");
+  } finally { await s.stop(); }
+});
+
+test("a member who joined late cannot read the transcript but reads the same recap", async () => {
+  const clock = { now: Date.parse("2026-05-01T09:00:00.000Z") };
+  const s = await startServer({ now: () => clock.now });
+  try {
+    const { A, B } = await friends(s.base);
+    const opened = await req(s.base, "POST", "/v1/face-rooms/join", A.owner.token, { code: "820007", bots: [A.bot.id] });
+    assert.equal(opened.status, 200, JSON.stringify(opened.body));
+    const roomId = opened.body.room_id as string;
+    const joined = await req(s.base, "POST", "/v1/face-rooms/join", B.owner.token, { code: "820007", bots: [B.bot.id] });
+    assert.equal(joined.status, 200, JSON.stringify(joined.body));
+    // A line is decided before the late member arrives, so it sits behind that member's join floor.
+    await decidedLine(s, A, roomId, APPROVED_LINE, "approved");
+    const C = await ownerWithBot(s.base, "carol");
+    const late = await req(s.base, "POST", "/v1/face-rooms/join", C.owner.token, { code: "820007", bots: [C.bot.id] });
+    assert.equal(late.status, 200, JSON.stringify(late.body));
+    const started = await req(s.base, "POST", `/v1/face-rooms/${roomId}/start`, A.owner.token);
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    // The room is readable, and the line from before the join is not in what the late member reads.
+    const early = await req(s.base, "GET", `/v1/face-rooms/${roomId}`, C.owner.token);
+    assert.equal(early.status, 200, JSON.stringify(early.body));
+    assert.ok(!JSON.stringify(early.body.events).includes(APPROVED_LINE), "a line from before the join stays behind the floor");
+
+    // Everyone leaves; the last seat out closes the room.
+    await leave(s, A, roomId);
+    await leave(s, B, roomId);
+    await leave(s, C, roomId);
+    // The room read door is shut for the late member, and the refusal carries no transcript line.
+    const closed = await req(s.base, "GET", `/v1/face-rooms/${roomId}`, C.owner.token);
+    assert.equal(closed.status, 404, "a closed room is shut to the read door");
+    assert.equal(closed.body.error?.code, "face_room_not_found");
+    assert.ok(!JSON.stringify(closed.body).includes(APPROVED_LINE), "no line comes back with the refusal");
+
+    // The recap still reaches that member, whole: the same payload as a member who did see the line.
+    const aEvents = await recapEvents(s.base, A.reg.bot_token);
+    const cEvents = await recapEvents(s.base, C.reg.bot_token);
+    assert.equal(cEvents.length, 1, "the late member's Bot gets the recap");
+    assert.equal(aEvents[0].room_id, roomId);
+    assert.deepEqual(payloadOf(cEvents[0]), payloadOf(aEvents[0]), "the same recap field for field, not trimmed by arrival");
+    assert.equal(cEvents[0].decisions.approved, 1, "the line that member never saw is still counted");
+    assert.ok(!JSON.stringify(cEvents[0]).includes(APPROVED_LINE), "the recap it reads carries no line either");
   } finally { await s.stop(); }
 });
