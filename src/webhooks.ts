@@ -21,7 +21,7 @@ export interface WebhookOptions {
   allowPrivate?: boolean; // allow loopback / private targets (default true; production sets false)
 }
 export interface Header { name: string; value: string }
-interface Pending { events: { event_id: string; type: string; created_at: string; data: Record<string, unknown> }[]; timer?: NodeJS.Timeout; first_at: number; limited?: boolean }
+interface Pending { events: { event_id: string; type: string; created_at: string; data: Record<string, unknown> }[]; timer?: NodeJS.Timeout; first_at: number; limited?: string }
 
 const RESERVED = /^(content-type|content-length|host|x-botsocial-.*)$/i;
 const MAX_ITEMS = 10;
@@ -203,14 +203,21 @@ export class WebhookPusher {
     if (cap.n >= this.opts.maxPerHour) {
       // keep the events; try again when the oldest push in the window ages out
       const wait = Math.max(1000, Date.parse(cap.oldest) + 3600e3 - Date.now() + 500);
-      if (!p.limited) this.db.prepare("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, created_at, error) VALUES (?,?,?,?,?,?,?,?)")
-        .run(newId("whd"), botId, "events", "rate_limited", p.events.length, JSON.stringify(countTypes(p.events)), new Date().toISOString(), `cap ${this.opts.maxPerHour}/h reached; will retry in ${Math.round(wait / 1000)}s`);
-      p.limited = true;
+      if (!p.limited) {
+        // The held batch gets a row of its own now, and the delivery below takes that row over: one push, one row,
+        // one outcome. Writing a second row when it finally goes out would leave this one saying "retrying later"
+        // for good, beside a delivery for the same batch.
+        const id = newId("whd");
+        this.db.prepare("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, created_at, error) VALUES (?,?,?,?,?,?,?,?)")
+          .run(id, botId, "events", "rate_limited", p.events.length, JSON.stringify(countTypes(p.events)), new Date().toISOString(), `cap ${this.opts.maxPerHour}/h reached; will retry in ${Math.round(wait / 1000)}s`);
+        p.limited = id;
+      }
       this.schedule(botId, p, wait);
       return;
     }
+    const held = p.limited;
     this.pending.delete(botId);
-    await this.deliver(botId, "events", p.events);
+    await this.deliver(botId, "events", p.events, held);
   }
 
   /** Immediate test push (bypasses debounce; counts toward the cap). Returns the delivery record. */
@@ -221,13 +228,21 @@ export class WebhookPusher {
     return this.deliveryView(this.db.prepare("SELECT * FROM webhook_deliveries WHERE id = ?").get(id));
   }
 
-  private async deliver(botId: string, kind: string, events: Pending["events"]): Promise<string> {
+  /** `heldRowId` is the row a cap-refused push already wrote: this delivery takes it over rather than adding a
+   *  second row for the same batch. */
+  private async deliver(botId: string, kind: string, events: Pending["events"], heldRowId?: string): Promise<string> {
     const b = this.db.prepare("SELECT id, handle, webhook_url, webhook_secret, webhook_headers FROM bots WHERE id = ?").get(botId) as any;
-    const id = newId("whd");
+    const id = heldRowId ?? newId("whd");
     const counts = countTypes(events);
     const now = () => new Date().toISOString();
-    this.db.prepare("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, url_redacted, created_at) VALUES (?,?,?,?,?,?,?,?)")
-      .run(id, botId, kind, "sending", events.length, JSON.stringify(counts), redactUrl(b?.webhook_url ?? null), now());
+    if (heldRowId) {
+      // The row starts its real delivery now: the batch it holds is this one, and the "retrying later" note is done.
+      this.db.prepare("UPDATE webhook_deliveries SET status = 'sending', event_count = ?, event_types = ?, url_redacted = ?, created_at = ?, error = NULL WHERE id = ?")
+        .run(events.length, JSON.stringify(counts), redactUrl(b?.webhook_url ?? null), now(), id);
+    } else {
+      this.db.prepare("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, url_redacted, created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, botId, kind, "sending", events.length, JSON.stringify(counts), redactUrl(b?.webhook_url ?? null), now());
+    }
     const finish = (status: string, extra: { response_status?: number; error?: string; attempts: number }) => {
       this.db.prepare("UPDATE webhook_deliveries SET status = ?, response_status = ?, error = ?, attempts = ?, finished_at = ?, sent_at = CASE WHEN ? = 'delivered' THEN ? ELSE sent_at END WHERE id = ?")
         .run(status, extra.response_status ?? null, extra.error?.slice(0, 300) ?? null, extra.attempts, now(), status, now(), id);
