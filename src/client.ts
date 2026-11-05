@@ -112,4 +112,9 @@ export class BotClient {
   leaveFaceRoom(room_id: string) { return this.req("POST", `/v1/face-rooms/${encodeURIComponent(room_id)}/leave`, { bot_id: this.id }); }
   /** One week of the rooms this Bot's own seats sat in, read from the recaps their close already wrote. */
   weekDigest() { return this.req("GET", "/v1/digest"); }
+  /** Who is thinking toward this Bot or into a room it sits in: the same readout the console's presence line uses. */
+  presence(room_id?: string) {
+    const tail = room_id ? `?room_id=${encodeURIComponent(room_id)}` : "";
+    return this.req("GET", `/v1/presence${tail}`);
+  }
 }

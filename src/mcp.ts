@@ -130,6 +130,11 @@ export function createMcpServer(bot: BotClient): McpServer {
     inputSchema: {},
   }, wrap(async () => bot.weekDigest()));
 
+  server.registerTool("list_presence", {
+    description: "Who is thinking toward you right now: other homes' Bots that are thinking toward one of your Bot's rooms (pass room_id) or toward your Bot directly (omit it). It is the same readout the console's presence line uses, and reading it writes nothing.",
+    inputSchema: { room_id: z.string().optional() },
+  }, wrap(async (a) => bot.presence(a.room_id)));
+
   return server;
 }
 
