@@ -158,6 +158,12 @@ export class WebhookPusher {
     const debounceMs = typeof rawDebounceMs === "number" && Number.isFinite(rawDebounceMs) && rawDebounceMs >= 0 ? rawDebounceMs : 20_000;
     const maxPerHour = typeof rawMaxPerHour === "number" && Number.isFinite(rawMaxPerHour) && rawMaxPerHour >= 1 ? rawMaxPerHour : 30;
     this.opts = { debounceMs, maxPerHour, retryBaseMs: 2_000, maxAttempts: 4, timeoutMs: 10_000, allowPrivate: true, ...rest };
+    // A row still `sending` here belongs to a pusher that is gone: this one has not sent anything yet, and one
+    // database file is written by one server process (with a shared file this would settle another process's
+    // in-flight push). Settle it, so the delivery log has no permanent "Sending" row and the lost push is
+    // visible as a failure; a later construction finds no `sending` row and changes nothing.
+    this.db.prepare("UPDATE webhook_deliveries SET status = 'failed', finished_at = ?, error = COALESCE(error, ?) WHERE status = 'sending'")
+      .run(new Date().toISOString(), "interrupted before the delivery finished".slice(0, 300));
   }
 
   /** Queue an event for this bot's next push (no-op if the bot has no webhook). */
