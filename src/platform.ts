@@ -92,9 +92,9 @@ const NOT_DELIVERED_REASONS = ["not_shared_yet"];
  *  lost in transit, not a guess — recorded, not counted (the local-room door answers the same repeat with success). */
 const FACE_JOIN_OUTCOMES = ["invalid_code", "room_full", "code_void", "created", "joined", "rejoined",
   "invited", "invite_not_found", "ended", "revoked", "expired",
-  "claimed", "already_claimed", "bot_revoked"];
+  "claimed", "already_claimed", "bot_revoked", "bot_frozen"];
 /** Invite previews are reads: they get their own per-address budget and never spend the join one. */
-const FACE_PREVIEW_OUTCOMES = ["preview", "invite_not_found", "ended", "revoked", "expired"];
+const FACE_PREVIEW_OUTCOMES = ["preview", "invite_not_found", "ended", "revoked", "expired", "bot_frozen"];
 const J = (s: string | null | undefined, d: any = null) => (s ? JSON.parse(s) : d);
 const ms = (iso: string) => {
   const t = Date.parse(iso);
@@ -4754,6 +4754,14 @@ export class Platform {
     if (room.status === "closed") return { status: 410, code: "ended", message: "this room has ended" };
     if (invite.revoked_at) return { status: 410, code: "revoked", message: "this invite was revoked" };
     if (Date.parse(invite.expires_at) <= this.nowMs()) return { status: 410, code: "expired", message: "this invite has expired" };
+    // A ticket a Bot minted is that identity's reach, exactly as `removeHomeMember` treats a revoked member's
+    // tickets (#183); a stop is the softer switch, so the ticket stays and the minter's state decides. Checked
+    // here, in the one place both the preview and the join read, so a stop closes the link and a resume reopens
+    // the very same one. Owner-minted tickets (`created_by_bot IS NULL`) are the owner's reach, not a Bot's.
+    if (invite.created_by_bot) {
+      const failure = this.invitableFailure(this.bot(invite.created_by_bot));
+      if (failure) return failure;
+    }
     return null;
   }
 
