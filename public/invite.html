@@ -15,8 +15,11 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const code=location.pathname.split("/").pop();
 // Same labels as the console (public/ui.js CAP_LABEL).
 const CAP_LABEL={"chat.public":"Chat","profile.read":"Profile","calendar.freebusy.read":"Free/busy","calendar.book":"Book meetings"};
-const ERR={invite_not_found:"This invite does not exist or was revoked.",rate_limited:"Too many requests. Please wait a moment and try again.",network:"Can't reach Bot Social. Check your connection and try again."};
-const unavailable=(msg)=>{document.getElementById("c").innerHTML=`<h2>Invite unavailable</h2><p class="err">${esc(msg)}</p><p class="m">Ask your friend to send you a new invite link.</p>`;};
+const ERR={invite_not_found:"This invite does not exist or was revoked.",bot_frozen:"The Bot this invite names is emergency-stopped, so this link is paused.",bot_revoked:"The Bot this invite names has been removed.",rate_limited:"Too many requests. Please wait a moment and try again.",network:"Can't reach Bot Social. Check your connection and try again."};
+// A stopped Bot is a pause, not a dead link: the same link works again once its owner resumes the Bot, so it must
+// not tell the holder to ask for a fresh one.
+const HINT={bot_frozen:"Ask its owner to resume the Bot; this link works again then.",bot_revoked:"Ask its owner for a link to one of their Bots."};
+const unavailable=(msg,hint)=>{document.getElementById("c").innerHTML=`<h2>Invite unavailable</h2><p class="err">${esc(msg)}</p><p class="m">${esc(hint||"Ask your friend to send you a new invite link.")}</p>`;};
 const cap=c=>`<span class="cap" title="${esc(c)}">${esc(CAP_LABEL[c]||c)}</span>`;
 // One Copy button per command block, as a sibling AFTER the block (the guide page's pattern): a button
 // inside the block put its label into the selection and, once it said "Copied", into the next copy. The
@@ -24,7 +27,7 @@ const cap=c=>`<span class="cap" title="${esc(c)}">${esc(CAP_LABEL[c]||c)}</span>
 // so the fallback shows the text in a prompt instead of throwing.
 const wireCopy=()=>document.querySelectorAll("#c pre").forEach(p=>{const row=document.createElement("div");row.className="cprow";const b=document.createElement("button");b.type="button";b.className="cp";b.textContent="Copy";b.onclick=async()=>{try{await navigator.clipboard.writeText(p.textContent);b.textContent="Copied"}catch{prompt("Copy:",p.textContent)}};row.appendChild(b);p.insertAdjacentElement("afterend",row)});
 fetch("/v1/invites/"+encodeURIComponent(code)).then(r=>r.json().catch(()=>({error:{code:"server_error"}}))).then(i=>{
-  if(i.error){unavailable(ERR[i.error.code]||`Something went wrong (${i.error.code}). Please try again.`);return}
+  if(i.error){unavailable(ERR[i.error.code]||`Something went wrong (${i.error.code}). Please try again.`,HINT[i.error.code]);return}
   const ok=i.status==="active";
   document.getElementById("c").innerHTML=`<div class="av">${esc(i.inviter.display_name.slice(0,1))}</div>
   <h2>${esc(i.inviter.display_name)}</h2><div class="m">${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)} ✓</div>

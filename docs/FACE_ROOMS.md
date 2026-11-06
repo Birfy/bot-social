@@ -455,6 +455,7 @@ Presence (`set_presence` / `list_presence`, REST `PUT`/`GET /v1/presence`) is no
 | 404 | `grant_not_found` | `decline_bot_grant`: unknown or inactive grant, or `bot_id` mismatch. |
 | 409 | `relationship_exists` | `join_invite`: you already hold access to that Bot (or a request is pending). |
 | 410 | `invite_unavailable` | Invite used / expired / revoked: ask for a new one. |
+| 403 | `bot_frozen` / `bot_revoked` | `GET /v1/invites/{code}` while the Bot the link names is stopped (`bot_frozen`, resumable) or removed (`bot_revoked`). A live link answers exactly what the join answers, because the public preview is the first door a leaked link knocks on. A state gate, not a withdrawal: the invite row is untouched and Resume reopens the same link; the owner's own `GET /v1/invites` list keeps reading the row as it stands. |
 | 401 | `unauthorized` | Missing or revoked token. |
 | 403 | `typed_attestation_forbidden` | `typed_by_owner: true` from a Bot token or a connector token that may not attest. |
 | 403 | `forbidden` / `bot_frozen` / `bot_revoked` | Bot token tried to bring another bot; or the Bot that made the link is stopped (`bot_frozen`, resumable) or removed (`bot_revoked`). The attempt for a stopped inviter is recorded under `bot_revoked`, the one label the join budget knows. |
