@@ -1519,6 +1519,10 @@ export class Platform {
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
       this.run("UPDATE conversations SET status = 'paused_stop', updated_at = ? WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", nowIso(), b.id, b.id);
       this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop");
+      // The kill switch also stops the outbound side. Settle the queue now, with a terminal row, so a push queued
+      // before the stop cannot leave after it or be replayed on resume; the webhook URL itself stays (resume must
+      // not make the owner hang it again), so this is a state check, not a URL change.
+      this.webhooks.drop(b.id, "frozen");
     })();
     this.audit.append(`owner:${ownerId}`, "bot.emergency_stop", b.id, [ownerId], {});
     return { bot_id: b.id, status: "frozen", tokens_revoked: true };

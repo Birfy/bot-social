@@ -175,15 +175,49 @@ export class WebhookPusher {
       .run(new Date().toISOString(), "interrupted before the retry went out".slice(0, 300));
   }
 
-  /** Queue an event for this bot's next push (no-op if the bot has no webhook). */
+  /** Queue an event for this bot's next push (no-op if the bot has no webhook, or is not active: a stopped or
+   *  revoked Bot's outbound side is closed, and the URL stays on the row so a resume needs no re-hanging). */
   enqueue(botId: string, ev: { event_id: string; type: string; created_at: string; data: Record<string, unknown> }) {
-    const b = this.db.prepare("SELECT webhook_url FROM bots WHERE id = ?").get(botId) as any;
-    if (!b?.webhook_url) return;
+    const b = this.db.prepare("SELECT status, webhook_url FROM bots WHERE id = ?").get(botId) as any;
+    if (!b?.webhook_url || b.status !== "active") return;
     let p = this.pending.get(botId);
     if (!p) { p = { events: [], first_at: Date.now() }; this.pending.set(botId, p); }
     p.events.push(ev);
     if (!p.timer) this.schedule(botId, p, this.opts.debounceMs);
   }
+
+  /** The kill switch stops the outbound side now: settle everything still queued for this Bot with one terminal
+   *  row, and drop it, so a batch queued before the stop neither goes out after it nor replays on resume. The
+   *  events themselves stay in the Bot's inbox (`webhook_status` says they were not pushed); a later event starts
+   *  a fresh batch. Nothing is written when the queue was empty. */
+  drop(botId: string, status: string): number {
+    const p = this.pending.get(botId);
+    if (!p) return 0;
+    this.pending.delete(botId);
+    if (p.timer) clearTimeout(p.timer);
+    if (!p.events.length) return 0;
+    this.settleWithoutSending(botId, p.events, p.limited, stopReason(status));
+    return p.events.length;
+  }
+
+  /** One terminal row for a batch that will never be attempted: it takes over a cap row instead of adding a second
+   *  one for the same batch, and no event is marked `delivered` because nothing left the machine. */
+  private settleWithoutSending(botId: string, events: Pending["events"], heldRowId: string | undefined, error: string) {
+    const id = heldRowId ?? newId("whd");
+    const now = new Date().toISOString();
+    if (heldRowId) {
+      this.db.prepare("UPDATE webhook_deliveries SET status = 'cancelled', event_count = ?, event_types = ?, finished_at = ?, error = ?, attempts = 0 WHERE id = ?")
+        .run(events.length, JSON.stringify(countTypes(events)), now, error, id);
+    } else {
+      const b = this.db.prepare("SELECT webhook_url FROM bots WHERE id = ?").get(botId) as any;
+      this.db.prepare("INSERT INTO webhook_deliveries (id, bot_id, kind, status, event_count, event_types, url_redacted, created_at, finished_at, error, attempts) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        .run(id, botId, "events", "cancelled", events.length, JSON.stringify(countTypes(events)), redactUrl(b?.webhook_url ?? null), now, now, error, 0);
+    }
+    const upd = this.db.prepare("UPDATE events SET webhook_status = 'failed' WHERE id = ?");
+    for (const e of events) upd.run(e.event_id);
+    return id;
+  }
+
   private schedule(botId: string, p: Pending, ms: number) {
     p.timer = setTimeout(() => { p.timer = undefined; this.track(this.fire(botId)); }, ms);
     p.timer.unref?.();
@@ -268,6 +302,13 @@ export class WebhookPusher {
     const custom: Header[] = JSON.parse(b.webhook_headers || "[]");
     let last: { response_status?: number; error?: string } = {};
     for (let attempt = 1; attempt <= this.opts.maxAttempts; attempt++) {
+      // Read the state before every attempt, not once when the batch was queued: a stop that lands while this
+      // delivery waits out a retry backoff must close the door too. An owner's explicit test push (`kind` test)
+      // is not the Bot's outbound side and keeps working while the Bot is frozen (#478).
+      if (kind === "events") {
+        const status = (this.db.prepare("SELECT status FROM bots WHERE id = ?").get(botId) as any)?.status;
+        if (status !== "active") { finish("cancelled", { error: stopReason(String(status ?? "missing")), attempts: attempt - 1 }); return id; }
+      }
       try {
         if (!this.opts.allowPrivate) {
           const host = new URL(b.webhook_url).hostname.replace(/^\[|\]$/g, "");
@@ -300,3 +341,9 @@ export class WebhookPusher {
   queued(botId: string) { return this.pending.get(botId)?.events.length ?? 0; }
 }
 function countTypes(evs: { type: string }[]) { const c: Record<string, number> = {}; for (const e of evs) c[e.type] = (c[e.type] ?? 0) + 1; return c; }
+/** Why a batch was not attempted, in the words the owner's delivery log already uses for the state. */
+function stopReason(status: string) {
+  if (status === "frozen") return "not pushed: the Bot is frozen (emergency stop)";
+  if (status === "revoked") return "not pushed: this bot identity was revoked";
+  return `not pushed: the Bot is not active (${status})`;
+}
