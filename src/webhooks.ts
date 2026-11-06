@@ -168,6 +168,11 @@ export class WebhookPusher {
     // visible as a failure; a later construction finds no `sending` row and changes nothing.
     this.db.prepare("UPDATE webhook_deliveries SET status = 'failed', finished_at = ?, error = COALESCE(error, ?) WHERE status = 'sending'")
       .run(new Date().toISOString(), "interrupted before the delivery finished".slice(0, 300));
+    // A row still `rate_limited` is a batch this process was holding in memory for a retry, and that memory is gone
+    // with it: the retry can never come, so the row settles like the interrupted delivery above instead of keeping a
+    // promise no queue is left to keep. Its batch was never attempted, so the reason replaces the wait it announced.
+    this.db.prepare("UPDATE webhook_deliveries SET status = 'failed', finished_at = ?, error = ? WHERE status = 'rate_limited'")
+      .run(new Date().toISOString(), "interrupted before the retry went out".slice(0, 300));
   }
 
   /** Queue an event for this bot's next push (no-op if the bot has no webhook). */

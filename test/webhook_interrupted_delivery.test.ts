@@ -52,7 +52,7 @@ describe("webhook delivery interrupted by shutdown", () => {
     } finally { reopened.close(); }
   });
 
-  test("only a 'sending' row is settled; every settled row and a second construction are untouched", () => {
+  test("an interrupted delivery or a held row is settled; every settled row and a second construction are untouched", () => {
     const dbPath = join(dir, "y.db");
     const at = "2026-01-02T03:04:05.000Z";
     const seed = new Platform({ dbPath });
@@ -75,7 +75,7 @@ describe("webhook delivery interrupted by shutdown", () => {
       first = all(p1);
       assert.equal(first.length, 5, "no row is added or removed");
       assert.deepEqual(first.map((r) => r.id), ["whd_cancelled", "whd_delivered", "whd_failed", "whd_limited", "whd_sending"]);
-      for (const settled of ["whd_cancelled", "whd_delivered", "whd_failed", "whd_limited"]) {
+      for (const settled of ["whd_cancelled", "whd_delivered", "whd_failed"]) {
         assert.deepEqual(first.find((r) => r.id === settled), seeded.find((r) => r.id === settled), `${settled} is untouched`);
       }
       const sending = first.find((r) => r.id === "whd_sending");
@@ -84,6 +84,14 @@ describe("webhook delivery interrupted by shutdown", () => {
       assert.equal(sending.attempts, 2, "attempts is kept");
       assert.equal(sending.sent_at, null, "sent_at is not invented");
       assert.equal(sending.error, "interrupted before the delivery finished", "an absent error gets a stable reason");
+      // A row left waiting by a stopped server is the same orphan: its batch lived in that process's memory, so the
+      // retry it announced will never come, and it settles with the reason that is actually true.
+      const limited = first.find((r) => r.id === "whd_limited");
+      assert.equal(limited.status, "failed", "a held row left by a stopped server does not keep announcing a retry");
+      assert.ok(limited.finished_at, "the settled held row has finished_at");
+      assert.equal(limited.attempts, 0, "no attempt was made, so none is invented");
+      assert.equal(limited.event_count, 3, "the batch the row recorded is kept");
+      assert.equal(limited.error, "interrupted before the retry went out", "the announced wait is replaced by what happened");
     } finally { p1.close(); }
 
     const p2 = new Platform({ dbPath });
