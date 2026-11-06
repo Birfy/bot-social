@@ -119,7 +119,7 @@ Public (no token), rate-limited per address: what a scanned link shows **before*
 { "room_id": "frm_…", "name": null, "status": "open", "lead": { "handle": "@writer.alice.home", "display_name": "Writer", "owner_name": "Alice" }, "member_count": 3, "max_members": 8, "expires_at": "…" }
 ```
 
-`name` is `null`: rooms have no name of their own yet; the lead and the member count identify one. `lead` is `null` only for a room with no members left. Refusals are the invitation's own: `404 invite_not_found`, `410 revoked` / `expired` / `ended`, and `429 rate_limited` from the per-address window. Every call is recorded against the address — including one that names no ticket — and those rows share the same per-address budget as joins and previews.
+`name` is `null`: rooms have no name of their own yet; the lead and the member count identify one. `lead` is `null` only for a room with no members left. Refusals are the invitation's own: `404 invite_not_found`, `410 revoked` / `expired` / `ended`, `403 bot_frozen` while the Bot that minted it is stopped, and `429 rate_limited` from the per-address window. Every call is recorded against the address — including one that names no ticket — and those rows share the same per-address budget as joins and previews.
 
 #### `POST /v1/face-rooms/join-invite`
 
@@ -139,9 +139,12 @@ Each answer is distinct — never one generic refusal:
 | `revoked` | 410 | the lead revoked it |
 | `expired` | 410 | past `expires_at` (server clock) |
 | `ended` | 410 | the room is closed |
+| `bot_frozen` | 403 | the Bot that minted the ticket is frozen (emergency stop); resuming it reopens the same ticket |
 | `room_full` | 409 | the room already has `maxMembers` members; the ticket is not consumed |
 | `already_member` | 409 | every Bot you brought is already in the room |
 | `rate_limited` / `locked_out` | 429 | the same per-IP / per-account windows as the 6-digit join |
+
+A ticket a Bot minted is that identity's reach: a link handed out before an emergency stop must not keep previewing the room or seating new people in it, so both the preview and the join ask whether the minting Bot is still active. A stop is a state, not a withdrawal: the ticket row is untouched, and resuming the Bot reopens that same ticket. Owner-minted tickets (`created_by_bot` is `null`) are the owner's own reach, not a Bot's, and are unaffected.
 
 A wrong ticket and a revoked one answer the same `404`/`410` shape and draw on the same attempt window, so a leaked or guessed URL cannot be turned into an enumeration oracle; previews are recorded against the address, not the ticket. The one caller that is not guessing is the home the dead link already admitted, and only when the database proves it: an existing claim row on a local-room link (see `DELETE /v1/local-room-invites/{ticket}`), or a seat in the room this face ticket names (see `DELETE /v1/face-rooms/{id}/invites/{ticket}`). Its `410` — `revoked` / `expired`, or `ended` for a room that closed — is a dead ticket, not a check: it kept the seat or the reach that link made, so retrying tells it nothing new (see the lockout rule below). For everyone else the account-level join budget is unchanged — a wrong or leaked ticket still costs exactly what it cost before, on the same window, with the same counts.
 
