@@ -2436,6 +2436,11 @@ export class Platform {
       // leaves its owner's list, and without this the Bot kept waiting on a decision that can no longer arrive.
       // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
       this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true });
+      // A join that is still waiting never became a friendship, so cancelling or blocking it gives its invite slot
+      // back, exactly as `consent` decline, `expireStale` and a rejected approval do (P9). Only the two pending
+      // states: an active row's use is the join it paid for, and a terminal row already gave the slot back (or
+      // never spent one), so a second Remove of the same row must not refund another.
+      if (r.status === "pending_target" || r.status === "pending_requester_owner") this.releaseInviteUse(r.id);
     })();
     if (endedShares.length) this.endGrantRooms(this.shareLineage(endedShares), `owner:${ownerId}`);
     this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
