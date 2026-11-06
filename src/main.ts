@@ -23,6 +23,7 @@ const platform = new Platform({ kmsKey, dbPath, auditPath, webhooks: {
 }, attachments: {
   maxBytes: Number(process.env.BOTSOCIAL_ATTACHMENT_MAX_MB ?? 20) * 1024 * 1024,
   ttlMs: Number(process.env.BOTSOCIAL_ATTACHMENT_TTL_DAYS ?? 7) * 24 * 3600 * 1000,
+  ownerBudgetBytes: Number(process.env.BOTSOCIAL_ATTACHMENT_BUDGET_MB ?? 512) * 1024 * 1024,
 }, publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}` });
 if (platform.oauth.warning) console.warn(platform.oauth.warning);
 const trustProxy = loadTrustProxy(process.env.TRUST_PROXY);

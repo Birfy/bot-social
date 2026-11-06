@@ -786,10 +786,20 @@ export class Platform {
     this.cleanupAttachments();
     const id = newId("att"), now = Date.now();
     const sha256 = sha256Hex(bytes);
-    this.run("INSERT INTO attachments (id, owner_id, bot_id, name, mime, size, sha256, sealed, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      id, ownerId, botId, check.name, check.mime, bytes.length, sha256, sealBytes(this.kmsKey, bytes, `attachment:${id}:${sha256}`), new Date(now).toISOString(), new Date(now + this.attachmentLimits.ttlMs).toISOString());
+    // The owner-level budget: every stored byte counts, whichever bot uploaded it. Read and insert in one
+    // transaction so parallel uploads cannot each see the same "under budget" total, and check before the INSERT so
+    // a refusal stores nothing at all — the caller keeps the file and reads `used_bytes`/`limit_bytes`.
+    const usedBytes = this.db.transaction(() => {
+      const used = (this.get("SELECT COALESCE(SUM(size),0) AS used FROM attachments WHERE owner_id = ?", ownerId) as any).used as number;
+      if (used + bytes.length > this.attachmentLimits.ownerBudgetBytes) {
+        throw new ApiError(413, "attachment_storage_full", `this owner's stored attachments would exceed ${this.attachmentLimits.ownerBudgetBytes} bytes`, { used_bytes: used, limit_bytes: this.attachmentLimits.ownerBudgetBytes });
+      }
+      this.run("INSERT INTO attachments (id, owner_id, bot_id, name, mime, size, sha256, sealed, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        id, ownerId, botId, check.name, check.mime, bytes.length, sha256, sealBytes(this.kmsKey, bytes, `attachment:${id}:${sha256}`), new Date(now).toISOString(), new Date(now + this.attachmentLimits.ttlMs).toISOString());
+      return used + bytes.length;
+    })();
     this.audit.append(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
-    return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: this.attachmentLimits };
+    return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: { ...this.attachmentLimits, used_bytes: usedBytes } };
   }
 
   private attachmentBot(p: Principal, botId?: string) {

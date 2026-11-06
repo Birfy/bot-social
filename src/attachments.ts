@@ -1,8 +1,10 @@
 /** File attachments: limits, type checks and AES-256-GCM sealing of the bytes at rest (same KMS key as custody). */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
-export interface AttachmentLimits { maxBytes: number; ttlMs: number; maxPerMessage: number }
-export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = { maxBytes: 20 * 1024 * 1024, ttlMs: 7 * 24 * 3600 * 1000, maxPerMessage: 5 };
+export interface AttachmentLimits { maxBytes: number; ttlMs: number; maxPerMessage: number; ownerBudgetBytes: number }
+/** `ownerBudgetBytes` is the owner-level ceiling over every stored byte (25 files of 20 MB): the per-file and
+ *  per-message limits bound one request, this bounds the account's disk. */
+export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = { maxBytes: 20 * 1024 * 1024, ttlMs: 7 * 24 * 3600 * 1000, maxPerMessage: 5, ownerBudgetBytes: 512 * 1024 * 1024 };
 
 /** Reference carried in a signed message payload; the signature covers every field. */
 export interface AttachmentRef { id: string; name: string; size: number; mime: string; sha256: string }
