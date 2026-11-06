@@ -541,6 +541,11 @@ export class Platform {
       // platform would deliver a message as a Bot that no longer exists. `cancelPendingFor` cancels the
       // approvals and marks their messages / actions / face-room drafts cancelled.
       this.cancelPendingFor("bot_id = ?", [m.id], "member_revoked");
+      // The other half of the same rule: a line that is held because *this* Bot was to receive it. Its card belongs
+      // to the sender's owner, and nothing about it can be delivered any more — approving it answers `bot_revoked`
+      // and the sender waits out the card's 24 hours for a line that can never go out. Settle it under its own
+      // reason, and tell the sending Bot why: it did not lose its seat, the peer it wrote to is gone.
+      this.cancelPendingFor("kind = 'outbound_message' AND subject_id IN (SELECT id FROM messages WHERE recipient_bot = ?)", [m.id], "recipient_revoked", { notify: true });
       for (const id of conversations) this.refreshConversationStatus(id);
       // A revoked identity must also leave the rooms it was in; otherwise it stays a visible member and the
       // room keeps writing events (and countersignatures) for a Bot nobody can read.
@@ -3163,12 +3168,14 @@ export class Platform {
     // the two ways the room settles a line (its sender walked out, or the room closed while it waited). A reason
     // this build does not map, and a row that was decided rather than settled, keep the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
+    const recipientGoneReason = "the receiving Bot was revoked; this draft can no longer be approved";
     const shareGoneReason = "the share this draft was waiting on was revoked; this draft can no longer be approved";
     const leftRoomReason = "the Bot is no longer in the room this draft was for; this draft can no longer be approved";
     const closedRoomReason = "the room closed before this draft was decided; this draft can no longer be approved";
     if (a.status !== "pending") {
       const known = a.status === "cancelled" ? a.decision : null;
       const sentence = known === "member_revoked" ? revokedReason
+        : known === "recipient_revoked" ? recipientGoneReason
         : known === "grant_revoked" ? shareGoneReason
         : known === "room_left" ? leftRoomReason
         : known === "room_closed" ? closedRoomReason
@@ -3180,6 +3187,13 @@ export class Platform {
     if (a.bot_id && ["outbound_message", "face_room_message", "action"].includes(a.kind) && this.bot(a.bot_id).status !== "active") {
       this.cancelPendingFor("id = ?", [a.id], "member_revoked");
       throw new ApiError(409, "invalid_state", revokedReason);
+    }
+    // The same defence for the other side: a line addressed to a Bot that has since been revoked. The revoke settles
+    // its cards, so this is a row an older build left pending; cancel it now rather than answering `bot_revoked`
+    // from deep in the delivery door, where the owner learns nothing about why the card cannot be decided.
+    if (a.kind === "outbound_message" && this.get("SELECT 1 FROM messages WHERE id = ? AND recipient_bot IN (SELECT id FROM bots WHERE status = 'revoked')", a.subject_id)) {
+      this.cancelPendingFor("id = ?", [a.id], "recipient_revoked", { notify: true });
+      throw new ApiError(409, "invalid_state", recipientGoneReason);
     }
     // A card that outlived its conversation is not a decision. Settle the chat first if its own clock ran out, then
     // refuse instead of delivering into a conversation that no longer exists; the invitee's accept is the one draft
