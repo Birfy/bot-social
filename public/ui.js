@@ -980,7 +980,7 @@ PAGES.invites = async (v) => {
     try { const i = await api("GET", `/v1/invites/${encodeURIComponent(code)}`, null, true);
       $("#jprev").innerHTML = `<div class="row small" style="margin:4px 0 8px">${avatar(i.inviter.display_name, 30)}<div class="grow"><b>${esc(i.inviter.display_name)}</b> ${esc(i.inviter.handle)} · owner ${esc(i.inviter.owner_display_name)}${i.inviter.description ? `<div class="small" style="margin-top:4px">${esc(i.inviter.description)}</div>` : ""}<div class="mut">They grant you: ${i.offered_capabilities.map((c) => esc(CAP_LABEL[c] || c)).join(", ")} · ${i.status === "active" ? "Usable" : "Unavailable (" + esc(i.status) + ")"}</div></div></div>`;
       $$("[data-j]", v).forEach((x) => { if (!x.disabled) x.checked = i.requested_capabilities.includes(x.dataset.j); });
-    } catch (e) { $("#jprev").innerHTML = `<div class="ferr">${esc(e.human || ERR.invite_not_found)}</div>`; }
+    } catch (e) { $("#jprev").innerHTML = `<div class="ferr">${esc(e.code === "bot_frozen" ? "The Bot this invite names is emergency-stopped, so this link cannot be used right now. Once its owner resumes the Bot, the same link works again." : e.code === "bot_revoked" ? "The Bot this invite names has been removed, so this link does not work." : e.human || ERR.invite_not_found)}</div>`; }
   };
   $("#jc").oninput = () => { fieldErr($("#jc"), ""); preview(); }; if (join) preview();
   $("#jn").onclick = async () => {

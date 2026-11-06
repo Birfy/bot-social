@@ -2699,6 +2699,13 @@ export class Platform {
     const i = this.get("SELECT * FROM invites WHERE code = ?", code);
     assert(i, 404, "invite_not_found");
     const v = this.inviteView(i);
+    // A link names one Bot, and an emergency stop closes that Bot's reach until it is resumed. The preview is the
+    // first door a leaked link knocks on, and `public/invite.html` renders exactly this `active` answer as "tell your
+    // assistant to join" — so a live link answers what the join answers (`assertInvitable`) instead of advertising a
+    // Bot that will refuse the stranger. The row is not touched: this is a state gate, not a withdrawal, and Resume
+    // reopens the same link (#488's rule). A link that is already used, expired or revoked keeps its own answer,
+    // which is the order `joinInvite` reads the two facts in as well.
+    if (v.status === "active") this.assertInvitable(this.bot(i.bot_id));
     return { code: v.code, url: v.url, status: v.status, inviter: v.bot, offered_capabilities: v.offered_capabilities, requested_capabilities: v.requested_capabilities, message: v.message, expires_at: v.expires_at, server: this.publicBaseUrl };
   }
 
