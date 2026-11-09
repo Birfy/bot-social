@@ -127,6 +127,26 @@ function mentionsOf(raw: unknown): string[] {
 }
 
 /**
+ * The most `structured` a message may carry: 32768 bytes of its JSON serialization. It is a machine-readable contract
+ * between two Bots -- a schema name and a few fields -- not a document; anything larger belongs in an attachment,
+ * which has its own per-file, per-owner and TTL limits. The draft door and the owner-edit door read this one
+ * number, so a payload cannot be refused on one and accepted on the other.
+ */
+const STRUCTURED_MAX_BYTES = 32768;
+
+/** The 413 answer both doors share, named like `attachment_storage_full`'s `used_bytes` / `limit_bytes`. */
+function structuredOverLimit(structured: unknown): { size_bytes: number; limit_bytes: number } | null {
+  if (structured === undefined || structured === null) return null;
+  const size = Buffer.byteLength(JSON.stringify(structured), "utf8");
+  return size > STRUCTURED_MAX_BYTES ? { size_bytes: size, limit_bytes: STRUCTURED_MAX_BYTES } : null;
+}
+
+function structuredTooLarge(over: { size_bytes: number; limit_bytes: number }) {
+  return new ApiError(413, "structured_too_large",
+    `structured serializes to ${over.size_bytes} bytes; the limit is ${over.limit_bytes} bytes — put larger payloads in an attachment`, over);
+}
+
+/**
  * What an owner's edit may change on a held line: the text, the structured payload, the reply expectation. Nothing
  * else is merged into the delivered payload -- an attachment ref in an edit never passed the draft's attachment
  * checks, and `trust`, a mention list or a platform flag must never be writable through this door. `attachments: []`
@@ -140,6 +160,8 @@ function editedPayloadOf(body: any): { text: string; structured?: unknown; expec
   const out: { text: string; structured?: unknown; expects_reply?: boolean } = { text: ep.text };
   if (ep.structured !== undefined) {
     assert(ep.structured === null || (typeof ep.structured === "object" && !Array.isArray(ep.structured)), 400, "invalid_request", "edited_payload.structured must be an object or null");
+    const over = structuredOverLimit(ep.structured);
+    if (over) throw structuredTooLarge(over);
     out.structured = ep.structured;
   }
   if (ep.expects_reply !== undefined) {
@@ -3493,6 +3515,12 @@ export class Platform {
     this.assertConvActive(c);
     const pl: any = env.payload ?? {};
     assert(typeof pl.text === "string" && pl.text.length > 0 && pl.text.length <= 4000, 400, "invalid_request", "payload.text (1-4000 chars) required");
+    // `structured` is the machine-readable half of a line: an object or null, never a string/number/array, and never
+    // more than 32 KiB serialized. Checked here, ahead of the DLP scan and the injection detector, so an oversized blob
+    // is refused before anything reads it. A refusal writes no row at all and spends none of the Bot's draft budget.
+    assert(pl.structured === undefined || pl.structured === null || (typeof pl.structured === "object" && !Array.isArray(pl.structured)), 400, "invalid_request", "payload.structured must be an object or null");
+    const structuredOver = structuredOverLimit(pl.structured);
+    if (structuredOver) throw structuredTooLarge(structuredOver);
     // Refs live in the signed payload, so the sender's signature covers them.
     const refs = this.checkRefs(botId, pl.attachments);
     const chat = roomRel ? this.findRoomGrant(peerB.owner_id, botId, "chat.public", peerB.id, roomContext!) : this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id);
