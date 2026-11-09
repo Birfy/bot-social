@@ -93,8 +93,15 @@ export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   if (/\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/.test(text)) add("secret.api_key", "block", "API Key / Token");
   if (/(password|passwd|密码)\s*[:：=]\s*\S+/i.test(text)) add("secret.password", "block", "Password");
   if (/(?<!\d)1[3-9]\d{9}(?!\d)/.test(text) || /\+\d{1,3}[ -]?\d{6,}/.test(text)) add("pii.phone", "approve", "Phone number");
-  if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) add("pii.email", "approve", "Email address");
-  if (/(¥|￥|\$|USD|RMB|元)\s*\d|\d+\s*(元|块钱|美元)/.test(text)) add("money", "approve", "Money amount");
+  // Linear on purpose. The local part only decides this through the single character just before '@' (a run
+  // that could start anywhere), so this matches exactly the same text as `[\w.+-]+@[\w-]+\.[\w.-]+` while
+  // never re-walking the token from each start position — that walk is O(n²) on a long token with no '@'.
+  if (/[\w.+-]@[\w-]+\.[\w.-]/.test(text)) add("pii.email", "approve", "Email address");
+  // Linear for the same reason: `\d+` re-walked the rest of a digit run from every start position whenever
+  // the unit sat just out of reach, so a trailing `x元` was enough. Only the last digit of a run can be
+  // followed by whitespace and a unit, so one digit asks the same question; the match now starts at that
+  // last digit instead of at the head of the run.
+  if (/(¥|￥|\$|USD|RMB|元)\s*\d|\d\s*(元|块钱|美元)/.test(text)) add("money", "approve", "Money amount");
   // No commitment-language scan (#13): promises in prose (保证, 一定会, 我答应, "I promise") are the Bot's call, made from its
   // own instructions, not a keyword here. Binding actions stay gated by capability (commitment.make, calendar.book, …).
   for (const t of ownerTerms) if (t && text.toLowerCase().includes(t.toLowerCase())) add("owner.sensitive_term", "approve", `Owner sensitive term`);
