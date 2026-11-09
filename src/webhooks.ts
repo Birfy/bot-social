@@ -137,6 +137,17 @@ function summarize(type: string, d: any): string {
     case "event.meeting_booked": return `Meeting booked${cid}`;
     case "event.invite_accepted": return `Meeting invite accepted${cid}`;
     case "action.failed": return `An action failed${cid}`;
+    // #23: the one push an owner gets when a stranger's Bot tried to reach this Bot and was refused for want of a
+    // share. The event carries the sender's public identity and the door it knocked on, never the refused content.
+    // The `attempted` values the platform writes are the three doors below; anything else (an older row, a future
+    // caller) still gets a sentence that says the Bot is not shared instead of the event name.
+    case "share.requested": {
+      const what = d?.attempted === "face_room.join" ? "bring you into a face-to-face room"
+        : d?.attempted === "message.draft" ? "send you a message"
+        : d?.attempted === "conversation.create" ? "start a chat with you"
+        : "reach you";
+      return `${who ?? "A Bot"} tried to ${what}, but is not shared with you — only your owner can share this bot`;
+    }
     case "webhook.test": return `Test push from Bot Social — your webhook works`;
     case "face_room.joined": return `A bot joined a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.left": return `A bot left a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
