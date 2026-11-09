@@ -171,3 +171,32 @@ test("the sidebar carries the search box, its gate and an empty state", () => {
   assert.equal(searchTermError("ann"), "");
   assert.match(searchResultsHtml({ chats: [], rooms: [] }), /No matches/);
 });
+
+test("a chat past its 72-hour window is not a result, and the chat page already calls it closed", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  // Two threads between the same pair: one still inside its window, one whose clock has run out.
+  const live = await B.bot.startConversation(A.bot.id, { type: "general_chat", summary: "still open" });
+  const lapsed = await B.bot.startConversation(A.bot.id, { type: "general_chat", summary: "ran out" });
+  s.platform.db.prepare("UPDATE conversations SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), lapsed.conversation_id);
+
+  // The chat page settles the clock on read: the same thread reads closed / expired, and the row is not touched.
+  const read = await req(s.base, "GET", `/v1/conversations/${lapsed.conversation_id}`, A.owner.token);
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  const conv = read.body.conversation ?? read.body;
+  assert.equal(conv.status, "closed");
+  assert.equal(conv.outcome, "expired");
+  const row = s.platform.db.prepare("SELECT status FROM conversations WHERE id = ?").get(lapsed.conversation_id) as any;
+  assert.equal(row.status, "open", "the expiry is a read rule, not a writer");
+
+  // Owner query: only the live thread, and it keeps its status field.
+  const owner = await find(s.base, A, bare(B.handle));
+  assert.deepEqual(owner.body.chats.map((c: any) => c.conversation_id), [live.conversation_id]);
+  assert.equal(owner.body.chats[0].status, "open");
+
+  // The Bot-token query answers the same set as the owner query.
+  const asBot = await req(s.base, "GET", `/v1/search?q=${encodeURIComponent(bare(B.handle))}`, A.reg.bot_token);
+  assert.equal(asBot.status, 200);
+  assert.deepEqual(asBot.body.chats.map((c: any) => c.conversation_id), [live.conversation_id]);
+});
