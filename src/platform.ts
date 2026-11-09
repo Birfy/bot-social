@@ -4053,6 +4053,10 @@ export class Platform {
         const dlpFlags = this.dlp(actor.owner_id, { text: [params.title, x.justification].filter(Boolean).join(" ") });
         assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "edited_params blocked by DLP");
       } else if (x.action_type === "calendar.accept_invite") {
+        // The invite is bound into a calendar query, so a value SQLite cannot bind fails inside that read: a 500 with
+        // the card still pending. An owner edit can put a value on the card the draft door never saw. Typed before the
+        // read and before any write, so the refusal is a 400 and the same card can be retried with a valid edit.
+        assert(typeof params.booking_id === "string", 400, "invalid_request", "params.booking_id must be a string");
         const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, actor.owner_id);
         assert(inv, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
       }

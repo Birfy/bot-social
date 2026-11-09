@@ -133,3 +133,32 @@ test("an accept draft whose booking_id is not a string is refused with 400 and w
   const ok: any = await B.bot.draftAction(cid, "calendar.accept_invite", { booking_id: bookingId }, "yes please");
   assert.equal(ok.status, "pending_approval");
 });
+
+test("an owner edit that gives the accept a non-string booking_id is refused with 400 and leaves the card pending", async (t) => {
+  const s = await startServer(); t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  const cid = (await A.bot.startConversation(B.bot.id, meetingIntent())).conversation_id as string;
+  const d: any = await A.bot.draftAction(cid, "calendar.book", { title: "Sync", start: inDays(1, 10), end: inDays(1, 11), attendees: [B.bot.id] }, "plan the week");
+  const done: any = await A.owner.req("POST", `/v1/approvals/${d.approval_id}/decision`, { decision: "approved" });
+  const bookingId = done.result.booking_id as string;
+  const accept: any = await B.bot.draftAction(cid, "calendar.accept_invite", { booking_id: bookingId }, "yes please");
+  const calendarRows = () => (s.platform.db.prepare("SELECT COUNT(*) n FROM calendar_entries WHERE owner_id = ? OR owner_id = ?").get(A.owner_id, B.owner_id) as any).n as number;
+  const before = calendarRows();
+
+  // The owner approves the accept with an edit the card can hold but SQLite cannot bind into the invite lookup.
+  await assert.rejects(
+    B.owner.req("POST", `/v1/approvals/${accept.approval_id}/decision`, { decision: "approved_with_edits", edited_params: { booking_id: { id: bookingId } } }),
+    (e: any) => {
+      assert.equal(e.status, 400, `an impossible booking_id must be a 400, not a ${e.status} (${e.message})`);
+      assert.equal(e.code, "invalid_request");
+      return true;
+    },
+  );
+  const a = s.platform.db.prepare("SELECT status FROM approvals WHERE id = ?").get(accept.approval_id) as any;
+  assert.equal(a.status, "pending", "the card is still decidable");
+  const x = s.platform.db.prepare("SELECT status FROM actions WHERE id = ?").get(accept.action_id) as any;
+  assert.equal(x.status, "pending_approval", "the action row is unchanged");
+  assert.equal(calendarRows(), before, "neither calendar was written");
+  const inv = s.platform.db.prepare("SELECT status FROM calendar_entries WHERE booking_id = ? AND owner_id = ?").get(bookingId, B.owner_id) as any;
+  assert.equal(inv.status, "invited", "the invitation is still open");
+});
