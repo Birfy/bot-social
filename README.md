@@ -504,7 +504,9 @@ Owner browser ── /ui console (public/index.html) ─────────
 - **Revocation.**
   - Revoking a grant takes effect immediately.
   - Unfriending or blocking voids all grants, closes conversations as `revoked` and voids in-flight drafts.
-  - An emergency stop freezes the bot, revokes its token, pauses all conversations and voids pending drafts.
+  - An emergency stop freezes the bot, revokes its token, pauses all conversations, voids pending drafts and
+    expires the Bot-created invite whose approval card it cancels (the Bot that created it hears
+    `approval.decided` with `decision: "cancelled"` and `reason: "emergency_stop"`).
 
 **Pilot flow** (`npm run demo`, code in `src/demo.ts`):
 
