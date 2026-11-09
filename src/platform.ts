@@ -3160,7 +3160,10 @@ export class Platform {
       card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
     } else if (a.kind === "action") {
       const x = this.get("SELECT * FROM actions WHERE id = ?", a.subject_id);
-      card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
+      // A card whose subject row is missing — a write an older build allowed to fail between the two rows — is
+      // still a card the owner can settle by id. It is reported without its action detail, so one such row cannot
+      // take every other card down with it. The read settles nothing.
+      if (x) card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
     } else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
       card.relationship = { relationship_id: r.id, target: this.publicBot(this.bot(r.target_bot)), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []) };
@@ -3957,7 +3960,17 @@ export class Platform {
     const def = ACTIONS[pl.action_type];
     const isAccept = pl.action_type === "calendar.accept_invite";
     const intent = J(c.intent);
+    // The draft door binds these values into the `actions` row and reads them again when the card is decided, so a
+    // value the store cannot bind, or one execution writes where the schema expects text, is refused while it is
+    // still a draft: a 400 that writes nothing, instead of a 500 after the card exists. Types only — the window, the
+    // attendees and the invite itself keep the checks they already had below.
+    assert(pl.justification === undefined || pl.justification === null || typeof pl.justification === "string", 400, "invalid_request", "justification must be a string or null");
+    assert(pl.params === undefined || (pl.params !== null && typeof pl.params === "object" && !Array.isArray(pl.params)), 400, "invalid_request", "params must be an object");
     const params = pl.params ?? {};
+    if (pl.action_type === "calendar.book") assert(params.title === undefined || typeof params.title === "string", 400, "invalid_request", "params.title must be a string");
+    // The invite is looked up by this value before anything is written; an object here reaches SQLite as bind
+    // parameters, which answers 500 instead of naming the bad field.
+    if (isAccept) assert(typeof params.booking_id === "string", 400, "invalid_request", "params.booking_id must be a string");
     let acceptInvite: any = null;
     if (isAccept) {
       // A booked invitation outlives the chat it was made in: an agreed or expired conversation may still accept it,
@@ -3997,9 +4010,16 @@ export class Platform {
     assert(!dlpFlags.some((f) => f.action === "block"), 422, "dlp_blocked", "DLP blocked this action draft");
     const id = newId("act");
     const reasons = [...def.reasons];
-    const aprId = this.createApproval(ownerId, "action", id, botId, convId, summary, reasons, dlpFlags, LIMITS.meetingApprovalTtlMs, undefined, this.actionHold(ownerId, params, pl.justification ?? null));
-    this.run("INSERT INTO actions (id, conversation_id, actor_bot, action_type, params, justification, envelope, status, approval_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      id, convId, botId, pl.action_type, JSON.stringify(params), pl.justification ?? null, JSON.stringify(env), "pending_approval", aprId, nowIso());
+    const hold = this.actionHold(ownerId, params, pl.justification ?? null);
+    // The card and the row it points at are one write: a pending card whose action row was never written takes the
+    // owner's whole list down (`approvalCard`), so a refusal must leave neither behind. The policy line and the audit
+    // line describe a change that is already durable, so they stay outside the transaction.
+    const aprId = this.db.transaction(() => {
+      const apr = this.createApproval(ownerId, "action", id, botId, convId, summary, reasons, dlpFlags, LIMITS.meetingApprovalTtlMs, undefined, hold);
+      this.run("INSERT INTO actions (id, conversation_id, actor_bot, action_type, params, justification, envelope, status, approval_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        id, convId, botId, pl.action_type, JSON.stringify(params), pl.justification ?? null, JSON.stringify(env), "pending_approval", apr, nowIso());
+      return apr;
+    })();
     this.policyDecision(botId, convId, owners, "action.draft", "require_approval", reasons, { action_id: id, action_type: pl.action_type });
     this.audit.append(`bot:${botId}`, "action.drafted", id, owners, { conversation_id: convId, action_type: pl.action_type, params, envelope_id: env.id, sig: env.sig, approval_id: aprId });
     this.refreshConversationStatus(convId);
@@ -4013,6 +4033,11 @@ export class Platform {
     const peer = this.bot(c.initiator_bot === actor.id ? c.peer_bot : c.initiator_bot);
     this.activeRelationship(actor.id, peer.id);
     const params = { ...J(x.params), ...(body.decision === "approved_with_edits" && body.edited_params ? body.edited_params : {}) };
+    // The value execution writes into the calendar's text column: typed here too, because an owner edit can put a
+    // title on the card that the draft door never saw, and a row an older build wrote can still carry one. Refused
+    // before `fail()` and before any write, so the card stays pending and the same card can be retried with a valid
+    // edit.
+    assert(params.title === undefined || typeof params.title === "string", 400, "invalid_request", "params.title must be a string");
     // An owner edit amends the bot's draft; it does not create a new unchecked commitment. The invariants the
     // action draft door set (range, attendees, DLP text, and the invite the accept points at) are re-checked here,
     // before any write — before `fail()` and before any calendar/actions/events row — so a refusal leaves the
