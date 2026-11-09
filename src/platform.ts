@@ -84,6 +84,10 @@ export function holdReasonOf(found: { riskFlags?: readonly unknown[]; attachment
 }
 
 const nowIso = () => new Date().toISOString();
+/** A chat is live while its row is not stored `closed` and its 72-hour clock has not run out. The clock is a read
+ *  rule, not a writer (`materializeExpiry` runs only when a door is touched), so every query that offers a chat asks
+ *  the question here; `reportedConvState` answers it for a row already in hand. */
+const CHAT_LIVE_SQL = "(c.status != 'closed' AND (c.expires_at IS NULL OR c.expires_at > ?))";
 /** Why a home could not hand a delivered message to its Bot (reportNotDelivered). A fixed list: the sender is shown a fixed line. */
 const NOT_DELIVERED_REASONS = ["not_shared_yet"];
 /** A join budget counts real door checks only, both the 6-digit code and the invite ticket. A request refused
@@ -3852,21 +3856,24 @@ export class Platform {
     assert(term.length >= 2 && term.length <= 100, 400, "invalid_query", "q must be 2-100 characters");
     const needle = term.toLowerCase();
     // Chats: the card's titles are the two handles and display names. A conversation is readable by an owner while
-    // either Bot is theirs, and by a Bot token only for its own threads; a closed thread is gone from the lists.
+    // either Bot is theirs, and by a Bot token only for its own threads; a closed thread, or one whose clock has run
+    // out, is gone from the lists.
     const title = "instr(lower(i.handle), ?) > 0 OR instr(lower(i.display_name), ?) > 0 OR instr(lower(pr.handle), ?) > 0 OR instr(lower(pr.display_name), ?) > 0";
     const chatRows = p.kind === "owner"
       ? this.all(`SELECT c.* FROM conversations c JOIN bots i ON i.id = c.initiator_bot JOIN bots pr ON pr.id = c.peer_bot
-          WHERE c.status != 'closed' AND (i.owner_id = ? OR pr.owner_id = ?) AND (${title})
-          ORDER BY c.updated_at DESC LIMIT 20`, p.ownerId, p.ownerId, needle, needle, needle, needle)
+          WHERE ${CHAT_LIVE_SQL} AND (i.owner_id = ? OR pr.owner_id = ?) AND (${title})
+          ORDER BY c.updated_at DESC LIMIT 20`, nowIso(), p.ownerId, p.ownerId, needle, needle, needle, needle)
       : this.all(`SELECT c.* FROM conversations c JOIN bots i ON i.id = c.initiator_bot JOIN bots pr ON pr.id = c.peer_bot
-          WHERE c.status != 'closed' AND (c.initiator_bot = ? OR c.peer_bot = ?) AND (${title})
-          ORDER BY c.updated_at DESC LIMIT 20`, p.botId, p.botId, needle, needle, needle, needle);
+          WHERE ${CHAT_LIVE_SQL} AND (c.initiator_bot = ? OR c.peer_bot = ?) AND (${title})
+          ORDER BY c.updated_at DESC LIMIT 20`, nowIso(), p.botId, p.botId, needle, needle, needle, needle);
     const chats = chatRows.map((c: any) => {
       const initiator = this.bot(c.initiator_bot), peer = this.bot(c.peer_bot);
       // The counterpart is the side that is not mine, exactly as the chat card names it; a thread between two of my
       // own Bots shows the peer side.
       const other = p.kind === "owner" ? (initiator.owner_id === p.ownerId ? peer : initiator) : (c.initiator_bot === p.botId ? peer : initiator);
-      return { conversation_id: c.id, status: c.status, summary: c.summary ?? null, updated_at: c.updated_at, peer: this.publicBot(other) };
+      // The hit reports the state the chat page reports, not the raw row: a clock between the query and the page
+      // cannot make the search call one thread open while its own read calls it closed.
+      return { conversation_id: c.id, status: this.reportedConvState(c).status, summary: c.summary ?? null, updated_at: c.updated_at, peer: this.publicBot(other) };
     });
     // Rooms: the same seat rule `listFaceRooms` answers with (my own seat, or a guest this home brought in), closed
     // rooms and seats that were given up left out. The title face is the note plus every seated handle.
