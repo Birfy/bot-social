@@ -1518,7 +1518,9 @@ export class Platform {
       this.run("UPDATE bots SET status = 'frozen' WHERE id = ?", b.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
       this.run("UPDATE conversations SET status = 'paused_stop', updated_at = ? WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", nowIso(), b.id, b.id);
-      this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop");
+      // The stop is told to the Bot that owned each card: for an invite that is also the only honest answer to
+      // "what happened to my link?" after its card is settled. The invite row is swept by `cancelPendingFor`.
+      this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop", { notify: true });
       // The kill switch also stops the outbound side. Settle the queue now, with a terminal row, so a push queued
       // before the stop cannot leave after it or be replayed on resume; the webhook URL itself stays (resume must
       // not make the owner hang it again), so this is a state check, not a URL change.
@@ -3041,6 +3043,11 @@ export class Platform {
       }
       if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
       if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
+      // A Bot-created invite waits at status `pending_owner` for this card, so settling only the card leaves a link
+      // nobody can use: the owner's list keeps offering it, the decision door answers 409 and the join door reports
+      // `pending_owner` until its own 72h clock. `expireApproval` settles the same two rows for the same reason; the
+      // guard keeps an invite the owner already approved (or one the Bot itself revoked) out of the sweep.
+      if (a.kind === "invite") this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
       // A cancelled room line names its room, as its approved, rejected and expired decisions do: the Bot reads the
       // room off the event, and it can hold the same kind of line in more than one room.
       const roomId = a.kind === "face_room_message"
