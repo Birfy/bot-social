@@ -158,7 +158,7 @@ export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   for (const m of text.match(/\b(?:\d[ -]?){13,19}\b/g) ?? []) { const d = m.replace(/\D/g, ""); if (d.length >= 13 && d.length <= 19 && luhn(d)) add("pii.bank_card", "block", "Bank card number"); }
   if (/\b[EeGg]\d{8}\b/.test(text)) add("pii.passport", "block", "Passport number");
   if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) add("secret.private_key", "block", "Private key");
-  if (/\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/.test(text)) add("secret.api_key", "block", "API Key / Token");
+  if (/(?<![A-Za-z0-9])(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/i.test(text)) add("secret.api_key", "block", "API Key / Token");
   if (/(password|passwd|密码)\s*[:：=]\s*\S+/i.test(text)) add("secret.password", "block", "Password");
   if (/(?<!\d)1[3-9]\d{9}(?!\d)/.test(text) || /\+\d{1,3}[ -]?\d{6,}/.test(text)) add("pii.phone", "approve", "Phone number");
   if (hasEmail(text)) add("pii.email", "approve", "Email address");
