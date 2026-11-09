@@ -607,6 +607,8 @@ function bindApprovals(root, after) {
 const ACTION_FAIL = {
   calendar_conflict: "that time is already busy",
   invite_not_found: "that meeting invite is no longer available",
+  meeting_in_past: "that meeting window has already started",
+  invite_expired: "that invitation expired with its meeting",
   unsupported_action: "the platform does not support that action",
 };
 const actionFailText = (code) => ACTION_FAIL[code] || `failed (${code || "no reason given"})`;

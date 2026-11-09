@@ -3917,6 +3917,10 @@ export class Platform {
       // missing invite stays the 404 it always was, and only a paused chat refuses the draft.
       acceptInvite = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, ownerId);
       assert(acceptInvite, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
+      // The invitation expires with its meeting, on the same rule the execute door applies: the two doors must not
+      // answer the same card differently, so both read `start <= now`. Drafting an answer to a moment that has passed
+      // is refused here, before a card exists.
+      assert(Date.parse(acceptInvite.start) > this.nowMs(), 410, "invite_expired", "the invitation expired with its meeting");
       this.materializeExpiry(c);
       this.assertNotPaused(c);
     } else {
@@ -3931,6 +3935,9 @@ export class Platform {
     if (pl.action_type === "calendar.book") {
       const s = ms(params.start), e = ms(params.end);
       assert(e > s, 400, "invalid_request", "end must be after start");
+      // Same window rule as the execute door: a booking is for a meeting that has not started. A card for a slot in
+      // the past is refused while it is a draft, instead of becoming a card that can only fail later.
+      assert(s > this.nowMs(), 400, "invalid_request", "start must be after now: a meeting window that has already started cannot be booked");
       const att: string[] = params.attendees ?? [peer];
       assert(att.length === 1 && att[0] === peer, 400, "invalid_request", "attendees must be exactly the peer bot");
       params.attendees = att;
@@ -3986,6 +3993,11 @@ export class Platform {
     };
     if (x.action_type === "calendar.book") {
       const s = ms(params.start), e = ms(params.end);
+      // A window that already started is not a booking. The card may have waited past the meeting, and executing it
+      // would write two calendar rows for a commitment the calendar has already left behind. This is the execute
+      // door's check, ahead of the conflict read and of every calendar write, and it settles the card as failed: an
+      // edit cannot move a past window into the future once the card is decided.
+      if (s <= this.nowMs()) return fail("meeting_in_past", { start: new Date(s).toISOString() });
       if (this.busyOf(actor.owner_id, s, e).length) return fail("calendar_conflict");
       const bookingId = newId("bkg");
       const title = params.title || J(c.intent).summary || "Meeting";
@@ -4006,6 +4018,10 @@ export class Platform {
     if (x.action_type === "calendar.accept_invite") {
       const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, actor.owner_id);
       if (!inv) return fail("invite_not_found");
+      // The invitation expires with its meeting: an accept approved after the start would confirm a past meeting and
+      // tell both Bots it is on. Checked before the conflict read and before the row flips to confirmed, and the card
+      // settles as failed — the answer to an invitation to a moment that has passed.
+      if (Date.parse(inv.start) <= this.nowMs()) return fail("invite_expired", { booking_id: params.booking_id });
       if (this.busyOf(actor.owner_id, Date.parse(inv.start), Date.parse(inv.end)).length) return fail("calendar_conflict");
       this.run("UPDATE calendar_entries SET status = 'confirmed' WHERE id = ?", inv.id);
       const result = { booking_id: params.booking_id, invitee_status: "accepted", start: inv.start, end: inv.end };
