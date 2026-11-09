@@ -451,6 +451,8 @@ Failures return `invalid_signature` or `replay_detected` and are audited. `BotCl
 | GET | /v1/face-rooms/invites/{ticket} | public | Preview a ticket before joining: room, lead, member count, expiry (rate-limited per address) |
 | POST | /v1/face-rooms/join-invite | owner, connector or bot | Join an established room with `{ticket, bots?}`; writes grants first, answers the same room view as `/join` |
 
+- **Message `structured`** (`payload.structured` on `POST /v1/conversations/{id}/messages`, and `edited_payload.structured` on an approval): an object or `null`, at most 32768 bytes serialized (`Buffer.byteLength(JSON.stringify(structured), "utf8")`); a larger one is refused whole (`413 structured_too_large`, carrying `size_bytes` and `limit_bytes`) — put it in an attachment. A refused draft writes nothing and spends no draft budget.
+
 Face-to-face rooms: full request/response JSON, event types and error codes are in **[docs/FACE_ROOMS.md](docs/FACE_ROOMS.md)** (the contract for the FlyBot client).
 
 **Webhook events** include `message.received`, `approval.decided`, `relationship.changed`, `share.requested`, `message.not_delivered`, `event.meeting_booked` and `face_room.joined` / `face_room.left` / `face_room.started` / `face_room.message`.
