@@ -6,7 +6,7 @@ import { ApiError, assert } from "./errors.js";
 import { newId, randomToken } from "./ids.js";
 import { seal, unseal, publicRawFromPrivatePem } from "./custody.js";
 import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToken, jcs, payloadDigest, sha256Hex as sha256Text, signString, verifyString, webhookSignature, publicKeyFromRaw } from "./crypto.js";
-import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan } from "./policy.js";
+import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan, dlpText } from "./policy.js";
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
 import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-look.js";
@@ -3619,8 +3619,14 @@ export class Platform {
 
   private dlp(ownerId: string, pl: any) {
     const o = this.owner(ownerId);
-    const text = [pl.text ?? "", pl.structured ? JSON.stringify(pl.structured) : ""].join("\n");
+    // #495: the scanned text is cut at DLP_TEXT_MAX_CHARS before any rule sees it. One request body is capped at
+    // 256 KiB (server.ts) and a single token that size reaches here through `text` or `structured`, so the scan needs
+    // its own bound; a cut is reported as a finding rather than swallowed, because a card that carried a hit past the
+    // cut would otherwise auto-approve as clean.
+    const scanned = dlpText([pl.text ?? "", pl.structured ? JSON.stringify(pl.structured) : ""].join("\n"));
+    const text = scanned.text;
     const flags = dlpScan(text, J(o.sensitive_terms, []));
+    if (scanned.truncated) flags.push({ category: "dlp.truncated", action: "approve", label: "Text over the DLP scan limit" });
     const details = this.all("SELECT title, location FROM calendar_entries WHERE owner_id = ?", ownerId).flatMap((e) => [e.title, e.location]).filter(Boolean);
     if (calendarDetailLeak(text, details)) flags.push({ category: "calendar.details", action: "approve", label: "Calendar details" });
     return flags;

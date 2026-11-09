@@ -79,6 +79,74 @@ function cnIdValid(id: string): boolean {
   return c[s % 11] === id[17].toUpperCase();
 }
 
+/**
+ * The most text one DLP scan reads. A request body is capped at 256 KiB (`src/server.ts:21`), but a single token
+ * that size reaches this scan, and two rules used to hold a core for minutes on it (#495: 95 s for a 256 KiB run of
+ * `a` with no `@`, 423 s for a 256 KiB digit run whose unit sat out of reach). The cap is explicit rather than
+ * implied by the rules, and the caller reports a cut as `dlp.truncated`, so shortening the text can never turn a
+ * finding into a silent allow.
+ */
+export const DLP_TEXT_MAX_CHARS = 64 * 1024;
+
+/** The part of `text` the DLP rules read, and whether it had to be cut. See `DLP_TEXT_MAX_CHARS`. */
+export function dlpText(text: string): { text: string; truncated: boolean } {
+  return text.length > DLP_TEXT_MAX_CHARS ? { text: text.slice(0, DLP_TEXT_MAX_CHARS), truncated: true } : { text, truncated: false };
+}
+
+// The two scanners below read the shapes the email and amount rules used to hand to the RegExp engine. Those rules
+// were "an arbitrary run, then a cue that may be far away": on a long run with no cue the engine re-walked the rest
+// of the run from every start position, which is quadratic (#495). These walk each character at most twice and
+// accept exactly what the old patterns accepted. `\w` is ASCII-only in JS even under the `u` flag, hence the
+// hand-written classes; `\s` is matched code point for code point.
+const isDigitCode = (c: number) => c >= 0x30 && c <= 0x39;
+const isWordCode = (c: number) => isDigitCode(c) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x5f;
+const isEmailLocalChar = (c: number) => isWordCode(c) || c === 0x2e /* . */ || c === 0x2b /* + */ || c === 0x2d /* - */;
+const isEmailDomainChar = (c: number) => isWordCode(c) || c === 0x2e /* . */ || c === 0x2d /* - */;
+const isSpaceCode = (c: number) =>
+  c === 0x20 || (c >= 0x09 && c <= 0x0d) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+  c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+
+/** `/[\w.+-]+@[\w-]+\.[\w.-]+/` in one left-to-right pass instead of one pass per start position. */
+function hasEmail(text: string): boolean {
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && isEmailLocalChar(text.charCodeAt(start - 1))) start--;
+    if (start === at) continue; // the local part needs at least one character
+    let end = at + 1;
+    let firstDot = -1;
+    while (end < text.length && isEmailDomainChar(text.charCodeAt(end))) {
+      if (firstDot === -1 && text.charCodeAt(end) === 0x2e) firstDot = end;
+      end++;
+    }
+    // `[\w-]+` before the dot, then `[\w.-]+` after it: a dot with a domain character on each side.
+    if (firstDot >= at + 2 && firstDot + 1 < end) return true;
+  }
+  return false;
+}
+
+/** `(¥|￥|$|USD|RMB|元)\s*\d|\d+\s*(元|块钱|美元)` read once: a cue is checked back to its digits, never re-walked. */
+function hasMoneyAmount(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    const markerLen = c === 0xa5 /* ¥ */ || c === 0xffe5 /* ￥ */ || c === 0x24 /* $ */ || c === 0x5143 /* 元 */ ? 1
+      : (c === 0x55 && text.startsWith("USD", i)) || (c === 0x52 && text.startsWith("RMB", i)) ? 3 : 0;
+    if (markerLen) {
+      let j = i + markerLen;
+      while (j < text.length && isSpaceCode(text.charCodeAt(j))) j++;
+      if (j < text.length && isDigitCode(text.charCodeAt(j))) return true;
+    }
+    const unitLen = c === 0x5143 /* 元 */ ? 1
+      : c === 0x5757 /* 块 */ && text.charCodeAt(i + 1) === 0x94b1 /* 钱 */ ? 2
+      : c === 0x7f8e /* 美 */ && text.charCodeAt(i + 1) === 0x5143 /* 元 */ ? 2 : 0;
+    if (unitLen) {
+      let j = i;
+      while (j > 0 && isSpaceCode(text.charCodeAt(j - 1))) j--;
+      if (j > 0 && isDigitCode(text.charCodeAt(j - 1))) return true;
+    }
+  }
+  return false;
+}
+
 export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   // One number, however its digits are grouped: fold compatibility forms (full-width digits, U+00A0 → space),
   // drop format characters (U+200B), then close the whitespace/dot/slash/dash runs between two digits. The
@@ -93,8 +161,8 @@ export function dlpScan(text: string, ownerTerms: string[] = []): DlpHit[] {
   if (/\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/.test(text)) add("secret.api_key", "block", "API Key / Token");
   if (/(password|passwd|密码)\s*[:：=]\s*\S+/i.test(text)) add("secret.password", "block", "Password");
   if (/(?<!\d)1[3-9]\d{9}(?!\d)/.test(text) || /\+\d{1,3}[ -]?\d{6,}/.test(text)) add("pii.phone", "approve", "Phone number");
-  if (/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text)) add("pii.email", "approve", "Email address");
-  if (/(¥|￥|\$|USD|RMB|元)\s*\d|\d+\s*(元|块钱|美元)/.test(text)) add("money", "approve", "Money amount");
+  if (hasEmail(text)) add("pii.email", "approve", "Email address");
+  if (hasMoneyAmount(text)) add("money", "approve", "Money amount");
   // No commitment-language scan (#13): promises in prose (保证, 一定会, 我答应, "I promise") are the Bot's call, made from its
   // own instructions, not a keyword here. Binding actions stay gated by capability (commitment.make, calendar.book, …).
   for (const t of ownerTerms) if (t && text.toLowerCase().includes(t.toLowerCase())) add("owner.sensitive_term", "approve", `Owner sensitive term`);
