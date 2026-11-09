@@ -211,3 +211,66 @@ test("a booking that succeeds still reads as before: the date on the line, a pla
   assert.match(line, /Book meetings · executed · \d{1,2}\/\d{1,2}, \d{2}:\d{2}/, `the successful booking still names its date: ${line}`);
   assert.doesNotMatch(line, /failed|busy|mystery/, `and says nothing about a failure: ${line}`);
 });
+
+const HOUR = 3600e3;
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** A server whose clock the test moves, so a card can outlive the meeting it names. */
+async function clocked(t: any) {
+  const clock = { now: Date.now() };
+  const s = await startServer({ now: () => clock.now });
+  t.after(s.stop);
+  return { s, clock };
+}
+
+test("a card whose meeting already started says so, on the action line and in the toast", async (t) => {
+  const { s, clock } = await clocked(t);
+  const { A, B } = await friends(s.base);
+  const cid = (await A.bot.startConversation(B.bot.id, meetingIntent())).conversation_id as string;
+  // The draft is legal while the window is ahead; the owner then leaves it on the desk past the meeting.
+  const act: any = await A.bot.draftAction(cid, "calendar.book", { title: "Late sync", start: iso(clock.now + 2 * HOUR), end: iso(clock.now + 3 * HOUR), attendees: [B.bot.id] }, "plan");
+  clock.now += 4 * HOUR;
+
+  const me = await A.owner.req("GET", "/v1/me");
+  const page = consoleAt(s.base, A.owner.token, me);
+  await page.renderApprovals();
+  await page.press(act.approval_id);
+
+  const row = s.platform.db.prepare("SELECT status, result FROM actions WHERE conversation_id = ?").get(cid) as any;
+  assert.equal(row.status, "failed", "the server records the refusal");
+  assert.equal(JSON.parse(row.result).error, "meeting_in_past", "and names the reason");
+
+  const toast = page.toast();
+  assert.match(toast, /failed/, `the toast tells the owner nothing was booked: "${toast}"`);
+  assert.match(toast, /already started/, `and says why, in words rather than a code: "${toast}"`);
+
+  const line = actsLine(await page.renderChat(cid));
+  assert.match(line, /already started/, `the action line says why it failed: ${line}`);
+  assert.doesNotMatch(line, /\(meeting_in_past\)/, `never the bare code: ${line}`);
+});
+
+test("an invitation that expired with its meeting says so, not a bare failed code", async (t) => {
+  const { s, clock } = await clocked(t);
+  const { A, B } = await friends(s.base);
+  const cid = (await A.bot.startConversation(B.bot.id, meetingIntent())).conversation_id as string;
+  const d: any = await A.bot.draftAction(cid, "calendar.book", { title: "Stale sync", start: iso(clock.now + 2 * HOUR), end: iso(clock.now + 3 * HOUR), attendees: [B.bot.id] }, "plan");
+  const booked: any = await A.owner.req("POST", `/v1/approvals/${d.approval_id}/decision`, { decision: "approved" });
+  assert.equal(booked.status, "executed");
+  // The invitee drafts the answer while the meeting is still ahead, then the meeting passes.
+  const acc: any = await B.bot.draftAction(cid, "calendar.accept_invite", { booking_id: booked.result.booking_id }, "ok");
+  clock.now += 4 * HOUR;
+
+  const me = await B.owner.req("GET", "/v1/me");
+  const page = consoleAt(s.base, B.owner.token, me);
+  await page.renderApprovals();
+  await page.press(acc.approval_id);
+
+  const toast = page.toast();
+  assert.match(toast, /failed/, `the toast tells the owner nothing was accepted: "${toast}"`);
+  assert.match(toast, /expired with its meeting/, `and says why, in words rather than a code: "${toast}"`);
+
+  const html = await page.renderChat(cid);
+  const line = (html.match(/<div class="sys">⚙ Accept meeting invite[^<]*<\/div>/) || [""])[0];
+  assert.match(line, /expired with its meeting/, `the action line says why it failed: ${line}`);
+  assert.doesNotMatch(line, /\(invite_expired\)/, `never the bare code: ${line}`);
+});
