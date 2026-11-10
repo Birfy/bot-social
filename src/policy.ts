@@ -80,13 +80,16 @@ function cnIdValid(id: string): boolean {
 }
 
 /**
- * The most text one DLP scan reads. A request body is capped at 256 KiB (`src/server.ts:21`), but a single token
- * that size reaches this scan, and two rules used to hold a core for minutes on it (#495: 95 s for a 256 KiB run of
- * `a` with no `@`, 423 s for a 256 KiB digit run whose unit sat out of reach). The cap is explicit rather than
- * implied by the rules, and the caller reports a cut as `dlp.truncated`, so shortening the text can never turn a
- * finding into a silent allow.
+ * The most text one DLP scan reads. It is the request-body ceiling itself (`src/server.ts:21`): nothing a caller
+ * can send reaches past it, so the cut is an internal backstop rather than a rule that shortens ordinary drafts.
+ *
+ * It used to be 64 KiB, the bound #495 needed while two rules were quadratic (95 s for a 256 KiB run of `a` with no
+ * `@`, 423 s for a 256 KiB digit run whose unit sat out of reach). Those rules are linear scanners now (a 256 KiB
+ * adversarial string costs ~18 ms, see test/dlp_scan_is_linear.test.ts), so 64 KiB bought no time and only hid
+ * findings: a `block` finding past the cut was never seen by the action doors (#506). The caller reports a cut as
+ * `dlp.truncated` and reads the block rules over the whole text, so a cut cannot turn a finding into a silent allow.
  */
-export const DLP_TEXT_MAX_CHARS = 64 * 1024;
+export const DLP_TEXT_MAX_CHARS = 256 * 1024;
 
 /** The part of `text` the DLP rules read, and whether it had to be cut. See `DLP_TEXT_MAX_CHARS`. */
 export function dlpText(text: string): { text: string; truncated: boolean } {

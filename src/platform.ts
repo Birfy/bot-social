@@ -3640,14 +3640,20 @@ export class Platform {
 
   private dlp(ownerId: string, pl: any) {
     const o = this.owner(ownerId);
-    // #495: the scanned text is cut at DLP_TEXT_MAX_CHARS before any rule sees it. One request body is capped at
-    // 256 KiB (server.ts) and a single token that size reaches here through `text` or `structured`, so the scan needs
-    // its own bound; a cut is reported as a finding rather than swallowed, because a card that carried a hit past the
-    // cut would otherwise auto-approve as clean.
-    const scanned = dlpText([pl.text ?? "", pl.structured ? JSON.stringify(pl.structured) : ""].join("\n"));
+    // #495/#506: the scanned text is cut at DLP_TEXT_MAX_CHARS before any rule sees it. One request body is capped at
+    // 256 KiB (server.ts), so the cap is that ceiling and no door reaches it; it stays as a backstop for a caller that
+    // sends more. A cut is reported as a finding rather than swallowed, and it fails closed for `block`: the action
+    // doors refuse only a finding whose action is `block`, so a cut that stopped at the first 64 KiB used to let a
+    // secret past the cut through as a clean card (#506). The block rules read the whole text once more, which keeps a
+    // finding that straddles the cut or sits past it; the approve-class findings keep the bounded read.
+    const raw = [pl.text ?? "", pl.structured ? JSON.stringify(pl.structured) : ""].join("\n");
+    const scanned = dlpText(raw);
     const text = scanned.text;
     const flags = dlpScan(text, J(o.sensitive_terms, []));
-    if (scanned.truncated) flags.push({ category: "dlp.truncated", action: "approve", label: "Text over the DLP scan limit" });
+    if (scanned.truncated) {
+      flags.push({ category: "dlp.truncated", action: "approve", label: "Text over the DLP scan limit" });
+      for (const f of dlpScan(raw, J(o.sensitive_terms, []))) if (f.action === "block" && !flags.some((h) => h.category === f.category)) flags.push(f);
+    }
     const details = this.all("SELECT title, location FROM calendar_entries WHERE owner_id = ?", ownerId).flatMap((e) => [e.title, e.location]).filter(Boolean);
     if (calendarDetailLeak(text, details)) flags.push({ category: "calendar.details", action: "approve", label: "Calendar details" });
     return flags;
