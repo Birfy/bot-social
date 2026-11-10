@@ -785,7 +785,13 @@ export class Platform {
       // the line — and the 1:1 route could write into a room's thread on nothing but a friendship and a non-room
       // grant. A conversation off that door answers exactly like one that does not exist, so ids cannot be probed.
       const doorId = roomRel?.id ?? this.findActiveRelationship(cb.botId, to.id)?.id ?? null;
-      assert(named.relationship_id === doorId, 404, "conversation_not_found", "no such conversation between these Bots");
+      // #515: a thread opened in a room keeps that room's relationship row after the room is over, so its door is
+      // neither the friendship's row nor a live room. The 1:1 route accepts that thread only on the evidence the
+      // delivery gate already settles such a line on (#67): the thread's own door no longer reads `room`, a
+      // room-scoped grant still records that it was one, and the pair still have a friendship to settle on. A live
+      // room's thread stays refused here, and a pair with no friendship has no door to settle on.
+      const endedRoom = roomRel === null && this.endedRoomDoor(named.relationship_id, doorId !== null);
+      assert(named.relationship_id === doorId || endedRoom, 404, "conversation_not_found", "no such conversation between these Bots");
       conversationId = named.id;
       message = this.draftMessage(cb.bp, conversationId, draftEnv(conversationId), typed, mentions, roomId);
     } else {
@@ -1703,6 +1709,21 @@ export class Platform {
   /** Access is only the two endpoint bots. Home / Chief never cover their members. */
   private findActiveRelationship(a: string, b: string): any {
     return this.pairRelationships(a, b).find((r) => r.status === "active");
+  }
+
+  /**
+   * #515: a thread a room opened keeps that room's relationship row after the room is over — the guest's seat is
+   * released, the share lapses — and the row stops reading `room`. Its room-scoped grants are revoked with it, so
+   * the thread reports no room and a console shows it as a chat, yet the row it was opened through is neither the
+   * friendship's nor a live room. This answers whether a named thread is one of those: its own door no longer
+   * reads `room`, a grant on that door still records the room it served, and the pair have a friendship to settle
+   * it on (the 1:1 door). A live room reads `room` and is refused, and an unfriended pair has no door at all.
+   */
+  private endedRoomDoor(relId: string, hasFriendship: boolean): boolean {
+    if (!hasFriendship) return false;
+    const rel = this.get("SELECT status FROM relationships WHERE id = ?", relId);
+    if (!rel || rel.status === "room") return false;
+    return !!this.get("SELECT 1 FROM grants WHERE relationship_id = ? AND room_id IS NOT NULL LIMIT 1", relId);
   }
 
   /** The bot the grantor is sharing (their endpoint on the relationship). */
