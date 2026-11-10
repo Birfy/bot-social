@@ -1662,6 +1662,15 @@ export class Platform {
     if (b.status === "revoked") throw new ApiError(403, "bot_revoked", "a Bot in this relationship was revoked");
   }
 
+  /**
+   * Is this invitation the one this conversation may answer? A booking is made *with* the peer of the chat it was
+   * booked in (`calendar.book` insists `attendees` is exactly that Bot), so the answer to it belongs there too. The
+   * two sides are homes, not Bots: a home's other Bot may answer for the same home in the same chat.
+   */
+  private inviteIsWithPeer(inv: any, peerOwnerId: string) {
+    return inv.organizer_owner === peerOwnerId || J(inv.attendees, []).includes(peerOwnerId);
+  }
+
   /** Access is only the two endpoint bots. Home / Chief never cover their members. */
   private findActiveRelationship(a: string, b: string): any {
     return this.pairRelationships(a, b).find((r) => r.status === "active");
@@ -3965,6 +3974,11 @@ export class Platform {
       // missing invite stays the 404 it always was, and only a paused chat refuses the draft.
       acceptInvite = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, ownerId);
       assert(acceptInvite, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
+      // The invitation belongs to the chat it was made in: `calendar.book` refuses an attendee that is not this
+      // peer, so the accept door must refuse an invite that is not this peer's. Otherwise a Bot that reads the
+      // wrong booking id answers another home's invitation here, and execution tells this chat's peer a meeting is
+      // on — with the other homes' window in the card and in the peer's queue.
+      assert(this.inviteIsWithPeer(acceptInvite, peerB.owner_id), 404, "invite_not_found", "this invite was not made with the peer of this conversation");
       // The invitation expires with its meeting, on the same rule the execute door applies: the two doors must not
       // answer the same card differently, so both read `start <= now`. Drafting an answer to a moment that has passed
       // is refused here, before a card exists.
@@ -4030,6 +4044,7 @@ export class Platform {
       } else if (x.action_type === "calendar.accept_invite") {
         const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, actor.owner_id);
         assert(inv, 404, "invite_not_found", "no pending invite with that booking_id for your owner");
+        assert(this.inviteIsWithPeer(inv, peer.owner_id), 404, "invite_not_found", "this invite was not made with the peer of this conversation");
       }
     }
     const owners = [actor.owner_id, peer.owner_id];
@@ -4065,7 +4080,9 @@ export class Platform {
     }
     if (x.action_type === "calendar.accept_invite") {
       const inv = this.get("SELECT * FROM calendar_entries WHERE booking_id = ? AND owner_id = ? AND status = 'invited'", params.booking_id, actor.owner_id);
-      if (!inv) return fail("invite_not_found");
+      // The same binding the draft door asks, before the row flips: an invite that is not this chat's peer's is not
+      // an invite this card may answer, whatever its params were edited to.
+      if (!inv || !this.inviteIsWithPeer(inv, peer.owner_id)) return fail("invite_not_found");
       // The invitation expires with its meeting: an accept approved after the start would confirm a past meeting and
       // tell both Bots it is on. Checked before the conflict read and before the row flips to confirmed, and the card
       // settles as failed — the answer to an invitation to a moment that has passed.
