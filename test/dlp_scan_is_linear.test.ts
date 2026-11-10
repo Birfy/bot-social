@@ -84,6 +84,7 @@ test("the scan cap cuts over-long text and says so", () => {
   const cut = policy.dlpText(long);
   assert.equal(cut.truncated, true);
   assert.equal(cut.text.length, policy.DLP_TEXT_MAX_CHARS);
-  // 64 KiB is what the entry hands the rules; the cap is well under the 256 KiB request-body limit it stands behind.
-  assert.ok(policy.DLP_TEXT_MAX_CHARS < 256 * KiB);
+  // The cap is the 256 KiB request-body limit itself (#506): no door can send more, so the cut is a backstop. It was
+  // 64 KiB while two rules were quadratic; once they were linear scanners that bound only hid findings.
+  assert.equal(policy.DLP_TEXT_MAX_CHARS, 256 * KiB);
 });
