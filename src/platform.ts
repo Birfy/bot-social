@@ -3215,8 +3215,13 @@ export class Platform {
     const card: any = { approval_id: a.id, kind: a.kind, status: a.status, decision: a.decision, summary: a.summary, reasons: J(a.reasons, []), risk_flags: J(a.risk_flags, []), ...(a.hold_reason ? { hold_reason: a.hold_reason } : {}), bot_id: a.bot_id, conversation_id: a.conversation_id, created_at: a.created_at, decided_at: a.decided_at, sender: a.bot_id ? this.publicBot(this.bot(a.bot_id)) : undefined, expires_at: a.expires_at };
     if (a.kind === "outbound_message") {
       const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
-      const pl = J(m.payload);
-      card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
+      // A card whose `messages` row is missing is the shape a torn write leaves (#516): it is listed without its
+      // detail, as the `action` and `face_room_message` branches below do, so one such row cannot take every other
+      // card of this owner down. The read settles nothing; the decision door cancels it by id.
+      if (m) {
+        const pl = J(m.payload);
+        card.message = { message_id: m.id, to: this.publicBot(this.bot(m.recipient_bot)), payload: pl, ...(mentionsOf(m.mentions).length ? { mentions: mentionsOf(m.mentions) } : {}), status: m.status, ...(pl.attachments ? { attachments: pl.attachments.map((r: AttachmentRef) => ({ ...r, size_label: humanSize(r.size) })) } : {}) };
+      }
     } else if (a.kind === "action") {
       const x = this.get("SELECT * FROM actions WHERE id = ?", a.subject_id);
       // A card whose subject row is missing — a write an older build allowed to fail between the two rows — is
@@ -3225,9 +3230,11 @@ export class Platform {
       if (x) card.action = { action_id: x.id, action_type: x.action_type, params: J(x.params), justification: x.justification, status: x.status };
     } else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
-      card.relationship = { relationship_id: r.id, target: this.publicBot(this.bot(r.target_bot)), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []) };
+      // Same shape as the two branches above: an orphan card is listed without its detail, not made a 500 (#516).
+      if (r) card.relationship = { relationship_id: r.id, target: this.publicBot(this.bot(r.target_bot)), message: r.message, requested_capabilities: J(r.requested_caps, []), offered_capabilities: J(r.offered_caps, []) };
     } else if (a.kind === "invite") {
-      card.invite = this.inviteView(this.get("SELECT * FROM invites WHERE id = ?", a.subject_id));
+      const it = this.get("SELECT * FROM invites WHERE id = ?", a.subject_id);
+      if (it) card.invite = this.inviteView(it);
     } else if (a.kind === "grant_request") {
       card.grant_request = { relationship_id: a.subject_id, ...J(a.note, {}), from: this.publicBot(this.bot(a.bot_id)) };
     } else if (a.kind === "face_room_message") {
@@ -3346,6 +3353,19 @@ export class Platform {
     const decision = body?.decision;
     assert(["approved", "approved_with_edits", "rejected"].includes(decision), 400, "invalid_request", "decision must be approved|approved_with_edits|rejected");
     const approve = decision !== "rejected";
+    // A card whose subject row was never written (a torn write an older build allowed) is settled here by id, with
+    // the reason, instead of failing deep in the delivery door as a 500 that names nothing (#516). Same shape as the
+    // invite branch below: the card is cancelled and the owner is told what it was waiting on is gone.
+    const messageGone = "the message this card was for was never written; this card can no longer be approved";
+    const requestGone = "the request this card was for was never written; this card can no longer be approved";
+    if (a.kind === "outbound_message" && !this.get("SELECT 1 FROM messages WHERE id = ?", a.subject_id)) {
+      this.cancelPendingFor("id = ?", [a.id], "message_unavailable", { notify: true });
+      throw new ApiError(409, "invalid_state", messageGone);
+    }
+    if (a.kind === "relationship_request" && !this.get("SELECT 1 FROM relationships WHERE id = ?", a.subject_id)) {
+      this.cancelPendingFor("id = ?", [a.id], "relationship_unavailable", { notify: true });
+      throw new ApiError(409, "invalid_state", requestGone);
+    }
     let result: any = {};
     if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
     else if (a.kind === "face_room_message") result = approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot);
@@ -3662,10 +3682,16 @@ export class Platform {
       this.audit.append("platform", "message.delivered", id, owners, { conversation_id: convId, turn: c.turn_count + 1, edited: false, injection_suspected: false, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig, typed_by_owner: true });
       return { message_id: id, status: "delivered", approval_id: undefined, typed_by_owner: true, ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.typed_by_owner", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
-    const aprId = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs, undefined, holdReason);
-    this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
-      "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, aprId, nowIso(), Date.now(), typedByOwner ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
+    // The card and the row it points at are one write (#516): a refused `messages` insert used to leave the card
+    // behind, and nothing in the repository deletes it — one such orphan then took the owner's whole pending list
+    // down. The announcement the card queues waits for this commit too (`atomically`), as the action door does.
+    const aprId = this.atomically(() => {
+      const apr = this.createApproval(ownerId, "outbound_message", id, botId, convId, `To @${peerB.handle}: ${pl.text.slice(0, 80)}${files}`, reasons, flags, J(c.intent).type === "schedule_meeting" ? LIMITS.meetingApprovalTtlMs : LIMITS.approvalTtlMs, undefined, holdReason);
+      this.run("INSERT INTO messages (id, conversation_id, sender_bot, recipient_bot, envelope, payload, status, risk_flags, expects_reply, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        id, convId, botId, peer, JSON.stringify(env), JSON.stringify({ kind: pl.kind ?? (pl.structured ? "structured" : "text"), text: pl.text, structured: pl.structured ?? null, expects_reply: pl.expects_reply !== false, ...(refs.length ? { attachments: refs } : {}) }),
+        "pending_approval", JSON.stringify(flags), pl.expects_reply === false ? 0 : 1, apr, nowIso(), Date.now(), typedByOwner ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
+      return apr;
+    });
     // While this card waits it holds its files: the sweep skips a bound row until the card is decided
     // (`cleanupAttachments`), so the bytes outlive the upload clock for exactly as long as the owner takes.
     for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
@@ -5734,9 +5760,14 @@ export class Platform {
     const found = holdReasonOf({ riskFlags: flags, injectionSuspected });
     const holdReason: HoldReason = found === "blanket_outbound" ? "face_room_auto_send_off" : found;
     const snap = this.faceSnapshot(sender);
-    const aprId = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId }, holdReason);
-    this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", aprId, this.ts(), this.nowMs(), typed ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
+    // One write, as the message and action doors do (#516): a refused `face_room_drafts` insert used to leave the
+    // card behind, and the card named a draft that was never written.
+    const aprId = this.atomically(() => {
+      const apr = this.createApproval(sender.owner_id, "face_room_message", id, sender.id, null, `To face room: ${text.slice(0, 80)}`, reasons, flags, LIMITS.approvalTtlMs, { room_id: roomId }, holdReason);
+      this.run("INSERT INTO face_room_drafts (id, room_id, sender_bot, payload, status, approval_id, created_at, created_ms, typed_by_owner, mentions) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", apr, this.ts(), this.nowMs(), typed ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
+      return apr;
+    });
     this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
     const o = this.owner(sender.owner_id);
     if (o.auto_approve_face_rooms && flags.length === 0 && !injectionSuspected) {
