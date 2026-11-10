@@ -952,6 +952,11 @@ export class Platform {
       const k = this.get("SELECT * FROM bot_keys WHERE bot_id = ? AND public_key = ? AND status = 'active' AND (expires_at IS NULL OR expires_at > ?)", b.id, pub, nowIso());
       assert(k, 400, "key_not_registered", "this private key does not match any active key of the bot");
       kid = k.kid; mode = "uploaded";
+      // Adoption is the moment the platform takes over signing, so the verification window `addKey` stamped on this
+      // row (the deadline for the key it replaced) cannot outlive it: left in place, it would expire the platform's
+      // own signing identity while the owner no longer holds the private key to rotate. Only the adopted row loses
+      // its date; a window that has already closed never reaches here (the lookup above refuses it, fail-closed).
+      this.run("UPDATE bot_keys SET expires_at = NULL WHERE bot_id = ? AND kid = ?", b.id, kid);
       this.storeCustody(b.id, kid, body.private_key_pem);
     } else {
       const kp = generateEd25519();
