@@ -201,6 +201,9 @@ export class Platform {
   readonly webhooks: WebhookPusher;
 
   private kmsKey: Buffer;
+  /** Events written inside `atomically`, waiting for that write to commit before they reach the push queue (#511).
+   *  The queue is memory, not a table, so an event row a rollback takes back must not leave a push behind. */
+  private afterCommitPushes: { botId: string; ev: { event_id: string; type: string; created_at: string; data: Record<string, unknown> } }[] | null = null;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
   /** GitHub OAuth (#76), decided once at startup. `enabled` is the constant every gate and the /ui meta read. */
@@ -294,11 +297,32 @@ export class Platform {
     return p;
   }
 
-  /** Append an event to a bot's queue (pull via /v1/events or MCP) and push to its webhook if configured. */
+  /** Append an event to a bot's queue (pull via /v1/events or MCP) and push to its webhook if configured.
+   *  Inside `atomically` the push waits for the commit: the event row rolls back with the write it describes, and a
+   *  push naming an event that is in no table would tell the Bot about a change that never happened. */
   emit(botId: string, type: string, data: Record<string, unknown>) {
     const ev = this.appendEvent(botId, type, data);
-    this.webhooks.enqueue(botId, ev);
+    if (this.afterCommitPushes) this.afterCommitPushes.push({ botId, ev });
+    else this.webhooks.enqueue(botId, ev);
     return ev.event_id;
+  }
+
+  /** Run `fn` as one transaction whose events are handed to the push queue only once it commits. A throw rolls every
+   *  row back and drops the queued pushes with it, so the Bots are only ever told about writes that are durable. */
+  private atomically<T>(fn: () => T): T {
+    const outer = this.afterCommitPushes;
+    const queued: NonNullable<Platform["afterCommitPushes"]> = [];
+    this.afterCommitPushes = queued;
+    let out: T;
+    try {
+      out = this.db.transaction(fn)();
+    } catch (e) {
+      this.afterCommitPushes = outer;
+      throw e;
+    }
+    this.afterCommitPushes = outer;
+    for (const p of queued) this.webhooks.enqueue(p.botId, p.ev);
+    return out;
   }
 
   /** Write one event row and hand it back in the shape the webhook queue pushes, so a caller can write the row with
@@ -4037,14 +4061,16 @@ export class Platform {
     const reasons = [...def.reasons];
     const hold = this.actionHold(ownerId, params, pl.justification ?? null);
     // The card and the row it points at are one write: a pending card whose action row was never written takes the
-    // owner's whole list down (`approvalCard`), so a refusal must leave neither behind. The policy line and the audit
-    // line describe a change that is already durable, so they stay outside the transaction.
-    const aprId = this.db.transaction(() => {
+    // owner's whole list down (`approvalCard`), so a refusal must leave neither behind. The announcement the card
+    // queues waits for this commit too (`atomically`), or a refused insert still pages the owner's Bot about a card
+    // that is in no table (#511). The policy line and the audit line describe a change that is already durable, so
+    // they stay outside the transaction.
+    const aprId = this.atomically(() => {
       const apr = this.createApproval(ownerId, "action", id, botId, convId, summary, reasons, dlpFlags, LIMITS.meetingApprovalTtlMs, undefined, hold);
       this.run("INSERT INTO actions (id, conversation_id, actor_bot, action_type, params, justification, envelope, status, approval_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         id, convId, botId, pl.action_type, JSON.stringify(params), pl.justification ?? null, JSON.stringify(env), "pending_approval", apr, nowIso());
       return apr;
-    })();
+    });
     this.policyDecision(botId, convId, owners, "action.draft", "require_approval", reasons, { action_id: id, action_type: pl.action_type });
     this.audit.append(`bot:${botId}`, "action.drafted", id, owners, { conversation_id: convId, action_type: pl.action_type, params, envelope_id: env.id, sig: env.sig, approval_id: aprId });
     this.refreshConversationStatus(convId);
