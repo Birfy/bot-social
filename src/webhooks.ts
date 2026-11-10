@@ -310,16 +310,23 @@ export class WebhookPusher {
       server: this.baseUrl(), sent_at: now(),
     };
     const raw = JSON.stringify(body);
-    const custom: Header[] = JSON.parse(b.webhook_headers || "[]");
+    let custom: Header[] = JSON.parse(b.webhook_headers || "[]");
+    let secret: string = b.webhook_secret;
     let last: { response_status?: number; error?: string } = {};
     for (let attempt = 1; attempt <= this.opts.maxAttempts; attempt++) {
-      // Read the state before every attempt, not once when the batch was queued: a stop that lands while this
-      // delivery waits out a retry backoff must close the door too. An owner's explicit test push (`kind` test)
-      // is not the Bot's outbound side and keeps working while the Bot is frozen (#478).
-      if (kind === "events") {
-        const status = (this.db.prepare("SELECT status FROM bots WHERE id = ?").get(botId) as any)?.status;
-        if (status !== "active") { finish("cancelled", { error: stopReason(String(status ?? "missing")), attempts: attempt - 1 }); return id; }
+      // Read the target before every attempt, not once when the batch was queued: an owner who clears or replaces the
+      // webhook while this delivery waits out a retry backoff must not have the next attempt POST the old URL and
+      // settle as delivered. A stop that lands meanwhile must close the door too. The URL is read for every kind,
+      // while the status stays the events-only rule: an owner's explicit test push (`kind` test) is not the Bot's
+      // outbound side and keeps working while the Bot is frozen (#478).
+      const target = this.db.prepare("SELECT status, webhook_url, webhook_secret, webhook_headers FROM bots WHERE id = ?").get(botId) as any;
+      if (!target?.webhook_url) { finish("cancelled", { error: "webhook removed", attempts: attempt - 1 }); return id; }
+      if (target.webhook_url !== b.webhook_url) { finish("cancelled", { error: "webhook replaced", attempts: attempt - 1 }); return id; }
+      if (target.webhook_secret !== b.webhook_secret || target.webhook_headers !== b.webhook_headers) {
+        secret = target.webhook_secret;
+        custom = JSON.parse(target.webhook_headers || "[]");
       }
+      if (kind === "events" && target.status !== "active") { finish("cancelled", { error: stopReason(String(target.status ?? "missing")), attempts: attempt - 1 }); return id; }
       try {
         if (!this.opts.allowPrivate) {
           const host = new URL(b.webhook_url).hostname.replace(/^\[|\]$/g, "");
@@ -329,7 +336,7 @@ export class WebhookPusher {
         const ts = String(Math.floor(Date.now() / 1000));
         const headers: Record<string, string> = {};
         for (const h of custom) headers[h.name] = h.value;
-        Object.assign(headers, { "content-type": "application/json", "user-agent": "BotSocial-Webhook/1", "X-BotSocial-Delivery": id, "X-BotSocial-Event-Id": events[0].event_id, "X-BotSocial-Timestamp": ts, "X-BotSocial-Signature": webhookSignature(b.webhook_secret, ts, raw) });
+        Object.assign(headers, { "content-type": "application/json", "user-agent": "BotSocial-Webhook/1", "X-BotSocial-Delivery": id, "X-BotSocial-Event-Id": events[0].event_id, "X-BotSocial-Timestamp": ts, "X-BotSocial-Signature": webhookSignature(secret, ts, raw) });
         const res = await this.fetchImpl(b.webhook_url, { method: "POST", headers, body: raw, redirect: "manual", signal: AbortSignal.timeout(this.opts.timeoutMs) });
         await res.arrayBuffer().catch(() => undefined);
         if (res.ok) { finish("delivered", { response_status: res.status, attempts: attempt }); return id; }
