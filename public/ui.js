@@ -347,7 +347,9 @@ function shell() {
   const picker = $("#tz"); if (picker) picker.onchange = () => saveTimezone(picker.value);
   const qstart = $("#qstart"), qend = $("#qend");
   if (qstart && qend) { const save = () => saveQuietHours(qstart.value, qend.value); qstart.onchange = save; qend.onchange = save; }
-  const qoff = $("#qoff"); if (qoff) qoff.onclick = (e) => { e.preventDefault(); saveQuietHours(null, null); };
+  // The save is a request the owner is waiting on: hand its promise back, so a caller (and the test that presses the
+  // link) settles only once the platform has answered -- a refused save then reports itself inside the click.
+  const qoff = $("#qoff"); if (qoff) qoff.onclick = (e) => { e.preventDefault(); return saveQuietHours(null, null); };
   bindSearch();
 }
 /** The sidebar's search box: typing runs one query, Enter runs it now, and a hit is a plain link to its page. */
