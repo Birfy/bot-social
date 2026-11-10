@@ -3467,6 +3467,16 @@ export class Platform {
     if (today >= LIMITS.newConversationsPerPairPerDay) throw new ApiError(429, "rate_limited", "too many new conversations for this relationship today", { retry_after: 3600 });
     const allowed = (pl.intent.allowed_capabilities ?? intentDef.allowed).filter((c: string) => intentDef.allowed.includes(c));
     const intent = { type: intentDef.type, summary: String(pl.intent.summary ?? ""), params: pl.intent.params ?? {}, allowed_capabilities: allowed, success_criteria: pl.intent.success_criteria ?? null, max_turns: null };
+    // #512: the peer reads this intent the moment the chat opens (`conversation.started`), so the half the caller
+    // wrote is scanned before anything is stored — the same `dlp()` the draft door runs, and the same rule: a `block`
+    // finding refuses with `categories` (never the value), everything else stays as the draft door leaves it. A
+    // refusal writes no row and queues no event, so the door cannot hand the peer a thread about a blocked value.
+    const intentText = [intent.summary, intent.success_criteria == null ? "" : typeof intent.success_criteria === "string" ? intent.success_criteria : JSON.stringify(intent.success_criteria)].filter(Boolean).join("\n");
+    const intentBlocked = this.dlp(ownerId, { text: intentText, structured: intent.params }).filter((f) => f.action === "block");
+    if (intentBlocked.length) {
+      this.policyDecision(botId, null, [ownerId, peer.owner_id], "conversation.create", "deny", ["dlp.blocked"], { categories: intentBlocked.map((b) => b.category) });
+      throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this conversation intent", { categories: intentBlocked.map((b) => b.category) });
+    }
     const id = newId("cnv");
     const expires = pl.intent.expires_at ? new Date(ms(pl.intent.expires_at)).toISOString() : new Date(Date.now() + 72 * 3600e3).toISOString();
     this.run("INSERT INTO conversations (id, type, relationship_id, initiator_bot, peer_bot, intent, status, max_turns, created_at, updated_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
