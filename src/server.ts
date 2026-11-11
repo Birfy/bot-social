@@ -149,14 +149,18 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/homes/:id/members", async (req, reply) => reply.status(201).send(platform.addHomeMember(auth(req), P(req).id, B(req))));
   app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
   app.post("/v1/attachments", { bodyLimit: Math.ceil(platform.attachmentLimits.maxBytes / 3) * 4 + 64 * 1024 }, async (req, reply) => reply.status(201).send(platform.uploadAttachment(auth(req), B(req))));
-  app.get("/v1/attachments/:id", async (req) => platform.getAttachment(auth(req), { attachment_id: P(req).id, bot_id: Q(req)?.bot_id }));
+  app.get("/v1/attachments/:id", async (req) => platform.getAttachment(auth(req), { attachment_id: P(req).id, bot_id: oneQ(Q(req).bot_id, "bot_id") }));
   app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(ownerAny(req), P(req).id));
-  app.get("/v1/remote-bots", async (req) => platform.listRemoteBots(ownerAny(req), Q(req).home || Q(req).home_id));
+  app.get("/v1/remote-bots", async (req) => {
+    const p = ownerAny(req);
+    const home = oneQ(Q(req).home, "home"), homeId = oneQ(Q(req).home_id, "home_id");
+    return platform.listRemoteBots(p, home || homeId);
+  });
   app.get("/v1/bots/:id/grants", async (req) => platform.listBotGrants(ownerAny(req), P(req).id));
   app.post("/v1/bots/:id/grants", async (req, reply) => reply.status(201).send(platform.grantBotToFriend(ownerAny(req), P(req).id, B(req).friend_owner_id, B(req).friend_bot_id)));
   app.delete("/v1/bots/:id/grants/:grantId", async (req) => platform.revokeBotGrant(ownerAny(req), P(req).grantId, P(req).id));
   // Recipient side: the grantee removes a grant given to one of their bots (the granting owner's list_bot_grants drops it).
-  app.delete("/v1/remote-bots/:grantId", async (req) => platform.declineBotGrant(ownerAny(req), P(req).grantId, Q(req).bot_id || undefined));
+  app.delete("/v1/remote-bots/:grantId", async (req) => platform.declineBotGrant(ownerAny(req), P(req).grantId, oneQ(Q(req).bot_id, "bot_id") || undefined));
   app.post("/v1/homes/:id/send", async (req, reply) => reply.status(202).send(platform.sendAsMember(auth(req), B(req))));
   app.post("/v1/onboard", { preHandler: authGate }, async (req, reply) => reply.status(201).send(platform.onboard(B(req))));
   const setupMd = () => readFileSync(join(here, "..", "docs", "SETUP.md"), "utf8").replaceAll("{{BASE_URL}}", platform.publicBaseUrl);
@@ -179,9 +183,9 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     return b.id as string;
   };
   app.put("/v1/connector/webhook", async (req) => { const p = ownerAny(req); const b = B(req); return platform.setWebhook(p, myBotId(p, b.bot_id), { url: b.url, headers: b.headers }); });
-  app.get("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.getWebhook(p, myBotId(p, Q(req).bot_id)); });
+  app.get("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.getWebhook(p, myBotId(p, oneQ(Q(req).bot_id, "bot_id"))); });
   app.post("/v1/connector/webhook/test", async (req) => { const p = ownerAny(req); return platform.testWebhook(p, myBotId(p, B(req).bot_id)); });
-  app.delete("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.clearWebhook(p, myBotId(p, Q(req).bot_id)); });
+  app.delete("/v1/connector/webhook", async (req) => { const p = ownerAny(req); return platform.clearWebhook(p, myBotId(p, oneQ(Q(req).bot_id, "bot_id"))); });
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/v1/platform", async () => platform.platformInfo());
 
@@ -266,7 +270,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.get("/v1/invites/:code", async (req) => platform.inviteInfo(P(req).code));
   app.delete("/v1/invites/:code", async (req) => platform.revokeInvite(auth(req), P(req).code));
   app.post("/v1/invites/:code/join", async (req, reply) => reply.status(201).send(platform.joinInvite(auth(req), P(req).code, B(req))));
-  app.get("/v1/friends-overview", async (req) => platform.friendsOverview(auth(req), Q(req).bot_id || undefined));
+  app.get("/v1/friends-overview", async (req) => platform.friendsOverview(auth(req), oneQ(Q(req).bot_id, "bot_id") || undefined));
   app.get("/v1/friends", async (req) => ({ friends: platform.listFriends(auth(req)) }));
   app.post("/v1/relationships/:id/consent", async (req) => platform.consent(auth(req), P(req).id, B(req)));
   app.delete("/v1/relationships/:id", async (req) => platform.removeRelationship(auth(req), P(req).id));
@@ -286,7 +290,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/conversations/:id/extend", async (req) => platform.extendConversation(auth(req), P(req).id, B(req)));
 
   // ---- approvals
-  app.get("/v1/approvals", async (req) => ({ approvals: platform.listApprovals(auth(req), Q(req).status ?? "pending") }));
+  app.get("/v1/approvals", async (req) => ({ approvals: platform.listApprovals(auth(req), oneQ(Q(req).status, "status") ?? "pending") }));
   app.post("/v1/approvals/:id/decision", async (req) => platform.decideApproval(auth(req), P(req).id, B(req)));
 
   // ---- calendar
@@ -311,7 +315,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   // Console search: the sidebar finds a chat or a face room by its title face. Owner login, connector token or a
   // Bot's own token; each answers only what that caller's list routes answer, so a hit is always something the
   // caller could have scrolled to.
-  app.get("/v1/search", async (req) => platform.searchConsole(faceAuth(req), Q(req).q));
+  app.get("/v1/search", async (req) => platform.searchConsole(faceAuth(req), oneQ(Q(req).q, "q")));
   app.post("/v1/face-rooms/join", async (req, reply) => reply.status(200).send(platform.joinFaceRoom(faceAuth(req), B(req), { ip: faceIp(req) })));
   // Invites into an established room (#39): mint, revoke, preview (public), join by ticket.
   app.post("/v1/face-rooms/:id/invites", async (req, reply) => reply.status(201).send(platform.mintFaceRoomInvite(faceAuth(req), P(req).id, { ip: faceIp(req) })));
@@ -337,9 +341,18 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.delete("/v1/local-room-invites/:ticket/claims/:home", async (req, reply) => { platform.endLocalRoomInviteClaim(faceAuth(req), P(req).ticket, P(req).home); return reply.status(204).send(); });
   // Presence ("thinking"): owner login, connector token or the Bot's own token (a Bot token acts only as itself).
   app.put("/v1/presence", async (req) => platform.setPresence(faceAuth(req), B(req)));
-  app.get("/v1/presence", async (req) => platform.listPresence(faceAuth(req), { bot_id: Q(req).bot_id || undefined, room_id: Q(req).room_id || undefined }));
+  app.get("/v1/presence", async (req) => {
+    const p = faceAuth(req);
+    const botId = oneQ(Q(req).bot_id, "bot_id"), roomId = oneQ(Q(req).room_id, "room_id");
+    return platform.listPresence(p, { bot_id: botId || undefined, room_id: roomId || undefined });
+  });
   app.get("/v1/face-rooms", async (req) => platform.listFaceRooms(faceAuth(req)));
-  app.get("/v1/face-rooms/:id", async (req) => platform.getFaceRoom(faceAuth(req), P(req).id, { after: cursorQ(Q(req).after), as_bot: Q(req).as ?? Q(req).bot ?? Q(req).as_bot }));
+  app.get("/v1/face-rooms/:id", async (req) => {
+    const p = faceAuth(req);
+    const after = cursorQ(Q(req).after);
+    const as = oneQ(Q(req).as, "as"), bot = oneQ(Q(req).bot, "bot"), asBot = oneQ(Q(req).as_bot, "as_bot");
+    return platform.getFaceRoom(p, P(req).id, { after, as_bot: as ?? bot ?? asBot });
+  });
   app.post("/v1/face-rooms/:id/start", async (req) => platform.startFaceRoom(faceAuth(req), P(req).id));
   app.post("/v1/face-rooms/:id/leave", async (req) => platform.leaveFaceRoom(faceAuth(req), P(req).id, B(req)));
   // Room lead (FlyBot #476): only the room creator's owner token; roles: your own Bots' role labels.
