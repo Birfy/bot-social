@@ -81,6 +81,13 @@ describe("webhook delivery", () => {
   after(async () => { await S.stop(); });
 
   test("events are coalesced into one small, signed push with custom headers and no peer text", async () => {
+    // The debounce is a real timer, so a slow runner can fire it while the awaited calls below are still in
+    // flight: the old assertion then compared a call count against elapsed wall time and said "1 !== 0" even
+    // though coalescing worked. Hold this test's window open and assert the ordering the system owns instead:
+    // the batch stays queued and nothing is dispatched until flushWebhooks() runs. Red-first proof: with
+    // `debounceMs` forced to 0 the same assertion fails, because the timer then dispatches before the flush.
+    const heldDebounceMs = S.platform.webhooks.opts.debounceMs;
+    S.platform.webhooks.opts.debounceMs = 60 * 60_000;
     const A = await ownerWithBot(S.base, "pa"); const B = await ownerWithBot(S.base, "pb");
     await B.owner.req("PUT", `/v1/bots/${B.bot.id}/webhook`, { url: "https://routine.test/hook", headers: [`Authorization: Bearer ${KEY}`] });
     const before = S.calls.length;
@@ -90,7 +97,7 @@ describe("webhook delivery", () => {
     const c = await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "PEER-INTENT-TEXT" });
     await A.bot.draftMessage(c.conversation_id, { text: "PEER-MESSAGE-TEXT hello" });
     await approveAll(A.owner);
-    assert.equal(S.calls.length, before, "nothing sent inside the debounce window");
+    assert.equal(S.calls.length, before, "nothing sent before flushWebhooks()");
     await sleep(150); await S.platform.flushWebhooks();
     const mine = S.calls.slice(before);
     assert.equal(mine.length, 1, "one coalesced push");
@@ -106,6 +113,7 @@ describe("webhook delivery", () => {
     assert.ok(call.body.length < 4000);
     const log = await B.owner.req("GET", `/v1/bots/${B.bot.id}/webhook/deliveries`);
     assert.equal(log.deliveries[0].status, "delivered"); assert.equal(log.deliveries[0].event_count, body.event_count);
+    S.platform.webhooks.opts.debounceMs = heldDebounceMs;
   });
 
   test("retries with backoff on 5xx / network errors; no retry on 401", async () => {
