@@ -3133,6 +3133,13 @@ export class Platform {
       // `pending_owner` until its own 72h clock. `expireApproval` settles the same two rows for the same reason; the
       // guard keeps an invite the owner already approved (or one the Bot itself revoked) out of the sweep.
       if (a.kind === "invite") this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
+      // A Bot-created friend request waits at `pending_requester_owner` for this card, so settling only the card
+      // leaves the pair unreachable: no door decides a cancelled card, so only the 7-day TTL in `expireStale` would
+      // ever move the row, and every later request to the same peer answers `relationship_exists` until then — the
+      // stop locks the pair out for a week by itself. `expireApproval` settles the same row for the same reason; the
+      // guard keeps a request the owner already approved (or one a block/unfriend settled) out of the sweep, and
+      // `updated_at` is written so a row settled here has the same shape as one `expireStale` settles.
+      if (a.kind === "relationship_request") this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending_requester_owner'", nowIso(), a.subject_id);
       // A cancelled room line names its room, as its approved, rejected and expired decisions do: the Bot reads the
       // room off the event, and it can hold the same kind of line in more than one room.
       const roomId = a.kind === "face_room_message"
