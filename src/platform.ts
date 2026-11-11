@@ -4862,7 +4862,14 @@ export class Platform {
       const lineLive = !!self && !!this.get(`SELECT 1 FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ?
           AND capability = ? AND IFNULL(room_id,'') = ? AND status = 'active' AND created_at > ? LIMIT 1`,
         self.relationship_id, self.grantor_owner, self.grantee_bot, self.capability, self.room_id ?? "", self.created_at);
-      if (lineLive) continue;
+      if (lineLive) {
+        // This row lapsed and was renewed before any sweep ran: the renewal already told the peer Bot it holds the
+        // capability, so announcing this row's old expiry would say the opposite of the truth. Settlement is still
+        // written, silently, so a later sweep cannot announce the lapse once the live row it was renewed into ends.
+        if (!self.revoked_at) this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", self.expires_at, self.id);
+        continue;
+      }
+      this.announceLapsedShare(self);
       for (const id of this.shareLineage([g.id])) {
         if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
             AND (u.ended_at IS NULL OR EXISTS (SELECT 1 FROM face_room_members m
@@ -4873,6 +4880,28 @@ export class Platform {
     }
     if (ended.size) this.endGrantRooms([...ended], "platform", "expired");
   }
+
+  /**
+   * A share that lapsed on its own clock is written down exactly once, and this sweep is the only door that does
+   * it: lazy readers flip a lapsed row to `expired` in place and must stay silent, because a GET is not a decision.
+   * The mark that makes it once is the row's own `revoked_at`, so a second sweep, another door that sweeps, and a
+   * row a reader already flipped all end at the same single `grant.expired`. It carries the row's `expires_at`,
+   * the moment the access really ended, never the sweep's clock. The peer Bot is told with `grant.changed` /
+   * `status: "expired"` so the Bot it lost access to no longer vanishes from its remote list unexplained.
+   */
+  private announceLapsedShare(g: any) {
+    const when = g.expires_at ?? this.ts();
+    // One claim, so two sweeps racing on the same row cannot both announce it. A row a reader already settled has
+    // no `revoked_at` and is still announced here: settling the status is not settling the record.
+    const claim = this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", when, g.id);
+    if (!claim.changes) return;
+    const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+    this.audit.append("platform", "grant.expired", g.id, [r?.requester_owner, r?.target_owner], {
+      relationship_id: g.relationship_id, capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: this.grantedBotOf(g, r),
+    });
+    this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "expired" });
+  }
+
   private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (!room) throw new ApiError(404, "face_room_not_found", "no such room");
