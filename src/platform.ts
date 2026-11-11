@@ -3365,6 +3365,7 @@ export class Platform {
     // invite branch below: the card is cancelled and the owner is told what it was waiting on is gone.
     const messageGone = "the message this card was for was never written; this card can no longer be approved";
     const requestGone = "the request this card was for was never written; this card can no longer be approved";
+    const actionGone = "the action this card was for was never written; this card can no longer be approved";
     if (a.kind === "outbound_message" && !this.get("SELECT 1 FROM messages WHERE id = ?", a.subject_id)) {
       this.cancelPendingFor("id = ?", [a.id], "message_unavailable", { notify: true });
       throw new ApiError(409, "invalid_state", messageGone);
@@ -3372,6 +3373,15 @@ export class Platform {
     if (a.kind === "relationship_request" && !this.get("SELECT 1 FROM relationships WHERE id = ?", a.subject_id)) {
       this.cancelPendingFor("id = ?", [a.id], "relationship_unavailable", { notify: true });
       throw new ApiError(409, "invalid_state", requestGone);
+    }
+    // The same defence for an action card, and only on the approve side: `draftAction` writes the `actions` row and
+    // the card together, and a torn write an older build allowed can leave the card without its subject. Approving it
+    // fails inside `executeAction`, which reads that row unconditionally — a 500 that names nothing and leaves the
+    // card pending, so the owner's queue keeps offering a decision that cannot succeed. Rejecting such a card writes
+    // no action row, so that decision never needed the subject and stays available.
+    if (approve && a.kind === "action" && !this.get("SELECT 1 FROM actions WHERE id = ?", a.subject_id)) {
+      this.cancelPendingFor("id = ?", [a.id], "action_unavailable", { notify: true });
+      throw new ApiError(409, "invalid_state", actionGone);
     }
     let result: any = {};
     if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
