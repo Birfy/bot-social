@@ -1747,6 +1747,9 @@ export class Platform {
       // A missing id keeps its own message above; only a string goes on to SQL.
       assert(payload.from_bot_id === undefined || payload.from_bot_id === null || typeof payload.from_bot_id === "string", 400, "invalid_request", "from_bot_id must be a string");
       fromBot = this.ownBot(p.ownerId, payload.from_bot_id);
+      // The kill switch closes every door that names a Bot: a frozen or revoked sender is refused here, exactly as
+      // the invite doors refuse it, instead of asking a peer for a friendship that its own owner already stopped.
+      this.assertInvitable(fromBot);
     }
     assert(payload.target_handle || payload.target_bot_id, 400, "invalid_request", "target_handle or target_bot_id required");
     // The target bot id is the other value this route hands to SQL as it arrived; a non-string answered 500.
