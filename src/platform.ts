@@ -2641,6 +2641,7 @@ export class Platform {
         rows.push(this.get("SELECT * FROM relationships WHERE id = ?", id));
       }
       for (const row of rows) if (row.status !== "blocked") this.endRelationship(ownerId, row, "blocked");
+      this.releaseBlockedSeats(this.actorOf(p), other.id, mine.id);
       return { relationship_id: rows[0].id, status: "blocked" };
     }
     // The Block button (`public/ui.js`, `scripts/botctl.ts`) sends the friendship's `relationship_id`, and the
@@ -2649,7 +2650,40 @@ export class Platform {
     for (const row of this.pairRelationships(r.requester_bot, r.target_bot)) {
       if (row.status !== "blocked") this.endRelationship(ownerId, row, "blocked");
     }
+    this.releaseBlockedSeats(this.actorOf(p), r.requester_owner === ownerId ? r.target_bot : r.requester_bot, r.requester_owner === ownerId ? r.requester_bot : r.target_bot);
     return { relationship_id: r.id, status: "blocked" };
+  }
+
+  /**
+   * The seat a Block takes with it. The room's read door (`faceRequireMember`) and its message door
+   * (`deliverFaceRoomMessage`) only ask whether the caller still holds a seat, so a seat left behind kept the pair
+   * reading and writing each other in every room both were seated in, while the friendship itself read `blocked`.
+   * `endRelationship` gives a seat back only through `endGrantRooms`, and only when a share paid for it
+   * (`grantPaysForSeat`); the seat an owner takes for its own Bot belongs to no share and no relationship row
+   * carries it. The block is the moment the pair's door ends, so every live room the two Bots still share is
+   * swept with the two calls the room's own leave door makes: `removeFaceMember`, then `endRoomGrantsForBots`.
+   * Only the blocked Bot's seat ends: the owner who blocked keeps its own seat and the room, and no other seat in
+   * the room is touched. Undoing the block restores no seat — it is a seat, not a grant.
+   */
+  private releaseBlockedSeats(actor: string, blockedBot: string, peerBot: string) {
+    const shared = this.all(`SELECT DISTINCT m.room_id AS room_id FROM face_room_members m
+        JOIN face_room_members p ON p.room_id = m.room_id AND p.bot_id = ? AND p.left_at IS NULL
+        JOIN face_rooms r ON r.id = m.room_id AND r.status != 'closed'
+      WHERE m.bot_id = ? AND m.left_at IS NULL`, peerBot, blockedBot) as { room_id: string }[];
+    if (!shared.length) return;
+    const blockedOwner = this.bot(blockedBot).owner_id;
+    this.db.transaction(() => {
+      for (const { room_id } of shared) {
+        const member = this.get("SELECT * FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", room_id, blockedBot);
+        if (member) this.removeFaceMember(room_id, member, "room_closed");
+        this.endRoomGrantsForBots(room_id, [blockedBot]);
+      }
+    }).immediate();
+    // The seat ended by a block is written down where the leave door writes the same end: the room's audit trail
+    // names the Bot and the caller, so an operator reading the room sees who took the seat and not a silent exit.
+    for (const { room_id } of shared) {
+      this.audit.append(actor, "face_room.left", room_id, [...this.faceOwnerIds(room_id), blockedOwner], { bots: [blockedBot] });
+    }
   }
 
   listRelationships(p: Principal) {
