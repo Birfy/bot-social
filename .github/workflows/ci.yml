@@ -27,7 +27,10 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit -p .
       - name: Tests + coverage
-        run: npm run coverage 2>&1 | tee test-output.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run coverage 2>&1 | tee test-output.txt
       - name: Summary
         if: always()
         run: |
