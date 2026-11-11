@@ -3135,8 +3135,10 @@ export class Platform {
 
   /** Every door that ends a share settles the cards that share was holding: the lines a Bot already wrote toward the
    *  other side, and its drafts of actions there. Only a share that carried `chat.public` held any of them, a room
-   *  thread is the room's business, and an invite acceptance keeps its draft (the peer's answer outlives the chat). */
-  private settleCardsForEndedShare(grants: any[]) {
+   *  thread is the room's business, and an invite acceptance keeps its draft (the peer's answer outlives the chat).
+   *  The reason is the door's: a revoke or a decline takes the share back (`grant_revoked`), and a share that ran out
+   *  of time lapsed (`grant_expired`) — the owner's card and the drafting Bot read the word for what happened. */
+  private settleCardsForEndedShare(grants: any[], reason = "grant_revoked") {
     for (const g of grants) {
       if (g.capability !== "chat.public" || g.room_id) continue;
       const granted = this.grantedBotOf(g);
@@ -3148,7 +3150,7 @@ export class Platform {
              AND NOT EXISTS (SELECT 1 FROM grants rg WHERE rg.relationship_id = c.relationship_id AND rg.room_id IS NOT NULL)
              AND ((c.initiator_bot = ? AND c.peer_bot = ?) OR (c.initiator_bot = ? AND c.peer_bot = ?)))`,
         [g.grantee_bot, g.relationship_id, g.grantee_bot, granted, granted, g.grantee_bot],
-        "grant_revoked",
+        reason,
         {
           keep: { where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE action_type = 'calendar.accept_invite'))", args: [] },
           notify: true,
@@ -3397,12 +3399,14 @@ export class Platform {
       }
     }
     // #84 follow-up: a settled card stays as a record, never as a decision. Say why, so the owner is not left
-    // guessing at "approval is cancelled": a revoked sender and a revoked share have their own sentence, and so do
-    // the two ways the room settles a line (its sender walked out, or the room closed while it waited). A reason
-    // this build does not map, and a row that was decided rather than settled, keep the plain state.
+    // guessing at "approval is cancelled": a revoked sender and a revoked share have their own sentence, a share
+    // that ran out of time has another (a lapse is not a revoke), and so do the two ways the room settles a line
+    // (its sender walked out, or the room closed while it waited). A reason this build does not map, and a row that
+    // was decided rather than settled, keep the plain state.
     const revokedReason = "the sending Bot was revoked; this draft can no longer be approved";
     const recipientGoneReason = "the receiving Bot was revoked; this draft can no longer be approved";
     const shareGoneReason = "the share this draft was waiting on was revoked; this draft can no longer be approved";
+    const shareLapsedReason = "the share this draft was waiting on lapsed; this draft can no longer be approved";
     const leftRoomReason = "the Bot is no longer in the room this draft was for; this draft can no longer be approved";
     const closedRoomReason = "the room closed before this draft was decided; this draft can no longer be approved";
     if (a.status !== "pending") {
@@ -3410,6 +3414,7 @@ export class Platform {
       const sentence = known === "member_revoked" ? revokedReason
         : known === "recipient_revoked" ? recipientGoneReason
         : known === "grant_revoked" ? shareGoneReason
+        : known === "grant_expired" ? shareLapsedReason
         : known === "room_left" ? leftRoomReason
         : known === "room_closed" ? closedRoomReason
         : `approval is ${a.status}`;
@@ -4869,6 +4874,11 @@ export class Platform {
         if (!self.revoked_at) this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", self.expires_at, self.id);
         continue;
       }
+      // The cards this share was holding settle with the lapse, as they do on the revoke and decline doors: the
+      // owner must not keep a card that can never be approved, and the Bot that drafted it must hear why. The sweep
+      // is the lapse's own door, so it writes the lapse's word; a settled card is not pending, so a later sweep
+      // settles nothing again.
+      this.settleCardsForEndedShare([self], "grant_expired");
       this.announceLapsedShare(self);
       for (const id of this.shareLineage([g.id])) {
         if (this.get(`SELECT 1 FROM grant_rooms u WHERE u.grant_id = ?
