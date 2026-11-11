@@ -1766,6 +1766,14 @@ export class Platform {
     assert(!declined || Date.now() - Date.parse(declined.updated_at) > LIMITS.declineCooldownMs, 429, "decline_cooldown", "request was declined within the last 30 days");
     const requested = this.validCaps(payload.requested_capabilities ?? DEFAULT_CAPABILITIES);
     const offered = this.validCaps(payload.offered_capabilities ?? DEFAULT_CAPABILITIES);
+    // The message is outbound text another owner's Bot reads, so it takes the scan the message draft door runs;
+    // only a `block` finding refuses, with that door's 422 verbatim. The refusal is settled here, before the row,
+    // its audit line and its event exist — the owner's queue and the target Bot never hear of a request that was not
+    // written. Approve-class findings (an email, a phone number) never blocked a draft and do not block one here.
+    const blocked = this.dlp(fromBot.owner_id, { text: payload.message ?? "" }).filter((f) => f.action === "block");
+    if (blocked.length) {
+      throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
+    }
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
     const expires = new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString();
