@@ -5775,6 +5775,11 @@ export class Platform {
       assert(value === null || typeof value === "string", 400, "invalid_request", "a role is a string or null");
       changes.push([m.bot_id, value === null ? null : sanitizePeerName(value, "", FACE_ROOM_ROLE_MAX) || null]);
     }
+    // A label is read by every member of the room, so writing one is that Bot's own outbound act rather than room
+    // metadata any seated owner may set: a Bot that was stopped or removed is refused with the same answers every
+    // outbound door gives (#196), before a row is written. Without this its owner could keep renaming it in every
+    // other home's roster while the same Bot could no longer write a line there.
+    for (const [botId] of changes) this.assertInvitable(this.bot(botId));
     this.db.transaction(() => { for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId); }).immediate();
     return this.faceRoomView(roomId, viewer);
   }
