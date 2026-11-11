@@ -3,7 +3,10 @@
  * night — approved, rejected, or cancelled by the emergency stop — is no longer waiting, so naming it in the
  * morning summary asks the owner to review something the queue no longer holds. The summary therefore reads the
  * queue now: only cards whose approval is still pending are named, and only those ledger lines are marked
- * delivered. A settled card's line stays undelivered, which is the price of never deleting a ledger row.
+ * delivered. A card the owner decided during the night keeps its line undelivered, which is the price of never
+ * deleting a ledger row. One settlement is not silent, though: an expired card is announced by the sweep that expires
+ * it (`approval.decided`), because the batch only ever names cards that still wait and holding this one back would be
+ * silence for good — so its line is settled with it.
  *
  * The clock is the platform's (`nowMs`), and the owner's zone is UTC, so a fixed instant is a fixed wall time.
  */
@@ -127,7 +130,9 @@ test("a card that expired before the window ended is not named", async (t) => {
   assert.equal(row.status, "expired", "opening the queue runs the expiry sweep");
 
   assert.deepEqual(ofType(s, A.bot.id, "approval.digest"), [], "an expired card is not waiting, so there is nothing to summarise");
-  assert.equal(noteRow(s, stale.approval_id).delivered_at, null);
+  assert.ok(noteRow(s, stale.approval_id).delivered_at, "the outlet is told the card settled, so its ledger line is settled too");
+  const told = ofType(s, A.bot.id, "approval.decided").filter((e: any) => e.approval_id === stale.approval_id);
+  assert.equal(told.length, 1, "one decision, not two: here the outlet is also the Bot that drafted the card");
 });
 
 test("a settled card of the owner's other Bot is not named either", async (t) => {

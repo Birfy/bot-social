@@ -3183,6 +3183,9 @@ export class Platform {
 
   private expireApproval(a: any) {
     this.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ?", nowIso(), a.id);
+    // Which Bots this settlement already tells: the outlet may be one of them, and one Bot must hear one decision.
+    const told = new Set<string>();
+    const tell = (botId: string, data: Record<string, unknown>) => { told.add(botId); this.emit(botId, "approval.decided", data); };
     if (a.kind === "outbound_message") {
       this.run("UPDATE messages SET status = 'expired' WHERE id = ?", a.subject_id);
       // Same as a rejection: the line never went out, so the files it held are not "already sent".
@@ -3191,40 +3194,58 @@ export class Platform {
       if (m) {
         // An expired draft is settled like a rejected one (`rejectMessage`): the peer never sees it and is not told.
         // It never received the line, so there is nothing for it to act on, and its queue and webhook stay quiet.
-        this.emit(m.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
+        tell(m.sender_bot, { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
       }
     }
     if (a.kind === "action") {
       this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
-      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
+      tell(a.bot_id, { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
     }
     if (a.kind === "face_room_message") {
       this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
       const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
-      if (d) this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
+      if (d) tell(d.sender_bot, { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
     }
     if (a.kind === "grant_request") {
       // The request exists only as this approval: the grant row is created when the owner approves, so there is
       // nothing else to sweep. Without this branch the card simply left the owner's pending list and the Bot that
       // asked for the capability was never told; the peer owner is not the addressee (same as the invite, #104).
-      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
+      tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
     }
     if (a.kind === "invite") {
       // A Bot-created invite waits at status pending_owner for this approval. Expiring only the approval row left
       // the link stuck: decide answered 409, the joining side read 410 pending_owner, and the Bot heard nothing.
       // Only a still-waiting invite is expired, so an invite approved earlier is never flipped by a later sweep.
       this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
-      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
+      tell(a.bot_id, { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
     }
     if (a.kind === "relationship_request") {
       // The relationship row is the business object: `expireStale` flips it before working the approvals, so this
       // branch must not touch any row — it only tells the Bot that asked. Without it the card left the owner's list
       // and the Bot sat in "waiting for my owner" with nothing to read (same shape as #104's invite, P19's grant
       // request). The peer Bot is not the addressee: the requester's owner owns this decision.
-      this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
+      tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
     }
+    this.tellSettledCardToOutlet(a, told);
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
+  }
+
+  /** A card that waited through quiet hours and settled before the window ended was announced to nobody: the held batch
+   *  names only cards that still wait, so a delivery moment that will never name it is silence for good (a 4h card
+   *  inside a 9h night). A decision is not an announcement the window may postpone, so the outlet hears it once here.
+   *  The ledger line is settled in the same breath: a row that keeps saying "never delivered" for a card the outlet was
+   *  told about cannot be told apart from the defect this fixes. An owner who cleared the outlet, or whose outlet was
+   *  revoked, cannot be told at all; the line then stays undelivered as the record of the announcement never made. */
+  private tellSettledCardToOutlet(a: any, told: Set<string>) {
+    const held = this.get("SELECT bot_id FROM approval_notifications WHERE approval_id = ? AND delivered_at IS NULL", a.id);
+    if (!held) return;
+    const outletId = this.get("SELECT notify_bot_id FROM owners WHERE id = ?", a.owner_id)?.notify_bot_id;
+    if (!outletId) return;
+    const outlet = this.get("SELECT status FROM bots WHERE id = ?", outletId);
+    if (!outlet || outlet.status === "revoked") return;
+    if (!told.has(outletId)) this.emit(outletId, "approval.decided", { approval_id: a.id, kind: a.kind, decision: "expired" });
+    this.run("UPDATE approval_notifications SET delivered_at = ? WHERE approval_id = ? AND delivered_at IS NULL", nowIso(), a.id);
   }
 
   listApprovals(p: Principal, status = "pending") {
