@@ -2845,6 +2845,15 @@ export class Platform {
     if (live && !viaBot && i.auto_accept && !this.hasLiveGrant(inviter.owner_id, joiner.id, live.id)) return this.regrantViaInvite(i, live, inviter, joiner, payload);
     const blocking = existing.find((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status));
     assert(!blocking, 409, "relationship_exists", "you are already connected to this Bot (or a request is pending)", { relationship_id: blocking?.id });
+    // The join message is outbound text another owner's Bot reads, so it takes the scan the message draft door runs;
+    // only a `block` finding refuses, with that door's 422 verbatim. The refusal is settled here, before the row, its
+    // audit line and its event exist and before the invite spends a use — the inviter's queue and the target Bot never
+    // hear of a join that was not written. Approve-class findings (an email, a phone number) never blocked a draft and
+    // do not block one here. An auto-accept regrant above stores no message, so it keeps its own path.
+    const blocked = this.dlp(joiner.owner_id, { text: payload.message ?? "" }).filter((f) => f.action === "block");
+    if (blocked.length) {
+      throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
+    }
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
