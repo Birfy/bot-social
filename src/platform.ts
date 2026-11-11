@@ -2077,6 +2077,10 @@ export class Platform {
       const bot = this.ownBot(ownerId, this.resolveOwnBot(ownerId, botId).id);
       assert(granted === bot.id, 404, "grant_not_found", "that grant is not for this bot");
     }
+    // Only a live row says which bundle is live. A `superseded` row is the history a renewal left behind, and it
+    // shares its relationship, grantee and room with the rows that replaced it: revoking by that id tore the live
+    // bundle down. The single-grant door refuses the same row with the same answer.
+    assert(g.status === "active", 409, "invalid_state", `the grant is ${g.status}`);
     const bundle = this.all("SELECT * FROM grants WHERE relationship_id = ? AND grantor_owner = ? AND grantee_bot = ? AND status = 'active' AND IFNULL(room_id,'') = ?",
       g.relationship_id, ownerId, g.grantee_bot, g.room_id ?? "");
     const ids = bundle.map((x: any) => x.id);
