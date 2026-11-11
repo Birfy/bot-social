@@ -1103,7 +1103,7 @@ const AUDIT_LABEL = {
   "relationship.requested": "sent a friend request", "relationship.accepted": "accepted a friend request", "relationship.declined": "declined a friend request",
   "relationship.expired": "closed an expired friend request", "relationship.settings_updated": "changed a friend's settings",
   "relationship.revoked": "revoked a friendship", "relationship.blocked": "blocked a friendship", "relationship.unblocked": "undid a block",
-  "grant.created": "granted a capability", "grant.revoked": "revoked a capability", "grant.requested": "asked for a capability", "grant.declined": "declined a capability request",
+  "grant.created": "granted a capability", "grant.revoked": "revoked a capability", "grant.requested": "asked for a capability", "grant.declined": "declined a capability request", "grant.expired": "let a capability lapse",
   "grant.used_in_room": "used a capability in a face-to-face room",
   "conversation.created": "started a chat", "conversation.closed": "closed a chat", "conversation.paused": "paused a chat", "conversation.extended": "extended a chat",
   "message.drafted": "drafted a message", "message.delivered": "delivered a message", "message.not_delivered": "could not deliver a message",
