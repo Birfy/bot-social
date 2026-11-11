@@ -3982,6 +3982,15 @@ export class Platform {
       summary = body?.summary ?? null;
     }
     assert(["agreed", "declined", "abandoned"].includes(outcome), 400, "invalid_request", "outcome must be agreed|declined|abandoned");
+    // The closing summary is peer content: it lands in the other side's console and event queue, so a stopped or
+    // removed Bot must not write one. This door names no Bot, so the speaker is the chat's Bot that belongs to the
+    // closing owner. A self-chat (both Bots this owner's) is let through: its summary can only reach this owner's own
+    // Bots and console, and with no single speaker there is nothing to gate. The stopped side keeps its answers from
+    // `assertInvitable`: frozen says the Bot can be resumed, revoked says its identity is gone.
+    if (p.kind === "owner") {
+      const speaking = [c.initiator_bot, c.peer_bot].map((id) => this.bot(id)).filter((b) => b.owner_id === p.ownerId);
+      if (speaking.length === 1) this.assertInvitable(speaking[0]);
+    }
     // A chat whose own clock ran out is closed by the clock, never as agreed: settle the expiry first, through the one
     // path every other door into a lapsed chat takes, then refuse it as closed. The refused close contributes nothing
     // of its own — no outcome, no summary; the row lands `closed`/`expired` and the cards hanging off it died as
