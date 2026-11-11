@@ -3386,6 +3386,7 @@ export class Platform {
     const messageGone = "the message this card was for was never written; this card can no longer be approved";
     const requestGone = "the request this card was for was never written; this card can no longer be approved";
     const actionGone = "the action this card was for was never written; this card can no longer be approved";
+    const draftGone = "the draft this card was for was never written; this card can no longer be approved";
     if (a.kind === "outbound_message" && !this.get("SELECT 1 FROM messages WHERE id = ?", a.subject_id)) {
       this.cancelPendingFor("id = ?", [a.id], "message_unavailable", { notify: true });
       throw new ApiError(409, "invalid_state", messageGone);
@@ -3402,6 +3403,15 @@ export class Platform {
     if (approve && a.kind === "action" && !this.get("SELECT 1 FROM actions WHERE id = ?", a.subject_id)) {
       this.cancelPendingFor("id = ?", [a.id], "action_unavailable", { notify: true });
       throw new ApiError(409, "invalid_state", actionGone);
+    }
+    // The same defence for a room line, and on both decisions: `draftFaceRoomMessage` writes the draft and the card
+    // together, and a torn write an older build allowed can leave the card without its draft. Unlike the action card
+    // above, neither leg can settle this one without the row — approving reads it in `deliverFaceRoomMessage` and
+    // rejecting reads it in `rejectFaceRoomMessage` to mark it rejected — so both answered a 500 that names nothing
+    // and left the card pending. Settle it once, with the reason, and refuse instead.
+    if (a.kind === "face_room_message" && !this.get("SELECT 1 FROM face_room_drafts WHERE id = ?", a.subject_id)) {
+      this.cancelPendingFor("id = ?", [a.id], "draft_unavailable", { notify: true });
+      throw new ApiError(409, "invalid_state", draftGone);
     }
     let result: any = {};
     if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
