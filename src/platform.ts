@@ -5749,6 +5749,12 @@ export class Platform {
     const viewer = this.faceRequireMember(p, roomId);
     const room = this.faceRequireLead(p, roomId, "set the room note");
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    // The note speaks for the whole room, so writing it is the lead's outbound act rather than room metadata anyone
+    // seated may set: a lead that was stopped or removed is refused with the same answers every outbound door gives
+    // (#196), before the row is written. Without this the stop's own owner could still put text in front of every
+    // other owner in the room, while the same Bot's lines were refused as `bot_frozen`.
+    const lead = this.faceLeadOf(room).effective;
+    if (lead) this.assertInvitable(this.bot(lead.bot_id));
     const raw = body?.note;
     const note = typeof raw === "string" ? raw.trim() : "";
     assert(note.length >= 1 && note.length <= 500, 400, "invalid_note", "note must be 1-500 characters");
