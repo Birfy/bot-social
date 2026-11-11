@@ -82,6 +82,17 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
     if (!Number.isSafeInteger(n) || n < 0) throw new ApiError(400, "invalid_request", "after must be a non-negative integer");
     return n;
   };
+  /**
+   * A key that may carry one value. Fastify hands a repeated key over as an array, and a route that reads a single
+   * value out of it reads "not sent": `?end_claims=1&end_claims=1` compared an array against `"1"`, answered 204 and
+   * ended nothing, while `?subject=a&subject=b` bound the array to SQLite and answered 500. Anything that is not one
+   * string is refused here, before the route sees it; a key sent once behaves exactly as before, empty value included.
+   */
+  const oneQ = (raw: unknown, name: string): string | undefined => {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw === "string") return raw;
+    throw new ApiError(400, "invalid_request", `${name} must be sent once`);
+  };
   // The events cursor is not a page bound: a malformed `since` is answered with the first page, as before.
   const intQ = (raw: unknown, o: { fallback: number; min?: number; max?: number }) => {
     const s = typeof raw === "string" ? raw.trim() : "";
@@ -285,7 +296,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
 
   // ---- events & audit
   app.get("/v1/events", async (req) => platform.listEvents(auth(req), intQ(Q(req).since, { fallback: 0 }), limitQ(Q(req).limit, 100, 500)));
-  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: Q(req).subject, limit: limitQ(Q(req).limit, 1000) }));
+  app.get("/v1/audit-events", async (req) => platform.auditEvents(auth(req), { subject: oneQ(Q(req).subject, "subject"), limit: limitQ(Q(req).limit, 1000) }));
   // One week of face rooms, read-only: the caller's own seats decide the scope, the recap carries every field.
   app.get("/v1/digest", async (req) => platform.weekDigest(auth(req)));
 
@@ -318,8 +329,8 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/local-room-invites/:ticket/claim", async (req) => platform.claimLocalRoomInvite(faceAuth(req), P(req).ticket, B(req), { ip: faceIp(req) }));
   // `?end_claims=1` (the room is gone) also ends the reach of every home that joined; without it they keep their seats.
   app.delete("/v1/local-room-invites/:ticket", async (req, reply) => {
-    const q = (req.query ?? {}) as Record<string, unknown>;
-    platform.revokeLocalRoomInvite(faceAuth(req), P(req).ticket, { endClaims: q.end_claims === "1" || q.end_claims === "true" });
+    const endClaims = oneQ((req.query as Record<string, unknown> | undefined)?.end_claims, "end_claims");
+    platform.revokeLocalRoomInvite(faceAuth(req), P(req).ticket, { endClaims: endClaims === "1" || endClaims === "true" });
     return reply.status(204).send();
   });
   // The minting owner ends one home's claim (it removed that guest from the room).
