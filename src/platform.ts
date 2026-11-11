@@ -3943,6 +3943,15 @@ export class Platform {
     const c = this.conv(convId);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
     assert(owners.includes(ownerId), 403, "forbidden");
+    // Extend tells both Bots the pair may talk again under a platform-trusted resume, so the Bot it would revive must
+    // still be allowed to talk. A stopped (`frozen`) or removed (`revoked`) Bot cannot use its owner to pull its own
+    // paused chat back into service: `resumeBot` is the way back, and the peer never hears a resume that the platform
+    // would have to take away again. The door names no Bot, so the speaker is the chat's Bot that belongs to this
+    // owner. A self-chat (both Bots this owner's) is let through: with no single speaker there is nothing to gate, and
+    // its resume reaches only this owner's own Bots and console. The refused extend writes and announces nothing, so
+    // the row stays exactly as the stop left it.
+    const speaking = [c.initiator_bot, c.peer_bot].map((id) => this.bot(id)).filter((b) => b.owner_id === ownerId);
+    if (speaking.length === 1) this.assertInvitable(speaking[0]);
     // A chat whose clock ran out is closed, whatever the row still says: settle it here (a POST may write) and refuse
     // it before `resumeConversation` can flip it back to open, announce a resume or write an extend to the audit.
     this.materializeExpiry(c);
