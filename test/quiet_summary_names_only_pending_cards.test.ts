@@ -111,7 +111,9 @@ test("a card cancelled by the emergency stop is not named", async (t) => {
   await A.owner.req("GET", "/v1/approvals?status=pending");
 
   assert.deepEqual(ofType(s, A.bot.id, "approval.digest"), [], "a cancelled card is not waiting, so there is nothing to summarise");
-  assert.equal(noteRow(s, stopped.approval_id).delivered_at, null);
+  // The outlet is told a cancellation rather than left waiting for a summary that will never name the card, so the
+  // ledger line is settled with that announcement (the same rule #557 applies to an expired card).
+  assert.ok(noteRow(s, stopped.approval_id).delivered_at, "the outlet is told the card settled, so its ledger line is settled too");
 });
 
 test("a card that expired before the window ended is not named", async (t) => {

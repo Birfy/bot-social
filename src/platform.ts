@@ -3180,6 +3180,8 @@ export class Platform {
   }
 
   private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean } = {}) {
+    // Which Bots this sweep already tells: the outlet may be one of them, and one Bot must hear one decision.
+    const told = new Set<string>();
     // `keep` is one extra condition on the rows to cancel: a row it excludes (the caller spells that as a NOT) keeps
     // both its pending status and the side effect on its subject row, so the card stays decidable.
     const keepSql = opts.keep ? ` AND ${opts.keep.where}` : "";
@@ -3213,16 +3215,23 @@ export class Platform {
       // A cancelled card is not pending any more: the chat it was holding must stop saying it waits for one.
       if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
       // A cancelled card is never silent: the Bot that owned it hears the outcome and the reason it can show.
-      if (opts.notify && a.bot_id) this.emit(a.bot_id, "approval.decided", {
-        approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
-        ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
-        ...(roomId ? { room_id: roomId } : {}),
-        ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
-        ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
-        // These two kinds carry the relationship in subject_id; without it the Bot cannot tell which relationship
-        // the cancelled card belonged to (the expiry path in `expireApproval` already sends it).
-        ...(a.kind === "relationship_request" || a.kind === "grant_request" ? { relationship_id: a.subject_id } : {}),
-      });
+      if (opts.notify && a.bot_id) {
+        told.add(a.bot_id);
+        this.emit(a.bot_id, "approval.decided", {
+          approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
+          ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
+          ...(roomId ? { room_id: roomId } : {}),
+          ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
+          ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
+          // These two kinds carry the relationship in subject_id; without it the Bot cannot tell which relationship
+          // the cancelled card belonged to (the expiry path in `expireApproval` already sends it).
+          ...(a.kind === "relationship_request" || a.kind === "grant_request" ? { relationship_id: a.subject_id } : {}),
+        });
+      }
+      // The same settlement reaches the owner's designated outlet: quiet hours hold a card that still waits, and the
+      // batch only ever names cards that still wait, so a card cancelled in the night is silence for good. Only the
+      // call sites that opt into `notify` announce it; the silent ones keep their ledger line undelivered on purpose.
+      if (opts.notify) this.tellSettledCardToOutlet(a, told, "cancelled", reason);
     }
   }
 
@@ -3279,17 +3288,19 @@ export class Platform {
   /** A card that waited through quiet hours and settled before the window ended was announced to nobody: the held batch
    *  names only cards that still wait, so a delivery moment that will never name it is silence for good (a 4h card
    *  inside a 9h night). A decision is not an announcement the window may postpone, so the outlet hears it once here.
+   *  Both settlements that can take a waiting card out of the batch come through here: an expiry (`decision`
+   *  `expired`) and a cancellation (`decision` `cancelled`, with the same `reason` the drafting Bot reads).
    *  The ledger line is settled in the same breath: a row that keeps saying "never delivered" for a card the outlet was
    *  told about cannot be told apart from the defect this fixes. An owner who cleared the outlet, or whose outlet was
    *  revoked, cannot be told at all; the line then stays undelivered as the record of the announcement never made. */
-  private tellSettledCardToOutlet(a: any, told: Set<string>) {
+  private tellSettledCardToOutlet(a: any, told: Set<string>, decision = "expired", reason?: string) {
     const held = this.get("SELECT bot_id FROM approval_notifications WHERE approval_id = ? AND delivered_at IS NULL", a.id);
     if (!held) return;
     const outletId = this.get("SELECT notify_bot_id FROM owners WHERE id = ?", a.owner_id)?.notify_bot_id;
     if (!outletId) return;
     const outlet = this.get("SELECT status FROM bots WHERE id = ?", outletId);
     if (!outlet || outlet.status === "revoked") return;
-    if (!told.has(outletId)) this.emit(outletId, "approval.decided", { approval_id: a.id, kind: a.kind, decision: "expired" });
+    if (!told.has(outletId)) this.emit(outletId, "approval.decided", { approval_id: a.id, kind: a.kind, decision, ...(reason ? { reason } : {}) });
     this.run("UPDATE approval_notifications SET delivered_at = ? WHERE approval_id = ? AND delivered_at IS NULL", nowIso(), a.id);
   }
 
