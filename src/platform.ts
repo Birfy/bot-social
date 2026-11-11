@@ -1077,6 +1077,13 @@ export class Platform {
     }
     const avatar = has("avatar") ? validateAvatar(body.avatar) : undefined;
     const color = has("color") ? validateColor(body.color) : undefined;
+    // The name, the look and the one-line card are the face other homes read about this Bot, so editing them is
+    // its outward act even when the owner types it. A stopped or removed identity is refused here for the same
+    // reason the room line door refuses it, before the one transaction writes all four fields: clearing a field is
+    // a write as well, and the words already published stay on the peer's card until the owner resumes the Bot.
+    // The door keeps its own order — a body with no field, a non-string value or an over-long card is still the
+    // same 400 it was before this guard is reached.
+    this.assertInvitable(b);
     this.db.transaction(() => {
       if (name !== undefined) this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
       if (description !== undefined) this.run("UPDATE bots SET description = ? WHERE id = ?", description, b.id);
