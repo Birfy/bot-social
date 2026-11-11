@@ -13,6 +13,10 @@ import { friends, ownerWithBot, startServer } from "./helpers.js";
 // that is no longer there: `409 code_void` for the 6-digit door (the shape of a number whose room has gone) and
 // `404 invite_not_found` for the ticket doors (the shape of a ticket that is not there for the caller). The tests
 // produce that existing refusal and compare the blocked one against it field by field.
+//
+// A block also ends the blocked Bot's seat in every live room the pair still shares, so a leave written after the
+// block answers `404 face_room_not_found` instead of the old `200`: the seat it was written for is already gone,
+// and a re-join with the same number is refused exactly like the re-join of a pair that never re-entered.
 
 async function req(base: string, method: string, path: string, token?: string, body?: unknown) {
   const r = await fetch(base + path, {
@@ -94,7 +98,13 @@ test("P23 (b): a whole-pair block survives a leave and a re-join with the same c
   const blocked = await req(s.base, "POST", "/v1/blocks", tok(A), { bot_id: B.bot.id });
   assert.equal(blocked.body.status, "blocked");
 
-  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, tok(B), {})).status, 200);
+  // The block already handed back the seat this leave was written for, so the leave door answers the blocked Bot
+  // the way it answers any Bot that is not in the room: 404 `face_room_not_found`. The door under test below is
+  // the number door, with the seat already gone.
+  const left = await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, tok(B), {});
+  assert.equal(left.status, 404, JSON.stringify(left.body));
+  assert.equal(left.body.code, "face_room_not_found");
+  assert.equal(seats(s, roomId, B.bot.id), 0, "the block took the seat before the leave could end it");
 
   // The number the 6-digit door answers with `code_void`: a room whose window is over while its mapping is still
   // there. Produced here from a second room so the blocked re-join can be compared with the real refusal.
@@ -211,7 +221,10 @@ test("P23 (f): a blocked pair cannot re-enter the room through its ticket", asyn
   assert.equal((await send(s.base, B, B.bot.id, A.handle, "in by link", roomId)).body.message.status, "delivered");
 
   assert.equal((await req(s.base, "POST", "/v1/blocks", tok(A), { bot_id: B.bot.id })).body.status, "blocked");
-  assert.equal((await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, tok(B), {})).status, 200);
+  const left = await req(s.base, "POST", `/v1/face-rooms/${roomId}/leave`, tok(B), {});
+  assert.equal(left.status, 404, JSON.stringify(left.body));
+  assert.equal(left.body.code, "face_room_not_found");
+  assert.equal(seats(s, roomId, B.bot.id), 0, "the block took the seat before the leave could end it");
 
   // What the ticket door answers for a link that is not there: mint a second one and drop its row.
   const other = await req(s.base, "POST", `/v1/face-rooms/${roomId}/invites`, tok(A));
@@ -237,7 +250,7 @@ test("P23 (f): a blocked pair cannot re-enter the room through its ticket", asyn
   assert.equal((await received(s, A)).length, 1, "only the line sent before the block arrived");
 });
 
-test("P23 (g): a block closes the door, not the seat: a pair already in the room re-enters the same number", async (t) => {
+test("P23 (g): a block ends the blocked Bot's seat and the door, and the number is dead to it", async (t) => {
   const s = await startServer({ faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 200 } });
   t.after(s.stop);
   const { A, B } = await friends(s.base);
@@ -246,15 +259,17 @@ test("P23 (g): a block closes the door, not the seat: a pair already in the room
   custody(s, B);
 
   assert.equal((await req(s.base, "POST", "/v1/blocks", tok(A), { bot_id: B.bot.id })).body.status, "blocked");
-  assert.equal(seats(s, roomId, B.bot.id), 1, "the block does not throw the blocked Bot out of its seat");
+  // The seat goes with the block: the read and message doors only ask whether the caller still holds one, so a
+  // seat left behind was the door. The owner who blocked keeps its own seat and the room.
+  assert.equal(seats(s, roomId, B.bot.id), 0, "the block ends the blocked Bot's seat");
+  assert.equal(seats(s, roomId, A.bot.id), 1, "the owner who blocked keeps its seat");
 
-  // Re-entering with the same number while still seated is the ordinary retry the door answers 200: no seat is
-  // added, no message is sent, the room view comes back. Seats and local claims are #111's out of scope.
+  // With no seat, re-entering with the same number is the same refusal the number door gives a pair that never
+  // re-entered: `409 code_void`, nothing seated, nothing sent.
   const again = await req(s.base, "POST", "/v1/face-rooms/join", tok(B), { code: "797979", bots: [B.bot.id] });
-  assert.equal(again.status, 200, JSON.stringify(again.body));
-  assert.equal(again.body.room_id, roomId);
-  assert.equal(seats(s, roomId, B.bot.id), 1, "no second seat");
-  assert.equal(seats(s, roomId, A.bot.id), 1);
+  assert.equal(again.status, 409, JSON.stringify(again.body));
+  assert.equal(again.body.code, "code_void");
+  assert.equal(seats(s, roomId, B.bot.id), 0, "no seat is written by the refused re-join");
   assert.equal((await received(s, A)).length, 0, "re-entering sends nothing");
 
   // The door stays shut all the same.
