@@ -3356,18 +3356,24 @@ export class Platform {
     // a closed chat keeps (#105), so it still decides. This runs before the share guard below: settling the chat is
     // what closes it, and a card held in a chat that is already closed is the chat's business, not the share's.
     if (a.conversation_id) {
-      const c = this.conv(a.conversation_id);
-      const wasClosed = c.status === "closed";
-      this.materializeExpiry(c);
-      if (c.status === "closed") {
-        const keepsInvite = a.kind === "action" && this.get("SELECT 1 FROM actions WHERE id = ? AND action_type = 'calendar.accept_invite'", a.subject_id);
-        if (!keepsInvite) {
-          // A chat already closed before this line (a row an older build left pending) is settled here, once. When
-          // the clock just ran out, `materializeExpiry` above is what cancelled the card: nothing to repeat.
-          if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed", { notify: true });
-          throw new ApiError(409, "invalid_state", c.outcome === "expired"
-            ? "the conversation expired; this draft can no longer be approved"
-            : "the conversation is closed; this draft can no longer be approved");
+      // The chat is context, not the thing being decided: the line the card holds and the chat it was written in
+      // both hang off `messages`, so a pointer at a chat that is not there is a row a torn write left behind. Read
+      // it tolerantly and skip the closed-chat check rather than answering a `404 conversation_not_found` about a
+      // chat the owner never asked about, which left the card pending forever.
+      const c = this.get("SELECT * FROM conversations WHERE id = ?", a.conversation_id);
+      if (c) {
+        const wasClosed = c.status === "closed";
+        this.materializeExpiry(c);
+        if (c.status === "closed") {
+          const keepsInvite = a.kind === "action" && this.get("SELECT 1 FROM actions WHERE id = ? AND action_type = 'calendar.accept_invite'", a.subject_id);
+          if (!keepsInvite) {
+            // A chat already closed before this line (a row an older build left pending) is settled here, once. When
+            // the clock just ran out, `materializeExpiry` above is what cancelled the card: nothing to repeat.
+            if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed", { notify: true });
+            throw new ApiError(409, "invalid_state", c.outcome === "expired"
+              ? "the conversation expired; this draft can no longer be approved"
+              : "the conversation is closed; this draft can no longer be approved");
+          }
         }
       }
     }
@@ -3472,7 +3478,11 @@ export class Platform {
   }
 
   private refreshConversationStatus(convId: string) {
-    const c = this.conv(convId);
+    // A status refresh is housekeeping, never a reason to fail the settlement that asked for it: the kill switch and
+    // the clock both settle the card first and refresh the chat after, so a row whose pointer names a chat that is
+    // not there skips the refresh instead of rolling the whole stop back.
+    const c = this.get("SELECT * FROM conversations WHERE id = ?", convId);
+    if (!c) return;
     if (!["open", "awaiting_approval"].includes(c.status)) return;
     const pending = this.get("SELECT COUNT(*) n FROM approvals WHERE conversation_id = ? AND status = 'pending'", convId).n;
     const s = pending ? "awaiting_approval" : "open";
