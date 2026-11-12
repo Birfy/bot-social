@@ -204,6 +204,12 @@ export class Platform {
   /** Events written inside `atomically`, waiting for that write to commit before they reach the push queue (#511).
    *  The queue is memory, not a table, so an event row a rollback takes back must not leave a push behind. */
   private afterCommitPushes: { botId: string; ev: { event_id: string; type: string; created_at: string; data: Record<string, unknown> } }[] | null = null;
+  /** Audit rows written inside a platform transaction, waiting for that write to commit (#575).
+   *  The audit log is its own database (`src/audit.ts` opens it, not `openDb`), so a rollback here cannot take its
+   *  rows back: a `grant.created` row would keep naming a grant the store refused, and the append-only chain cannot
+   *  retract it. Same shape as `afterCommitPushes`: the outermost commit appends them in the order they were written,
+   *  a rollback drops that level's rows. */
+  private afterCommitAudits: { actor: string; action: string; subject: string | null; owners: (string | null | undefined)[]; data: unknown }[] | null = null;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
   /** GitHub OAuth (#76), decided once at startup. `enabled` is the constant every gate and the /ui meta read. */
@@ -221,6 +227,7 @@ export class Platform {
     this.authRateLimits = loadAuthRateLimits(opts.authRateLimit);
     this.authLimiter = new AuthRateLimiter(this.authRateLimits, () => this.nowMs());
     this.db = openDb(opts.dbPath ?? ":memory:");
+    this.deferAuditsToCommit();
     this.audit = new AuditLog(opts.auditPath ?? ":memory:");
     this.publicBaseUrl = opts.publicBaseUrl ?? "http://localhost:8787";
     this.kmsKey = opts.kmsKey ?? randomBytes(32);
@@ -228,7 +235,7 @@ export class Platform {
     this.webhooks = new WebhookPusher(this.db, this.fetchImpl, () => this.publicBaseUrl, opts.webhooks);
     this.oauth = oauthConfigFrom(process.env, opts.oauth);
     this.oauthProviderId = this.oauth.enabled ? GITHUB_PROVIDER.id : null;
-    this.audit.append("platform", "platform.started", null, [], { policy_version: POLICY_VERSION, platform_kid: this.platformKid, platform_public_key: this.platformKey.publicKey });
+    this.auditWrite("platform", "platform.started", null, [], { policy_version: POLICY_VERSION, platform_kid: this.platformKid, platform_public_key: this.platformKey.publicKey });
   }
   private ts() { return new Date(this.nowMs()).toISOString(); }
 
@@ -334,6 +341,45 @@ export class Platform {
     return { event_id: id, type, created_at, data };
   }
 
+  /** Append an audit row, or queue it when a platform transaction is open (#575). An audit row is the trail's claim
+   *  that a write happened, and the trail is append-only and hash-linked, so it cannot be corrected afterwards: a row
+   *  written inside a transaction that later rolls back would name a grant, a card or a room that is in no table, and
+   *  no compensating row could take that back. So inside a transaction it waits for the commit — "the write and its
+   *  audit row are one decision" — exactly as `emit` waits before pushing. */
+  private auditWrite(actor: string, action: string, subject: string | null, owners: (string | null | undefined)[], data: unknown = {}) {
+    if (this.afterCommitAudits) this.afterCommitAudits.push({ actor, action, subject, owners, data });
+    else this.audit.append(actor, action, subject, owners, data);
+  }
+
+  /** Run `fn` with one audit level of its own: a level that commits hands its rows to the level above it, so only the
+   *  outermost commit reaches `AuditLog.append` (in the order the rows were written, once each), and a rollback drops
+   *  every row written at its level and below. */
+  private withAuditLevel<T>(fn: () => T): T {
+    const outer = this.afterCommitAudits;
+    const queued: NonNullable<Platform["afterCommitAudits"]> = [];
+    this.afterCommitAudits = queued;
+    let out: T;
+    try { out = fn(); } catch (e) { this.afterCommitAudits = outer; throw e; }
+    this.afterCommitAudits = outer;
+    if (outer) outer.push(...queued);
+    else for (const a of queued) this.audit.append(a.actor, a.action, a.subject, a.owners, a.data);
+    return out;
+  }
+
+  /** Every platform write transaction opens through `this.db.transaction`; wrapping it once, here, is what lets an
+   *  audit row follow its commit without a guard in each gate — including the savepoint `db.transaction` becomes when
+   *  a gate opens one inside another. `src/audit.ts` is untouched: its class, schema and chain stay as they are. */
+  private deferAuditsToCommit() {
+    type Run = (...args: any[]) => unknown;
+    const raw = this.db.transaction.bind(this.db) as (fn: Run) => Run & { deferred: Run; immediate: Run; exclusive: Run };
+    const open = (fn: Run) => {
+      const txn = raw(fn);
+      const run = (mode: "deferred" | "immediate" | "exclusive") => (...args: any[]) => this.withAuditLevel(() => txn[mode](...args));
+      return Object.assign(run("deferred"), { deferred: run("deferred"), immediate: run("immediate"), exclusive: run("exclusive") });
+    };
+    (this.db as unknown as { transaction: typeof open }).transaction = open;
+  }
+
   private countersign(obj: Record<string, unknown>): string {
     return signString(this.platformKey.privateKeyPem, jcs(obj));
   }
@@ -362,7 +408,7 @@ export class Platform {
     const id = newId("own");
     this.run("INSERT INTO owners (id, username, display_name, password_hash, timezone, created_at) VALUES (?,?,?,?,?,?)",
       id, body.username, displayName, hashPassword(body.password), timezone, nowIso());
-    this.audit.append(`owner:${id}`, "owner.registered", id, [id], { username: body.username });
+    this.auditWrite(`owner:${id}`, "owner.registered", id, [id], { username: body.username });
     // The sign-up is not a failed attempt against the account it just created: a brand-new owner starts its window
     // with nothing spent, so the first wrong passwords after it are judged on their own count.
     this.authLimiter.forgiveAccount(body.username);
@@ -387,7 +433,7 @@ export class Platform {
     // hash against a fixed dummy, so its timing matches a known name with a wrong password.
     const ok = checkPassword(String(body?.password ?? ""), o?.password_hash ?? DUMMY_PASSWORD_HASH);
     if (!o || !ok) throw new ApiError(401, "invalid_credentials");
-    this.audit.append(`owner:${o.id}`, "owner.login", o.id, [o.id]);
+    this.auditWrite(`owner:${o.id}`, "owner.login", o.id, [o.id]);
     // The door accepted this name and its secret, so the failed attempts before it are not a reason to refuse the next
     // correct one. Only the account bucket is cleared: the address bucket keeps counting the burst (see forgiveAccount).
     this.authLimiter.forgiveAccount(body.username);
@@ -410,7 +456,7 @@ export class Platform {
       : undefined;
     assert(row && row.subject_id === ownerId, 401, "unauthorized", "invalid or revoked token");
     this.run("UPDATE tokens SET revoked_at = ? WHERE token_hash = ?", nowIso(), row.token_hash);
-    this.audit.append(`owner:${ownerId}`, "owner.logout", ownerId, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "owner.logout", ownerId, [ownerId], {});
     return { ok: true };
   }
 
@@ -447,7 +493,7 @@ export class Platform {
     const token = randomToken("otk");
     const attest = body?.attest_typed_by_owner === true ? 1 : 0;
     this.run("INSERT INTO tokens (token_hash, kind, subject_id, created_at, id, label, scope, attest_typed) VALUES (?,?,?,?,?,?,?,?)", hashToken(token), "owner", ownerId, nowIso(), id, label, "connector", attest);
-    this.audit.append(`owner:${ownerId}`, "connector_token.created", id, [ownerId], { label, attest_typed_by_owner: !!attest });
+    this.auditWrite(`owner:${ownerId}`, "connector_token.created", id, [ownerId], { label, attest_typed_by_owner: !!attest });
     return { token_id: id, label, token, attest_typed_by_owner: !!attest, ...this.connectorConfig(token) };
   }
 
@@ -472,7 +518,7 @@ export class Platform {
     const t = this.get("SELECT * FROM tokens WHERE id = ? AND kind='owner' AND scope='connector' AND subject_id = ?", tokenId, ownerId);
     assert(t, 404, "token_not_found");
     if (!t.revoked_at) this.run("UPDATE tokens SET revoked_at = ? WHERE id = ?", nowIso(), tokenId);
-    this.audit.append(`owner:${ownerId}`, "connector_token.revoked", tokenId, [ownerId], { label: t.label });
+    this.auditWrite(`owner:${ownerId}`, "connector_token.revoked", tokenId, [ownerId], { label: t.label });
     return { token_id: tokenId, status: "revoked" };
   }
 
@@ -555,14 +601,14 @@ export class Platform {
       const previousStatus = existing.status;
       this.run("UPDATE bots SET status = 'active', display_name = ? WHERE id = ?", peerDisplayName(body?.display_name, existing.display_name || handle), existing.id);
       this.applyLook(existing.id, look);
-      if (previousStatus !== "active") this.audit.append(`owner:${ownerId}`, "home.member_reactivated", existing.id, [ownerId], { home: home.id, from: previousStatus });
+      if (previousStatus !== "active") this.auditWrite(`owner:${ownerId}`, "home.member_reactivated", existing.id, [ownerId], { home: home.id, from: previousStatus });
       return { bot_id: existing.id, handle: "@" + handle, home: "@" + home.handle, status: "active", reactivated: true };
     }
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
     this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
     this.applyLook(bot.bot_id, look);
     this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
-    this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
+    this.auditWrite(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
     return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
   }
 
@@ -635,7 +681,7 @@ export class Platform {
       // seating new people in it. Owner-minted tickets (`created_by_bot IS NULL`) are not this identity's reach.
       revokedFaceInvites = this.run("UPDATE face_room_invites SET revoked_at = ? WHERE created_by_bot = ? AND revoked_at IS NULL", nowIso(), m.id).changes;
     })();
-    this.audit.append(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, revoked_face_invites: revokedFaceInvites, rooms_left: rooms.length, notify_outlet_cleared: clearedNotifyOutlet > 0 });
+    this.auditWrite(`owner:${ownerId}`, "home.member_revoked", m.id, [ownerId], { home: home.id, revoked_invites: revokedInvites, revoked_face_invites: revokedFaceInvites, rooms_left: rooms.length, notify_outlet_cleared: clearedNotifyOutlet > 0 });
     return { bot_id: m.id, handle: "@" + m.handle, status: "revoked" };
   }
 
@@ -854,7 +900,7 @@ export class Platform {
         id, ownerId, botId, check.name, check.mime, bytes.length, sha256, sealBytes(this.kmsKey, bytes, `attachment:${id}:${sha256}`), new Date(now).toISOString(), new Date(now + this.attachmentLimits.ttlMs).toISOString());
       return used + bytes.length;
     })();
-    this.audit.append(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
+    this.auditWrite(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
     return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: { ...this.attachmentLimits, used_bytes: usedBytes } };
   }
 
@@ -916,7 +962,7 @@ export class Platform {
     assert(Date.parse(row.expires_at) > Date.now(), 410, "attachment_expired", "attachment expired");
     const bytes = unsealBytes(this.kmsKey, row.sealed, `attachment:${row.id}:${row.sha256}`);
     assert(sha256Hex(bytes) === row.sha256, 500, "attachment_corrupt", "attachment hash mismatch");
-    this.audit.append("platform", "attachment.downloaded", row.id, [row.owner_id, this.bot(m.recipient_bot).owner_id], { message_id: m.id, sha256: row.sha256 });
+    this.auditWrite("platform", "attachment.downloaded", row.id, [row.owner_id, this.bot(m.recipient_bot).owner_id], { message_id: m.id, sha256: row.sha256 });
     return { attachment: refOf(row), message_id: m.id, from: this.publicBot(this.bot(m.sender_bot)), trust: "peer_untrusted", content_base64: bytes.toString("base64") };
   }
 
@@ -995,7 +1041,7 @@ export class Platform {
       mode = "rotated";
       this.storeCustody(b.id, kid, kp.privateKeyPem);
     }
-    this.audit.append(`owner:${ownerId}`, "bot.custody_enabled", b.id, [ownerId], { kid, mode });
+    this.auditWrite(`owner:${ownerId}`, "bot.custody_enabled", b.id, [ownerId], { kid, mode });
     return { bot_id: b.id, handle: "@" + b.handle, custodial: true, kid, mode, note: mode === "rotated" ? "new platform-held key added; existing keys (e.g. botctl) remain valid" : "uploaded key is now also held by the platform" };
   }
 
@@ -1006,7 +1052,7 @@ export class Platform {
     assert(c, 404, "not_custodial");
     this.run("DELETE FROM bot_custody WHERE bot_id = ?", b.id);
     if (c.kid.startsWith("cust_")) this.run("UPDATE bot_keys SET status = 'revoked', expires_at = ? WHERE bot_id = ? AND kid = ?", nowIso(), b.id, c.kid);
-    this.audit.append(`owner:${ownerId}`, "bot.custody_disabled", b.id, [ownerId], { kid: c.kid });
+    this.auditWrite(`owner:${ownerId}`, "bot.custody_disabled", b.id, [ownerId], { kid: c.kid });
     return { bot_id: b.id, custodial: false };
   }
 
@@ -1036,7 +1082,7 @@ export class Platform {
     this.run("UPDATE owners SET password_hash = ? WHERE id = ?", hashPassword(body.new_password), ownerId);
     // log out every web/login session; connector tokens stay (they are listed/revoked separately)
     this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'owner' AND subject_id = ? AND scope IS NULL AND revoked_at IS NULL", nowIso(), ownerId);
-    this.audit.append(`owner:${ownerId}`, "owner.password_changed", ownerId, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "owner.password_changed", ownerId, [ownerId], {});
     return { ok: true, note: "password changed; all login sessions were signed out (connector tokens unaffected)" };
   }
 
@@ -1088,7 +1134,7 @@ export class Platform {
       if (name !== undefined) this.run("UPDATE bots SET display_name = ? WHERE id = ?", name, b.id);
       if (description !== undefined) this.run("UPDATE bots SET description = ? WHERE id = ?", description, b.id);
       const changed = this.applyLook(b.id, { avatar, color });
-      this.audit.append(this.actorOf(p), "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...(description !== undefined ? { description: description === null ? "cleared" : "set" } : {}), ...changed });
+      this.auditWrite(this.actorOf(p), "bot.profile_updated", b.id, [ownerId], { ...(name !== undefined ? { display_name: name } : {}), ...(description !== undefined ? { description: description === null ? "cleared" : "set" } : {}), ...changed });
     })();
     return this.botCard(this.bot(b.id), true);
   }
@@ -1166,7 +1212,7 @@ export class Platform {
     // `fields` alone cannot tell a switch turned on from one turned off: both rows would read alike. Record the value
     // where the value is the point — the auto-approve flag, and how many sensitive words were set, never the words
     // themselves, which are the owner's secrets. Every other field stays a name only.
-    if (changed.length > 0) this.audit.append(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], {
+    if (changed.length > 0) this.auditWrite(`owner:${ownerId}`, "owner.settings_updated", ownerId, [ownerId], {
       fields: changed,
       ...(typeof body.auto_approve_face_rooms === "boolean" ? { auto_approve_face_rooms: body.auto_approve_face_rooms } : {}),
       ...(Array.isArray(body.sensitive_terms) ? { sensitive_terms: body.sensitive_terms.length } : {}),
@@ -1322,7 +1368,7 @@ export class Platform {
         this.db.transaction(() => {
           if (existing) this.run("UPDATE oauth_identities SET login = ? WHERE provider = ? AND subject = ?", profile.login, GITHUB_PROVIDER.id, profile.subject);
           else this.run("INSERT INTO oauth_identities (provider, subject, owner_id, login, created_at) VALUES (?,?,?,?,?)", GITHUB_PROVIDER.id, profile.subject, ownerId, profile.login, this.ts());
-          this.audit.append(`owner:${ownerId}`, "oauth.identity_linked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(profile.subject) });
+          this.auditWrite(`owner:${ownerId}`, "oauth.identity_linked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(profile.subject) });
         })();
       } catch {
         return { status: 302, location: "/ui#/login?oauth=identity_conflict", clearCookie };
@@ -1357,7 +1403,7 @@ export class Platform {
       const still = this.get("SELECT 1 AS ok FROM oauth_identities WHERE provider = ? AND owner_id = ?", row.provider, row.owner_id);
       if (!still) throw invalid();
       token = this.issueToken("owner", row.owner_id, "oauth:github");
-      this.audit.append(`owner:${row.owner_id}`, "oauth.signin", row.owner_id, [row.owner_id], { provider: row.provider });
+      this.auditWrite(`owner:${row.owner_id}`, "oauth.signin", row.owner_id, [row.owner_id], { provider: row.provider });
     })();
     return { owner_token: token };
   }
@@ -1399,7 +1445,7 @@ export class Platform {
       this.run("DELETE FROM oauth_identities WHERE provider = ? AND owner_id = ?", GITHUB_PROVIDER.id, ownerId);
       this.run("DELETE FROM oauth_states WHERE owner_id = ? AND provider = ?", ownerId, GITHUB_PROVIDER.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'owner' AND subject_id = ? AND via = 'oauth:github' AND revoked_at IS NULL", this.ts(), ownerId);
-      this.audit.append(`owner:${ownerId}`, "oauth.identity_unlinked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(String(identity!.subject)) });
+      this.auditWrite(`owner:${ownerId}`, "oauth.identity_unlinked", ownerId, [ownerId], { provider: GITHUB_PROVIDER.id, subject_fp: subjectFingerprint(String(identity!.subject)) });
     })();
   }
 
@@ -1443,7 +1489,7 @@ export class Platform {
     })();
     const botToken = this.issueToken("bot", id);
     const lookChanged = this.applyLook(id, look);
-    this.audit.append(`owner:${ownerId}`, "bot.registered", id, [ownerId], { handle, kid: key.kid, public_key: key.value, integration_type: body.integration_type || "rest", ...lookChanged });
+    this.auditWrite(`owner:${ownerId}`, "bot.registered", id, [ownerId], { handle, kid: key.kid, public_key: key.value, integration_type: body.integration_type || "rest", ...lookChanged });
     return {
       ...lookOf(this.bot(id)),
       bot_id: id, owner_id: ownerId, handle: "@" + handle, status: "active", bot_token: botToken, webhook_secret: webhookSecret,
@@ -1495,7 +1541,7 @@ export class Platform {
     this.run(`UPDATE bot_keys SET expires_at = ? WHERE bot_id = ? AND status = 'active' AND expires_at IS NULL
       AND kid NOT IN (SELECT kid FROM bot_custody WHERE bot_id = ?)`, until, botId, botId);
     this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", botId, body.kid, "Ed25519", body.value, nowIso());
-    this.audit.append(`owner:${ownerId}`, "bot.key_added", botId, [ownerId], { kid: body.kid, old_keys_expire_at: until });
+    this.auditWrite(`owner:${ownerId}`, "bot.key_added", botId, [ownerId], { kid: body.kid, old_keys_expire_at: until });
     return { bot_id: botId, kid: body.kid, status: "active" };
   }
 
@@ -1510,7 +1556,7 @@ export class Platform {
       "the platform signs this bot's owner-side sends with this key; move custody to a new key first (enable_custody, rotate), then revoke this one");
     const r = this.run("UPDATE bot_keys SET status = 'revoked' WHERE bot_id = ? AND kid = ?", botId, kid);
     assert(r.changes, 404, "key_not_found");
-    this.audit.append(`owner:${ownerId}`, "bot.key_revoked", botId, [ownerId], { kid });
+    this.auditWrite(`owner:${ownerId}`, "bot.key_revoked", botId, [ownerId], { kid });
     return { bot_id: botId, kid, status: "revoked" };
   }
 
@@ -1549,13 +1595,13 @@ export class Platform {
     const url = validateUrl(rawUrl);
     const headers = body?.headers === undefined ? J(b.webhook_headers, []) : validateHeaders(body.headers ?? []);
     this.run("UPDATE bots SET webhook_url = ?, webhook_headers = ?, webhook_updated_at = ? WHERE id = ?", url, JSON.stringify(headers), nowIso(), botId);
-    this.audit.append(this.actorOf(p), "bot.webhook_set", botId, [b.owner_id], { url: redactUrl(url), header_names: headers.map((h: any) => h.name) });
+    this.auditWrite(this.actorOf(p), "bot.webhook_set", botId, [b.owner_id], { url: redactUrl(url), header_names: headers.map((h: any) => h.name) });
     return this.webhookView(botId);
   }
   clearWebhook(p: Principal, botId: string) {
     const b = this.webhookBot(p, botId);
     this.run("UPDATE bots SET webhook_url = NULL, webhook_headers = '[]', webhook_updated_at = ? WHERE id = ?", nowIso(), botId);
-    this.audit.append(this.actorOf(p), "bot.webhook_cleared", botId, [b.owner_id], {});
+    this.auditWrite(this.actorOf(p), "bot.webhook_cleared", botId, [b.owner_id], {});
     return this.webhookView(botId);
   }
   /** The test push is the one webhook write that appends its row after an await, so it takes its actor from the
@@ -1565,7 +1611,7 @@ export class Platform {
     assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     assert(b.webhook_url, 409, "no_webhook", "no webhook configured");
     const d = await this.webhooks.test(botId);
-    this.audit.append(this.actorOf(p), "bot.webhook_tested", botId, [b.owner_id], { delivery_id: d.delivery_id, status: d.status, response_status: d.response_status });
+    this.auditWrite(this.actorOf(p), "bot.webhook_tested", botId, [b.owner_id], { delivery_id: d.delivery_id, status: d.status, response_status: d.response_status });
     return d;
   }
   webhookDeliveries(p: Principal, botId: string, limit = 30) { this.webhookBot(p, botId); return { deliveries: this.webhooks.deliveries(botId, Math.min(limit, 200)) }; }
@@ -1594,7 +1640,7 @@ export class Platform {
       // not make the owner hang it again), so this is a state check, not a URL change.
       this.webhooks.drop(b.id, "frozen");
     })();
-    this.audit.append(`owner:${ownerId}`, "bot.emergency_stop", b.id, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "bot.emergency_stop", b.id, [ownerId], {});
     return { bot_id: b.id, status: "frozen", tokens_revoked: true };
   }
 
@@ -1607,7 +1653,7 @@ export class Platform {
     assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.run("UPDATE bots SET status = 'active' WHERE id = ?", b.id);
     const token = this.issueToken("bot", b.id);
-    this.audit.append(`owner:${ownerId}`, "bot.resumed", b.id, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "bot.resumed", b.id, [ownerId], {});
     return { bot_id: b.id, status: "active", bot_token: token };
   }
 
@@ -1620,7 +1666,7 @@ export class Platform {
     assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
     const token = this.issueToken("bot", b.id);
-    this.audit.append(`owner:${ownerId}`, "bot.token_rotated", b.id, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "bot.token_rotated", b.id, [ownerId], {});
     return { bot_id: b.id, bot_token: token };
   }
 
@@ -1629,7 +1675,7 @@ export class Platform {
   verifyEnvelope(p: Principal, env: Envelope, expectedType: string): Envelope {
     const { botId, ownerId } = this.requireBot(p);
     const reject = (status: number, code: string, msg: string): never => {
-      this.audit.append(`bot:${botId}`, "signature.rejected", botId, [ownerId], { code, reason: msg, type: env?.type, envelope_id: env?.id });
+      this.auditWrite(`bot:${botId}`, "signature.rejected", botId, [ownerId], { code, reason: msg, type: env?.type, envelope_id: env?.id });
       throw new ApiError(status, code, msg);
     };
     if (!env || typeof env !== "object" || env.v !== "botsocial/1.0" || !env.sig || !env.id || !env.nonce || !env.ts) reject(400, "invalid_envelope", "request body must be a signed botsocial/1.0 envelope");
@@ -1667,7 +1713,7 @@ export class Platform {
       // no event) before the approval sweep below could see it, so the real-world path stayed silent. The
       // relationship row above is already terminal, so a reader reacting to the event sees the end state.
       for (const a of this.all("SELECT * FROM approvals WHERE subject_id = ? AND status = 'pending'", r.id)) this.expireApproval(a);
-      this.audit.append("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
+      this.auditWrite("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
       this.releaseInviteUse(r.id);
     }
     for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
@@ -1681,7 +1727,7 @@ export class Platform {
   activeRelationship(a: string, b: string) {
     const rel = this.findActiveRelationship(a, b);
     if (!rel) {
-      this.audit.append(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
+      this.auditWrite(`bot:${a}`, "policy.denied", b, [this.bot(a).owner_id], { code: "no_relationship" });
       throw new ApiError(403, "no_relationship", "no active relationship between these bots");
     }
     // Revoking a FlyBot home member keeps the relationship rows (so re-adding the same handle can restore
@@ -1789,7 +1835,7 @@ export class Platform {
     const expires = new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString();
     this.run(`INSERT INTO relationships (id, requester_bot, target_bot, requester_owner, target_owner, status, message, requested_caps, offered_caps, created_at, updated_at, expires_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, id, fromBot.id, target.id, fromBot.owner_id, target.owner_id, status, payload.message ?? null, JSON.stringify(requested), JSON.stringify(offered), nowIso(), nowIso(), expires);
-    this.audit.append(viaBot ? `bot:${fromBot.id}` : `owner:${fromBot.owner_id}`, "relationship.requested", id, [fromBot.owner_id, target.owner_id], { from: fromBot.id, to: target.id, status, requested, offered });
+    this.auditWrite(viaBot ? `bot:${fromBot.id}` : `owner:${fromBot.owner_id}`, "relationship.requested", id, [fromBot.owner_id, target.owner_id], { from: fromBot.id, to: target.id, status, requested, offered });
     let approval_id: string | undefined;
     if (viaBot) {
       approval_id = this.createApproval(fromBot.owner_id, "relationship_request", id, fromBot.id, null, `Your bot wants to send a friend request to @${target.handle}`, ["relationship.requires_owner"], [], LIMITS.relationshipRequestTtlMs);
@@ -1840,7 +1886,7 @@ export class Platform {
       // A declined join never became a friendship: give the invite slot back, exactly as `expireStale` and a
       // rejected approval do, so a 1-use link does not read "used" while no relationship exists (P9).
       this.releaseInviteUse(relId);
-      this.audit.append(`owner:${ownerId}`, "relationship.declined", relId, [r.requester_owner, r.target_owner], {});
+      this.auditWrite(`owner:${ownerId}`, "relationship.declined", relId, [r.requester_owner, r.target_owner], {});
       this.emit(r.requester_bot, "relationship.changed", { relationship_id: relId, status: "declined" });
       return { relationship_id: relId, status: "declined" };
     }
@@ -1884,7 +1930,7 @@ export class Platform {
   /** Runs only after writeActivation committed. Both Bots' `relationship.changed` carries the grants already written
    *  (`grants_ready: true`), so a home can record them before it handles the first message (FlyBot #442). */
   private announceActivation(r: any, targetSpecs: { capability: string }[], actor: string) {
-    this.audit.append(actor, "relationship.accepted", r.id, [r.requester_owner, r.target_owner], { granted_to_requester: targetSpecs.map((s) => s.capability) });
+    this.auditWrite(actor, "relationship.accepted", r.id, [r.requester_owner, r.target_owner], { granted_to_requester: targetSpecs.map((s) => s.capability) });
     const grants = this.grantSummary(r.id);
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status: "active", grants_ready: true, grants });
   }
@@ -1936,7 +1982,7 @@ export class Platform {
     this.run("INSERT INTO grants (id, relationship_id, grantor_owner, grantee_bot, capability, scope, created_at, expires_at, room_id, reply_only) VALUES (?,?,?,?,?,?,?,?,?,?)",
       id, relId, grantorOwner, granteeBot, cap, JSON.stringify(sc), nowIso(), exp, extra.roomId ?? null, replyOnly ? 1 : 0);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
-    this.audit.append(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: sc, expires_at: exp, room_id: extra.roomId ?? null, ...(replyOnly ? { reply_only: true } : {}) });
+    this.auditWrite(actor, "grant.created", id, [r.requester_owner, r.target_owner], { relationship_id: relId, grantor_owner: grantorOwner, grantee_bot: granteeBot, capability: cap, scope: sc, expires_at: exp, room_id: extra.roomId ?? null, ...(replyOnly ? { reply_only: true } : {}) });
     return id;
   }
 
@@ -2057,7 +2103,7 @@ export class Platform {
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
     this.endGrantRooms(this.shareLineage([grantId]), `owner:${ownerId}`);
     this.settleCardsForEndedShare([g]);
-    this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
+    this.auditWrite(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked" });
     return { grant_id: grantId, status: "revoked" };
   }
@@ -2088,7 +2134,7 @@ export class Platform {
     for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
-    this.audit.append(this.actorOf(p), "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
+    this.auditWrite(this.actorOf(p), "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
     });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked", granted_bot: granted });
@@ -2127,7 +2173,7 @@ export class Platform {
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
     this.settleCardsForEndedShare(bundle);
-    this.audit.append(this.actorOf(p), "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
+    this.auditWrite(this.actorOf(p), "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
     });
     for (const b of new Set([granted, g.grantee_bot].filter(Boolean))) {
@@ -2247,7 +2293,7 @@ export class Platform {
       }
     })();
 
-    this.audit.append(actor, "grant.created", rel.id, [ownerId, friendOwnerId], {
+    this.auditWrite(actor, "grant.created", rel.id, [ownerId, friendOwnerId], {
       relationship_id: rel.id, granted_bot: bot.id, grantee_bot: friendBot, friend_owner_id: friendOwnerId, via: "grant_bot_to_friend", created_relationship: createdRel,
     });
     for (const b of [bot.id, friendBot]) {
@@ -2424,7 +2470,7 @@ export class Platform {
     if (existing && !existing.ended_at) return;
     if (existing) this.run("UPDATE grant_rooms SET ended_at = NULL, created_at = ? WHERE grant_id = ? AND room_id = ?", nowIso(), grantId, roomId);
     else this.run("INSERT INTO grant_rooms (grant_id, room_id, created_at) VALUES (?,?,?)", grantId, roomId, nowIso());
-    this.audit.append(actor, "grant.used_in_room", grantId, owners, { room_id: roomId });
+    this.auditWrite(actor, "grant.used_in_room", grantId, owners, { room_id: roomId });
   }
 
   /** The rows a share was renewed from: `insertGrant` marks the live row `superseded` and writes a new one, and the
@@ -2562,7 +2608,7 @@ export class Platform {
     const peerOwner = r.requester_bot === botId ? r.target_owner : r.requester_owner;
     const aprId = this.createApproval(peerOwner, "grant_request", r.id, botId, null, `@${this.bot(botId).handle} requests capability ${pl.capability}`, ["grant.requires_owner"], [], LIMITS.approvalTtlMs,
       { capability: pl.capability, scope: pl.scope ?? {}, reason: pl.reason ?? null, grantee_bot: botId });
-    this.audit.append(`bot:${botId}`, "grant.requested", r.id, [ownerId, peerOwner], { capability: pl.capability, scope: pl.scope ?? {}, approval_id: aprId });
+    this.auditWrite(`bot:${botId}`, "grant.requested", r.id, [ownerId, peerOwner], { capability: pl.capability, scope: pl.scope ?? {}, approval_id: aprId });
     return { status: "pending_owner_approval", approval_id: aprId };
   }
 
@@ -2586,7 +2632,7 @@ export class Platform {
       if (r.status === "pending_target" || r.status === "pending_requester_owner") this.releaseInviteUse(r.id);
     })();
     if (endedShares.length) this.endGrantRooms(this.shareLineage(endedShares), `owner:${ownerId}`);
-    this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
+    this.auditWrite(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status });
   }
 
@@ -2618,7 +2664,7 @@ export class Platform {
     this.db.transaction(() => {
       for (const row of rows) this.run("UPDATE relationships SET status = 'revoked', blocked_by = NULL WHERE id = ?", row.id);
     })();
-    this.audit.append(`owner:${ownerId}`, "relationship.unblocked", r.id, [r.requester_owner, r.target_owner], { relationship_ids: rows.map((x) => x.id), rows: rows.length });
+    this.auditWrite(`owner:${ownerId}`, "relationship.unblocked", r.id, [r.requester_owner, r.target_owner], { relationship_ids: rows.map((x) => x.id), rows: rows.length });
     for (const botId of new Set(rows.flatMap((x) => [x.requester_bot, x.target_bot]))) this.emit(botId as string, "relationship.changed", { relationship_id: r.id, status: "revoked" });
     return { relationship_id: relId, status: "revoked" };
   }
@@ -2693,7 +2739,7 @@ export class Platform {
     // The seat ended by a block is written down where the leave door writes the same end: the room's audit trail
     // names the Bot and the caller, so an operator reading the room sees who took the seat and not a silent exit.
     for (const { room_id } of shared) {
-      this.audit.append(actor, "face_room.left", room_id, [...this.faceOwnerIds(room_id), blockedOwner], { bots: [blockedBot] });
+      this.auditWrite(actor, "face_room.left", room_id, [...this.faceOwnerIds(room_id), blockedOwner], { bots: [blockedBot] });
     }
   }
 
@@ -2733,7 +2779,7 @@ export class Platform {
     assert(typeof body?.auto_approve_chat === "boolean", 400, "invalid_request", "auto_approve_chat (boolean) required");
     this.run(`INSERT INTO relationship_settings (relationship_id, owner_id, auto_approve_chat, updated_at) VALUES (?,?,?,?)
       ON CONFLICT(relationship_id, owner_id) DO UPDATE SET auto_approve_chat = excluded.auto_approve_chat, updated_at = excluded.updated_at`, relId, ownerId, body.auto_approve_chat ? 1 : 0, nowIso());
-    this.audit.append(`owner:${ownerId}`, "relationship.settings_updated", relId, [r.requester_owner, r.target_owner], { auto_approve_chat: body.auto_approve_chat });
+    this.auditWrite(`owner:${ownerId}`, "relationship.settings_updated", relId, [r.requester_owner, r.target_owner], { auto_approve_chat: body.auto_approve_chat });
     return { relationship_id: relId, settings: this.settingsFor(relId, ownerId) };
   }
 
@@ -2819,7 +2865,7 @@ export class Platform {
       new Date(Date.now() + hours * 3600e3).toISOString(), nowIso(), scope);
     let approval_id: string | undefined;
     if (viaBot) approval_id = this.createApproval(bot.owner_id, "invite", id, bot.id, null, `Your bot wants to create a friend invite link (grants to the joiner: ${offered.join(", ")})`, ["invite.requires_owner"], [], LIMITS.approvalTtlMs);
-    this.audit.append(viaBot ? `bot:${bot.id}` : `owner:${bot.owner_id}`, "invite.created", id, [bot.owner_id], { offered, requested, max_uses: maxUses, status });
+    this.auditWrite(viaBot ? `bot:${bot.id}` : `owner:${bot.owner_id}`, "invite.created", id, [bot.owner_id], { offered, requested, max_uses: maxUses, status });
     return { ...this.inviteView(this.get("SELECT * FROM invites WHERE id = ?", id)), approval_id };
   }
 
@@ -2837,7 +2883,7 @@ export class Platform {
     // Approve that can no longer mean anything (the decision path refuses a revoked invite). Same shape as the
     // other revokes: the record stays, settled, with the reason, and the Bot that asked hears it.
     this.cancelPendingFor("kind = 'invite' AND subject_id = ?", [i.id], "invite_revoked", { notify: true });
-    this.audit.append(`owner:${ownerId}`, "invite.revoked", i.id, [ownerId], {});
+    this.auditWrite(`owner:${ownerId}`, "invite.revoked", i.id, [ownerId], {});
     return { invite_id: i.id, status: "revoked" };
   }
 
@@ -2914,7 +2960,7 @@ export class Platform {
       this.run("UPDATE invites SET uses = uses + 1 WHERE id = ?", i.id);
       return viaBot ? null : this.autoAcceptSpecs(id);
     })();
-    this.audit.append(viaBot ? `bot:${joiner.id}` : `owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: id, offered });
+    this.auditWrite(viaBot ? `bot:${joiner.id}` : `owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: id, offered });
     let approval_id: string | undefined;
     if (viaBot) approval_id = this.createApproval(joiner.owner_id, "relationship_request", id, joiner.id, null, `Your bot wants to befriend @${inviter.handle} via invite (you grant: ${offered.join(", ")})`, ["relationship.requires_owner", "invite"], [], LIMITS.relationshipRequestTtlMs);
     else if (autoAccept) this.announceActivation(this.get("SELECT * FROM relationships WHERE id = ?", id), autoAccept.specs, autoAccept.actor);
@@ -2950,7 +2996,7 @@ export class Platform {
         if (!this.findGrant(joiner.owner_id, inviter.id, c, joiner.id)) this.insertGrant(rel.id, joiner.owner_id, inviter.id, c, c === "calendar.freebusy.read" ? fbScope : {}, undefined, `owner:${joiner.owner_id}`, { replyOnly: true });
       }
     })();
-    this.audit.append(`owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: rel.id, regrant: true, offered });
+    this.auditWrite(`owner:${joiner.owner_id}`, "invite.joined", i.id, [joiner.owner_id, inviter.owner_id], { relationship_id: rel.id, regrant: true, offered });
     for (const b of [inviter.id, joiner.id]) this.emit(b, "grant.changed", { relationship_id: rel.id, status: "granted", granted_bot: inviter.id, grantee_bot: joiner.id });
     return { relationship_id: rel.id, status: "active", approval_id: undefined, inviter: this.publicBot(inviter), joined_as: { bot_id: joiner.id, handle: "@" + joiner.handle }, awaiting: null, regranted: true };
   }
@@ -3284,7 +3330,7 @@ export class Platform {
     }
     this.tellSettledCardToOutlet(a, told);
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
-    this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
+    this.auditWrite("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
   }
 
   /** A card that waited through quiet hours and settled before the window ended was announced to nobody: the held batch
@@ -3547,7 +3593,7 @@ export class Platform {
     }
     this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
     const flags = J(a.risk_flags, []);
-    this.audit.append(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
+    this.auditWrite(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
     return { approval_id: a.id, decision, ...result };
   }
@@ -3598,7 +3644,7 @@ export class Platform {
     // A card the clock cancelled carries its own reason (`conversation_expired`, next to the manual close's
     // `conversation_closed`), and `notify` tells the Bot that owned it why it died.
     this.cancelPendingFor("conversation_id = ?", [c.id], "conversation_expired", { keep: this.acceptInviteCardOf(c.id), notify: true });
-    this.audit.append("platform", "conversation.closed", c.id, owners, { outcome: "expired" });
+    this.auditWrite("platform", "conversation.closed", c.id, owners, { outcome: "expired" });
     // No peer wrote anything on this path, so the line is the platform's own and carries no untrusted_content.
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: c.id, outcome: "expired", trust: "platform", summary: null });
   }
@@ -3626,6 +3672,9 @@ export class Platform {
   }
 
   private policyDecision(actor: string, convId: string | null, owners: string[], action: string, decision: string, reasons: string[], extra: Record<string, unknown> = {}) {
+    // A decision row records what the platform decided about an attempt, not a row it wrote: it is true whether or not
+    // the write it gated survives, and a refusal that left nothing behind is exactly when the owner still needs to read
+    // why. So it is appended at the moment it is made — unchanged — and not deferred to a commit it does not describe.
     this.audit.append(`bot:${actor}`, "policy.decision", convId, owners, { action, decision, reasons, policy_version: POLICY_VERSION, ...extra });
   }
 
@@ -3697,7 +3746,7 @@ export class Platform {
     /** The allow decision, the audit entry and the peer's push, written once the conversation is really stored. */
     const announce = () => {
       this.policyDecision(botId, id, [ownerId, peer.owner_id], "conversation.create", "allow", [roomRel ? "room.context" : "relationship.active", "intent.allowed"]);
-      this.audit.append(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
+      this.auditWrite(`bot:${botId}`, "conversation.created", id, [ownerId, peer.owner_id], { peer: peer.id, intent, envelope_id: env.id, sig: env.sig });
       this.webhooks.enqueue(peer.id, started);
     };
     return { conversation, announce };
@@ -3817,8 +3866,8 @@ export class Platform {
       this.policyDecision(botId, convId, owners, "message.draft", "allow", ["owner.typed_by_owner", "dlp.clean"], { message_id: id, typed_by_owner: true });
       // The owner's audit page shows why this line needed no approval: the owner wrote it. Actor is the owner, not
       // the Bot (`message.drafted` stays `bot:<id>` for every card).
-      this.audit.append(`owner:${ownerId}`, "owner_typed_message_delivered", id, owners, { conversation_id: convId, recipient_bot: peer, dlp_version: POLICY_VERSION, text_length: pl.text.length });
-      this.audit.append("platform", "message.delivered", id, owners, { conversation_id: convId, turn: c.turn_count + 1, edited: false, injection_suspected: false, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig, typed_by_owner: true });
+      this.auditWrite(`owner:${ownerId}`, "owner_typed_message_delivered", id, owners, { conversation_id: convId, recipient_bot: peer, dlp_version: POLICY_VERSION, text_length: pl.text.length });
+      this.auditWrite("platform", "message.delivered", id, owners, { conversation_id: convId, turn: c.turn_count + 1, edited: false, injection_suspected: false, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig, typed_by_owner: true });
       return { message_id: id, status: "delivered", approval_id: undefined, typed_by_owner: true, ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.typed_by_owner", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
     // The card and the row it points at are one write (#516): a refused `messages` insert used to leave the card
@@ -3835,7 +3884,7 @@ export class Platform {
     // (`cleanupAttachments`), so the bytes outlive the upload clock for exactly as long as the owner takes.
     for (const r of refs) this.run("UPDATE attachments SET message_id = ? WHERE id = ? AND message_id IS NULL", id, r.id);
     this.policyDecision(botId, convId, owners, "message.draft", "require_approval", reasons, { message_id: id });
-    this.audit.append(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
+    this.auditWrite(`bot:${botId}`, "message.drafted", id, owners, { conversation_id: convId, envelope_id: env.id, payload_sha256: env.payload_sha256, sig: env.sig, risk_flags: flags, approval_id: aprId, ...(typedByOwner ? { typed_by_owner: true } : {}) });
     this.refreshConversationStatus(convId);
     const rel = roomRel ?? this.activeRelationship(botId, peer);
     const autoChat = this.settingsFor(rel.id, ownerId).auto_approve_chat;
@@ -3894,7 +3943,7 @@ export class Platform {
   private pauseConversation(c: any, status: string, reason: string) {
     this.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), c.id);
     const owners = [this.bot(c.initiator_bot).owner_id, this.bot(c.peer_bot).owner_id];
-    this.audit.append("platform", "conversation.paused", c.id, owners, { status, reason, turn_count: c.turn_count });
+    this.auditWrite("platform", "conversation.paused", c.id, owners, { status, reason, turn_count: c.turn_count });
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.paused", { conversation_id: c.id, status, reason, trust: "platform" });
   }
 
@@ -3916,7 +3965,7 @@ export class Platform {
     this.run("UPDATE messages SET not_delivered_reason = ? WHERE id = ?", reason, m.id);
     const recipient = this.bot(m.recipient_bot);
     const sender = this.bot(m.sender_bot);
-    this.audit.append(`owner:${ownerId}`, "message.not_delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: m.conversation_id, reason });
+    this.auditWrite(`owner:${ownerId}`, "message.not_delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: m.conversation_id, reason });
     this.emit(sender.id, "message.not_delivered", { message_id: m.id, conversation_id: m.conversation_id, to: this.publicBot(recipient), reason, trust: "platform" });
     return { message_id: m.id, status: "not_delivered", reason };
   }
@@ -4001,7 +4050,7 @@ export class Platform {
     this.run("UPDATE conversations SET turn_count = ?, updated_at = ? WHERE id = ?", turn, nowIso(), c.id);
     this.emit(recipient.id, "message.received", delivered);
     this.emit(sender.id, "approval.decided", { approval_id: a.id, kind: "outbound_message", message_id: m.id, decision: body.decision, note_to_bot: body.note_to_bot ?? null, delivered_payload: payload });
-    this.audit.append("platform", "message.delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: c.id, turn, edited: !!edited, injection_suspected: inj.suspected, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig });
+    this.auditWrite("platform", "message.delivered", m.id, [sender.owner_id, recipient.owner_id], { conversation_id: c.id, turn, edited: !!edited, injection_suspected: inj.suspected, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig });
     return { message_id: m.id, status: "delivered" };
   }
 
@@ -4052,7 +4101,7 @@ export class Platform {
     }
     this.refreshConversationStatus(c.id);
     c.status = this.conv(c.id).status;
-    this.audit.append(actor, "conversation.extended", c.id, owners, data);
+    this.auditWrite(actor, "conversation.extended", c.id, owners, data);
     for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.resumed", { conversation_id: c.id, max_turns: null, trust: "platform" });
   }
 
@@ -4095,7 +4144,7 @@ export class Platform {
     // narrowed to this same conversation so an accept drafted in another chat is never exempted. Everything else is
     // cancelled, and each cancellation is announced to the Bot that owned the card.
     this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", { keep: this.acceptInviteCardOf(convId), notify: true });
-    this.audit.append(actor, "conversation.closed", convId, owners, { outcome, summary });
+    this.auditWrite(actor, "conversation.closed", convId, owners, { outcome, summary });
     // The summary was written by the Bot (or the owner) that closed the chat, so for the other side it is peer
     // content: it travels inside `untrusted_content` under `trust: "peer_untrusted"`, like every other peer text
     // (README "Untrusted markers", AGENT_GUIDE safety rule 1). Never a bare `summary` next to `trust: "platform"`.
@@ -4286,7 +4335,7 @@ export class Platform {
       return apr;
     });
     this.policyDecision(botId, convId, owners, "action.draft", "require_approval", reasons, { action_id: id, action_type: pl.action_type });
-    this.audit.append(`bot:${botId}`, "action.drafted", id, owners, { conversation_id: convId, action_type: pl.action_type, params, envelope_id: env.id, sig: env.sig, approval_id: aprId });
+    this.auditWrite(`bot:${botId}`, "action.drafted", id, owners, { conversation_id: convId, action_type: pl.action_type, params, envelope_id: env.id, sig: env.sig, approval_id: aprId });
     this.refreshConversationStatus(convId);
     return { action_id: id, status: "pending_approval", approval_id: aprId, sensitivity: def.sensitivity, policy: { decision: "require_approval", reasons, policy_version: POLICY_VERSION } };
   }
@@ -4330,7 +4379,7 @@ export class Platform {
     const owners = [actor.owner_id, peer.owner_id];
     const fail = (reason: string, detail: any = {}) => {
       this.run("UPDATE actions SET status = 'failed', result = ? WHERE id = ?", JSON.stringify({ error: reason, ...detail }), x.id);
-      this.audit.append("platform", "action.failed", x.id, owners, { reason, ...detail });
+      this.auditWrite("platform", "action.failed", x.id, owners, { reason, ...detail });
       this.emit(actor.id, "action.failed", { action_id: x.id, conversation_id: c.id, reason, trust: "platform" });
       return { action_id: x.id, status: "failed", reason };
     };
@@ -4349,7 +4398,7 @@ export class Platform {
       this.run(ins, newId("cal"), peer.owner_id, new Date(s).toISOString(), new Date(e).toISOString(), title, JSON.stringify([actor.owner_id]), "botsocial", "invited", actor.owner_id, bookingId, nowIso());
       const result = { booking_id: bookingId, start: new Date(s).toISOString(), end: new Date(e).toISOString(), title, organizer: actor.id, invitee: peer.id, invitee_status: "invited" };
       this.run("UPDATE actions SET status = 'executed', result = ? WHERE id = ?", JSON.stringify(result), x.id);
-      this.audit.append("platform", "action.executed", x.id, owners, { action_type: x.action_type, ...result });
+      this.auditWrite("platform", "action.executed", x.id, owners, { action_type: x.action_type, ...result });
       // `title` is written by the requester's Bot (`params.title`, else its intent summary). The requester's own
       // copy can keep it: it is that Bot's text. The invitee's copy carries it as peer content, inside
       // `untrusted_content`, never as a top-level field next to `trust: "platform"`.
@@ -4371,7 +4420,7 @@ export class Platform {
       this.run("UPDATE calendar_entries SET status = 'confirmed' WHERE id = ?", inv.id);
       const result = { booking_id: params.booking_id, invitee_status: "accepted", start: inv.start, end: inv.end };
       this.run("UPDATE actions SET status = 'executed', result = ? WHERE id = ?", JSON.stringify(result), x.id);
-      this.audit.append("platform", "action.executed", x.id, owners, { action_type: x.action_type, ...result });
+      this.auditWrite("platform", "action.executed", x.id, owners, { action_type: x.action_type, ...result });
       for (const b of [actor.id, peer.id]) this.emit(b, "event.invite_accepted", { conversation_id: c.id, action_id: x.id, trust: "platform", by: actor.id, ...result });
       return { action_id: x.id, status: "executed", result };
     }
@@ -4466,7 +4515,7 @@ export class Platform {
       });
       if (okHours && !busyAll.some(([s, e]) => overlaps(t, t + dur, s, e))) suggestions.push({ start: isoInTz(t, hourRules[0].tz), end: isoInTz(t + dur, hourRules[0].tz) });
     }
-    this.audit.append(`bot:${botId}`, "calendar.freebusy.queried", c.id, [ownerId, ...peerOwners], { subjects, envelope_id: env.id });
+    this.auditWrite(`bot:${botId}`, "calendar.freebusy.queried", c.id, [ownerId, ...peerOwners], { subjects, envelope_id: env.id });
     return { results, common_free_suggestions: suggestions };
   }
 
@@ -4727,7 +4776,7 @@ export class Platform {
       const granted = this.grantedBotOf(g, r);
       if (!botIds.includes(g.grantee_bot) && !botIds.includes(granted)) continue;
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
-      this.audit.append("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "room_left", room_id: roomId, grantee_bot: g.grantee_bot });
+      this.auditWrite("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "room_left", room_id: roomId, grantee_bot: g.grantee_bot });
     }
     if (botIds.length) {
       const marks = botIds.map(() => "?").join(",");
@@ -4756,7 +4805,7 @@ export class Platform {
       [roomId], "room_closed", { notify: true });
     for (const g of this.all("SELECT * FROM grants WHERE room_id = ? AND status = 'active'", roomId)) {
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
-      this.audit.append("platform", "grant.revoked", g.id, [], { reason: "room_closed", room_id: roomId });
+      this.auditWrite("platform", "grant.revoked", g.id, [], { reason: "room_closed", room_id: roomId });
     }
     this.run("UPDATE grant_rooms SET ended_at = ? WHERE room_id = ? AND ended_at IS NULL", now, roomId);
     this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE status = 'room' AND id IN (SELECT relationship_id FROM grants WHERE room_id = ?)", now, roomId);
@@ -4818,7 +4867,7 @@ export class Platform {
       : "The room is now open. The number is no longer valid.";
     const ev = this.faceInsertEvent(room.id, "room.started", actor?.botId ?? null, { text, reason, trust: "platform" });
     this.faceEmitMembers(room.id, "face_room.started", { room_id: room.id, event_id: ev.id, event_cursor: ev.seq, text, reason, trust: "platform" });
-    this.audit.append(actor ? actor.actor : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
+    this.auditWrite(actor ? actor.actor : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
   }
   /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
   advanceFaceRooms() {
@@ -4906,7 +4955,7 @@ export class Platform {
     const claim = this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", when, g.id);
     if (!claim.changes) return;
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
-    this.audit.append("platform", "grant.expired", g.id, [r?.requester_owner, r?.target_owner], {
+    this.auditWrite("platform", "grant.expired", g.id, [r?.requester_owner, r?.target_owner], {
       relationship_id: g.relationship_id, capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: this.grantedBotOf(g, r),
     });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "expired" });
@@ -5145,7 +5194,7 @@ export class Platform {
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.auditWrite(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     // The row goes to every member, so a join never carries the address: a room-mate would read it.
@@ -5153,8 +5202,8 @@ export class Platform {
     // request took (`out.seated`), not every Bot it brought: one already in the room sat down again, so it
     // is not a join. A repeat join that seats nobody writes no row; its "rejoined" attempt already records it.
     const joinData = out.created ? { bots: bots.map((b) => b.id), ip } : { bots: out.seated };
-    if (out.created) this.audit.append(actor, "face_room.created", out.roomId, this.faceOwnerIds(out.roomId), joinData);
-    else if (out.seated.length) this.audit.append(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    if (out.created) this.auditWrite(actor, "face_room.created", out.roomId, this.faceOwnerIds(out.roomId), joinData);
+    else if (out.seated.length) this.auditWrite(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), joinData);
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -5232,7 +5281,7 @@ export class Platform {
     const expiresAt = new Date(this.nowMs() + this.faceRoomLimits.inviteTtlMs).toISOString();
     this.run("INSERT INTO face_room_invites (ticket, room_id, created_by_owner_id, created_by_bot, expires_at, created_at) VALUES (?,?,?,?,?,?)",
       ticket, roomId, p.ownerId, p.kind === "bot" ? p.botId : null, expiresAt, this.ts());
-    this.audit.append(this.actorOf(p), "face_room.invite_minted", roomId, this.faceOwnerIds(roomId), { expires_at: expiresAt, ttl_seconds: Math.round(this.faceRoomLimits.inviteTtlMs / 1000) });
+    this.auditWrite(this.actorOf(p), "face_room.invite_minted", roomId, this.faceOwnerIds(roomId), { expires_at: expiresAt, ttl_seconds: Math.round(this.faceRoomLimits.inviteTtlMs / 1000) });
     return { room_id: roomId, ticket, url: this.faceInviteUrl(ticket), expires_at: expiresAt };
   }
 
@@ -5251,7 +5300,7 @@ export class Platform {
     const revokedAt = invite.revoked_at ?? this.ts();
     if (!invite.revoked_at) {
       this.run("UPDATE face_room_invites SET revoked_at = ? WHERE ticket = ?", revokedAt, ticket);
-      this.audit.append(this.actorOf(p), "face_room.invite_revoked", roomId, this.faceOwnerIds(roomId), {});
+      this.auditWrite(this.actorOf(p), "face_room.invite_revoked", roomId, this.faceOwnerIds(roomId), {});
     }
     return { room_id: roomId, revoked: true, revoked_at: revokedAt };
   }
@@ -5350,12 +5399,12 @@ export class Platform {
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.auditWrite(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     // Same rule on the ticket path: every member reads this row, so no address on it, and it names only
     // the seats this request took.
-    if (out.seated.length) this.audit.append(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: out.seated, invite: true });
+    if (out.seated.length) this.auditWrite(actor, "face_room.joined", out.roomId, this.faceOwnerIds(out.roomId), { bots: out.seated, invite: true });
     const viewer = this.faceJoinViewer(p, out.roomId, out.seated);
     return this.faceRoomView(out.roomId, viewer);
   }
@@ -5474,7 +5523,7 @@ export class Platform {
     this.run("INSERT INTO local_room_invites (ticket, room_id, name, created_by_owner_id, inviter_bot, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
       ticket, roomId, name, ownerId, inviter.id, expiresAt, this.ts());
     // The ticket is a bearer credential: it is returned once and never written to the audit log.
-    this.audit.append(this.actorOf(p), "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
+    this.auditWrite(this.actorOf(p), "local_room.invite_minted", roomId, [ownerId], { inviter_bot: inviter.id });
     return { kind: "local_room", ticket, url: this.localInviteUrl(inviter.handle, ticket), room_id: roomId, name, expires_at: null, inviter: { handle: "@" + inviter.handle, home: this.homeHandleOf(ownerId) } };
   }
 
@@ -5593,11 +5642,11 @@ export class Platform {
     });
     const out = txn.immediate();
     if (!out.ok) {
-      if (out.lockout) this.audit.append(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
+      if (out.lockout) this.auditWrite(actor, "face_room.lockout", null, [ownerId], { ip, reason: out.code });
       throw new ApiError(out.status, out.code, out.message, out.extra);
     }
     const invite = out.invite;
-    if (out.fresh) this.audit.append(actor, "local_room.invite_claimed", invite.room_id, [ownerId, invite.created_by_owner_id], { inviter_bot: invite.inviter_bot, bots: wanted });
+    if (out.fresh) this.auditWrite(actor, "local_room.invite_claimed", invite.room_id, [ownerId, invite.created_by_owner_id], { inviter_bot: invite.inviter_bot, bots: wanted });
     const inviter = this.bot(invite.inviter_bot);
     return {
       ...this.localInviteView(invite, ownerId),
@@ -5648,7 +5697,7 @@ export class Platform {
       this.endLocalPairGrants(sibling.room_id, sibling.inviter_bot, claim.bots);
     }
     const claimers = [...ended.map((c) => c.owner_id), ...siblingClaims.map(({ claim }) => claim.owner_id)];
-    this.audit.append(this.actorOf(p), minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...claimers], minter ? { ended_claims: claimers.length } : {});
+    this.auditWrite(this.actorOf(p), minter ? "local_room.invite_revoked" : "local_room.invite_released", invite.room_id, [invite.created_by_owner_id, ...claimers], minter ? { ended_claims: claimers.length } : {});
   }
 
   /** The minting owner ends one home's claim (it removed that guest): that home's reach in the room ends, the link stays. `home` is the home's handle or one of its claimed Bots' handles. */
@@ -5664,7 +5713,7 @@ export class Platform {
     // The minter ends it: recorded, so the same link does not seat that home again.
     this.run("UPDATE local_room_invite_claims SET released_at = ?, ended_by_owner_id = ? WHERE ticket = ? AND owner_id = ?", this.ts(), p.ownerId, invite.ticket, claim.owner_id);
     this.endLocalPairGrants(invite.room_id, invite.inviter_bot, claim.bots);
-    this.audit.append(this.actorOf(p), "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
+    this.auditWrite(this.actorOf(p), "local_room.claim_ended", invite.room_id, [p.ownerId, claim.owner_id], {});
   }
 
   private ensureLocalPairGrant(roomId: string, inviter: any, guest: any, actor: string) {
@@ -5694,7 +5743,7 @@ export class Platform {
         for (const g of this.all("SELECT * FROM grants WHERE relationship_id = ? AND room_id = ? AND status = 'active'", r.id, roomId)) {
           this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, g.id);
           // The ending of a share belongs to both owners of the pair: the read side filters by owner id.
-          this.audit.append("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "local_invite_ended", room_id: roomId });
+          this.auditWrite("platform", "grant.revoked", g.id, [r?.requester_owner, r?.target_owner], { reason: "local_invite_ended", room_id: roomId });
         }
         this.run("UPDATE relationships SET status = 'revoked', updated_at = ? WHERE id = ?", now, r.id);
       }
@@ -5841,7 +5890,7 @@ export class Platform {
     // A leave that removes nobody writes nothing: it is not a leave, and a row saying it happened would put an
     // owner who never sat in the room into that room's audit trail. The same rule a join that seats nobody
     // follows for `face_room.joined`; the response and the room state are unchanged.
-    if (leaving.length) this.audit.append(this.actorOf(p), "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
+    if (leaving.length) this.auditWrite(this.actorOf(p), "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
     if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
@@ -5869,7 +5918,7 @@ export class Platform {
     }
     if ((room.lead_bot_id ?? null) !== botId) {
       this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", viewer.botIds[0] ?? null)).immediate();
-      this.audit.append(this.actorOf(p), "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
+      this.auditWrite(this.actorOf(p), "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
     }
     return this.faceRoomView(roomId, viewer);
   }
@@ -5970,7 +6019,7 @@ export class Platform {
         id, roomId, sender.id, JSON.stringify({ text }), "pending_approval", apr, this.ts(), this.nowMs(), typed ? 1 : 0, kept.length ? JSON.stringify(kept) : null);
       return apr;
     });
-    this.audit.append(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
+    this.auditWrite(`bot:${sender.id}`, "face_room.message_drafted", id, this.faceOwnerIds(roomId), { room_id: roomId, approval_id: aprId });
     const o = this.owner(sender.owner_id);
     if (o.auto_approve_face_rooms && flags.length === 0 && !injectionSuspected) {
       this.decideApproval({ kind: "owner", ownerId: sender.owner_id }, aprId, { decision: "approved" }, "policy:auto_approve");
@@ -6024,7 +6073,7 @@ export class Platform {
       ...(listed.length ? { mentions: listed } : {}),
     });
     this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
-    this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
+    this.auditWrite("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
     return { message_id: d.id, status: "delivered", event_cursor: ev.seq };
   }
   private rejectFaceRoomMessage(a: any, note?: string) {
