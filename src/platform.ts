@@ -2865,7 +2865,13 @@ export class Platform {
     assert(bot.status === "active", 403, "bot_revoked", "this bot identity was revoked");
     const offered = this.validCaps(payload.offered_capabilities ?? DEFAULT_CAPABILITIES);
     const requested = this.validCaps(payload.requested_capabilities ?? DEFAULT_CAPABILITIES);
-    const maxUses = Math.max(1, Math.min(Number(payload.max_uses) || 1, 50));
+    // max_uses is a count, so a body that is not a whole number of uses is refused rather than coerced. The old
+    // Number(...) read stored 1.5 as REAL 1.5 and admitted ceil(1.5) = 2 joins — a link wider than the caller can
+    // have meant. Absent or null keeps the 1-use default; a value over the 50 ceiling still clamps as before.
+    if (payload.max_uses !== undefined && payload.max_uses !== null) {
+      assert(typeof payload.max_uses === "number" && Number.isInteger(payload.max_uses) && payload.max_uses >= 1, 400, "invalid_request", "max_uses must be a positive integer");
+    }
+    const maxUses = Math.max(1, Math.min(payload.max_uses ?? 1, 50));
     const hours = Math.max(1, Math.min(Number(payload.expires_in_hours) || 72, 24 * 30));
     const id = newId("inv");
     const code = randomBytes(9).toString("base64url").replace(/[-_]/g, "x");
