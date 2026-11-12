@@ -204,10 +204,13 @@ export class Platform {
   /** Events written inside `atomically`, waiting for that write to commit before they reach the push queue (#511).
    *  The queue is memory, not a table, so an event row a rollback takes back must not leave a push behind. */
   private afterCommitPushes: { botId: string; ev: { event_id: string; type: string; created_at: string; data: Record<string, unknown> } }[] | null = null;
-  /** Audit records written while a transaction is open, waiting for that transaction to commit (#575). The audit
-   *  log is its own SQLite file, so a record written inside a transaction outlives a rollback of the write it
-   *  describes — it would keep naming grants the platform refused to make. `policy.decision` is never held: it
-   *  records a decision already answered to the caller, not a write that can still be taken back. */
+  /** Audit records written while a transaction is open, waiting for that level of transaction to commit (#575, #578).
+   *  The audit log is its own SQLite file, so a record written inside a transaction outlives a rollback of the write
+   *  it describes — it would keep naming grants the platform refused to make. Each level holds its own queue: a
+   *  commit hands the rows to the enclosing level, and a rollback drops that level's rows and leaves the enclosing
+   *  level's alone, so a nested transaction whose failure the enclosing one catches cannot have its records ride the
+   *  outer commit. `policy.decision` is never held: it records a decision already answered to the caller, not a
+   *  write that can still be taken back. */
   private pendingAudits: { actor: string; action: string; subject: string | null; owners: (string | null | undefined)[]; data: unknown }[] | null = null;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
@@ -349,21 +352,25 @@ export class Platform {
       return append(actor, action, subject, owners, data);
     }) as AuditLog["append"];
 
-    // Hooking the transaction, not each call site: a nested transaction joins the outermost one's queue, and the
-    // append happens after the commit is durable, in the order the writes were made.
+    // Hooking the transaction, not each call site. Each level holds its own queue: an inner transaction is a
+    // savepoint, and a savepoint that fails can be caught by the transaction around it, which then commits. Handing
+    // the inner rows up only when the inner level commits — and dropping them when it rolls back — keeps a record
+    // from outliving the write it describes at every depth. The outermost commit appends in write order.
     const transaction = this.db.transaction.bind(this.db);
     (this.db as any).transaction = (fn: () => unknown) => {
       const run = transaction(fn);
       const once = (call: () => unknown) => {
-        const outer = this.pendingAudits === null;
-        if (outer) this.pendingAudits = [];
+        const enclosing = this.pendingAudits;
+        const held: NonNullable<Platform["pendingAudits"]> = [];
+        this.pendingAudits = held;
         let out: unknown;
         try { out = call(); }
-        catch (e) { if (outer) this.pendingAudits = null; throw e; }
-        if (outer) {
-          const held = this.pendingAudits ?? [];
-          this.pendingAudits = null;
+        catch (e) { this.pendingAudits = enclosing; throw e; }
+        this.pendingAudits = enclosing;
+        if (enclosing === null) {
           for (const r of held) append(r.actor, r.action, r.subject, r.owners, r.data);
+        } else {
+          enclosing.push(...held);
         }
         return out;
       };
