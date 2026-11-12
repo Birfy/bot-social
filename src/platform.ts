@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { AuditLog } from "./audit.js";
+import { AuditLog, type AuditRecord } from "./audit.js";
 import { openDb } from "./db.js";
 import { ApiError, assert } from "./errors.js";
 import { newId, randomToken } from "./ids.js";
@@ -204,6 +204,11 @@ export class Platform {
   /** Events written inside `atomically`, waiting for that write to commit before they reach the push queue (#511).
    *  The queue is memory, not a table, so an event row a rollback takes back must not leave a push behind. */
   private afterCommitPushes: { botId: string; ev: { event_id: string; type: string; created_at: string; data: Record<string, unknown> } }[] | null = null;
+  /** Audit records written while a transaction is open, waiting for that transaction to commit (#575). The audit
+   *  log is its own SQLite file, so a record written inside a transaction outlives a rollback of the write it
+   *  describes — it would keep naming grants the platform refused to make. `policy.decision` is never held: it
+   *  records a decision already answered to the caller, not a write that can still be taken back. */
+  private pendingAudits: { actor: string; action: string; subject: string | null; owners: (string | null | undefined)[]; data: unknown }[] | null = null;
   readonly attachmentLimits: AttachmentLimits;
   readonly faceRoomLimits: FaceRoomLimits;
   /** GitHub OAuth (#76), decided once at startup. `enabled` is the constant every gate and the /ui meta read. */
@@ -222,6 +227,7 @@ export class Platform {
     this.authLimiter = new AuthRateLimiter(this.authRateLimits, () => this.nowMs());
     this.db = openDb(opts.dbPath ?? ":memory:");
     this.audit = new AuditLog(opts.auditPath ?? ":memory:");
+    this.auditFollowsCommit();
     this.publicBaseUrl = opts.publicBaseUrl ?? "http://localhost:8787";
     this.kmsKey = opts.kmsKey ?? randomBytes(32);
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -323,6 +329,50 @@ export class Platform {
     this.afterCommitPushes = outer;
     for (const p of queued) this.webhooks.enqueue(p.botId, p.ev);
     return out;
+  }
+
+  /** Make every audit record follow the write it describes (#575). The audit log is a second SQLite file, so a
+   *  record written inside a transaction is durable the moment it is written — a rollback of that transaction
+   *  leaves it behind, naming access the platform refused to give (`writeActivation` writes one `grant.created`
+   *  per grant and can still refuse the request on a later capability's expiry). Records written while a
+   *  transaction is open are therefore held, in order, and appended only once the outermost transaction commits;
+   *  a rollback drops them. `policy.decision` is written immediately: a refusal has already been answered to the
+   *  caller, so it is a fact even when the write it refused never happened. */
+  private auditFollowsCommit() {
+    const append = this.audit.append.bind(this.audit);
+    this.audit.append = ((actor, action, subject, owners, data = {}) => {
+      if (this.db.inTransaction && action !== "policy.decision") {
+        (this.pendingAudits ??= []).push({ actor, action, subject, owners, data });
+        // No caller reads the record back; the log is the only place it lives.
+        return null as unknown as AuditRecord;
+      }
+      return append(actor, action, subject, owners, data);
+    }) as AuditLog["append"];
+
+    // Hooking the transaction, not each call site: a nested transaction joins the outermost one's queue, and the
+    // append happens after the commit is durable, in the order the writes were made.
+    const transaction = this.db.transaction.bind(this.db);
+    (this.db as any).transaction = (fn: () => unknown) => {
+      const run = transaction(fn);
+      const once = (call: () => unknown) => {
+        const outer = this.pendingAudits === null;
+        if (outer) this.pendingAudits = [];
+        let out: unknown;
+        try { out = call(); }
+        catch (e) { if (outer) this.pendingAudits = null; throw e; }
+        if (outer) {
+          const held = this.pendingAudits ?? [];
+          this.pendingAudits = null;
+          for (const r of held) append(r.actor, r.action, r.subject, r.owners, r.data);
+        }
+        return out;
+      };
+      const wrapped = ((...args: unknown[]) => once(() => (run as any)(...args))) as any;
+      for (const kind of ["deferred", "immediate", "exclusive"] as const) {
+        wrapped[kind] = (...args: unknown[]) => once(() => (run as any)[kind](...args));
+      }
+      return wrapped;
+    };
   }
 
   /** Write one event row and hand it back in the shape the webhook queue pushes, so a caller can write the row with
