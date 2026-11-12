@@ -3197,6 +3197,24 @@ export class Platform {
     return true;
   }
 
+  /** The delivery moment the platform owns. Quiet hours postpone an announcement, but nothing in the account has to
+   *  move for the batch to leave: a window that ends while the owner sleeps must still wake the outlet once. Every
+   *  existing delivery moment is somebody else's action (a card written outside the window, the queue opened), so an
+   *  owner who touches nothing after the night never hears the batch. Walk the undelivered ledger rows by owner and
+   *  let each batch go through `announceHeldApprovals`, which is idempotent: an open window leaves the batch where it
+   *  is, and a batch already announced has no undelivered row left to send. Returns how many batches left.
+   *  Caller: the hourly tick in `src/main.ts`. It must never take that timer down. */
+  flushHeldApprovals(): number {
+    let delivered = 0;
+    const waiting = this.all("SELECT DISTINCT owner_id FROM approval_notifications WHERE delivered_at IS NULL");
+    for (const r of waiting) {
+      const o = this.get("SELECT id, notify_bot_id, timezone, quiet_start, quiet_end FROM owners WHERE id = ?", r.owner_id);
+      if (!o?.notify_bot_id || this.inQuietHours(o)) continue;
+      if (this.announceHeldApprovals(o.id, o.notify_bot_id)) delivered++;
+    }
+    return delivered;
+  }
+
   /** Every door that ends a share settles the cards that share was holding: the lines a Bot already wrote toward the
    *  other side, and its drafts of actions there. Only a share that carried `chat.public` held any of them, a room
    *  thread is the room's business, and an invite acceptance keeps its draft (the peer's answer outlives the chat).
