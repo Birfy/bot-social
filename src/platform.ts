@@ -8,7 +8,7 @@ import { seal, unseal, publicRawFromPrivatePem } from "./custody.js";
 import { Envelope, envelopeSigningInput, generateEd25519, signEnvelope, hashToken, jcs, payloadDigest, sha256Hex as sha256Text, signString, verifyString, webhookSignature, publicKeyFromRaw } from "./crypto.js";
 import { ACTIONS, CAPABILITIES, DEFAULT_CAPABILITIES, INTENTS, LIMITS, MVP_GRANTABLE, POLICY_VERSION, calendarDetailLeak, detectInjection, detectLoop, dlpScan, dlpText } from "./policy.js";
 import { WebhookOptions, WebhookPusher, redactHeaders, redactUrl, validateHeaders, validateUrl } from "./webhooks.js";
-import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
+import { AttachmentLimits, AttachmentRef, DEFAULT_ATTACHMENT_LIMITS, checkFile, decodeCanonicalBase64, humanSize, refOf, sealBytes, sha256Hex, unsealBytes } from "./attachments.js";
 import { avatarFingerprint, lookOf, validateAvatar, validateColor } from "./bot-look.js";
 import { PRESENCE_DEFAULT_TTL_S, PRESENCE_MAX_TTL_S, PRESENCE_MIN_TTL_S, PRESENCE_WRITES_PER_MIN, PresenceStore } from "./presence.js";
 import { clipToDailyHours, ianaTimezone, isoInTz, localMinutes, localWeekday, overlaps, parseHours } from "./time.js";
@@ -886,7 +886,8 @@ export class Platform {
     const { botId, ownerId } = this.attachmentBot(p, body?.bot_id);
     assert(typeof body?.content_base64 === "string", 400, "invalid_request", "content_base64 required");
     assert(body.content_base64.length <= Math.ceil(this.attachmentLimits.maxBytes / 3) * 4 + 4, 413, "attachment_too_large", `file exceeds ${this.attachmentLimits.maxBytes} bytes`);
-    const bytes = Buffer.from(body.content_base64, "base64");
+    const bytes = decodeCanonicalBase64(body.content_base64);
+    assert(bytes !== null, 400, "invalid_request", "content_base64 must be canonical base64");
     const check = checkFile(body.name, body.mime, bytes, this.attachmentLimits);
     if (!check.ok) throw new ApiError(check.code === "attachment_too_large" ? 413 : 415, check.code, check.message);
     this.cleanupAttachments();

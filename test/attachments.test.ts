@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkFile, DEFAULT_ATTACHMENT_LIMITS, sealBytes, sha256Hex, unsealBytes } from "../src/attachments.js";
+import { checkFile, decodeCanonicalBase64, DEFAULT_ATTACHMENT_LIMITS, sealBytes, sha256Hex, unsealBytes } from "../src/attachments.js";
 import { startServer } from "./helpers.js";
 
 async function post(base: string, path: string, body: unknown, token?: string) {
@@ -45,6 +45,13 @@ test("file checks: size, blocked types, executable content; sealing round-trips 
   assert.equal(sealed.includes(data), false);
   assert.deepEqual(unsealBytes(key, sealed, "attachment:a1"), data);
   assert.throws(() => unsealBytes(key, sealed, "attachment:a2"));
+});
+
+test("attachments: only canonical standard base64 decodes", () => {
+  assert.deepEqual(decodeCanonicalBase64(b64("hello")), Buffer.from("hello"));
+  for (const bad of ["aGV=sbG8=", "aGVsbG9=", "aGVsbG8", "aGVs bG8=", "!!!!aGVsbG8=", "aGVsbG8=!!!!", "aGVsbG8-_", "===="]) {
+    assert.equal(decodeCanonicalBase64(bad), null, bad);
+  }
 });
 
 test("attachments: signed refs, approval card lists files, recipient downloads only after delivery, hash verified", async (t) => {
@@ -104,4 +111,39 @@ test("attachments: size limit, blocked types, rejected sends stay private, expir
   const up2 = await A("upload_attachment", { bot_id: writer.bot_id, name: "b.txt", content_base64: b64("later") });
   assert.equal(s.platform.cleanupAttachments(Date.now() + 2000), 2);
   await assert.rejects(A("send_as_member", { from_bot_id: writer.bot_id, to: coder.handle, text: "late", attachments: [up2.attachment] }), /no such attachment/);
+});
+
+test("attachments: a non-canonical content_base64 is refused and stores nothing", async (t) => {
+  const { s, A, writer } = await pair();
+  t.after(s.stop);
+  const rows = () => (s.platform.db.prepare("SELECT COUNT(*) n FROM attachments WHERE name = ?").get("plan.md") as any).n as number;
+  const audits = () => (s.platform.audit.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action = 'attachment.uploaded'").get() as any).n as number;
+  const before = { rows: rows(), audits: audits() };
+  // Node's decoder is lenient: it stops at a mid-string '=', so this used to answer 201 with a 2-byte file.
+  await assert.rejects(A("upload_attachment", { bot_id: writer.bot_id, name: "plan.md", mime: "text/markdown", content_base64: "aGV=sbG8=" }), /canonical base64/);
+  assert.equal(rows(), before.rows, "no attachments row for the refused upload");
+  assert.equal(audits(), before.audits, "no attachment.uploaded audit for the refused upload");
+  // Canonical base64 of the same name and type still uploads, with the bytes the caller encoded.
+  const ok = await A("upload_attachment", { bot_id: writer.bot_id, name: "plan.md", mime: "text/markdown", content_base64: b64("hello") });
+  assert.equal(ok.attachment.size, 5);
+  assert.equal(ok.attachment.sha256, sha256Hex(Buffer.from("hello")));
+});
+
+test("attachments: the REST upload refuses the same non-canonical base64", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const reg = await post(s.base, "/v1/owners", { username: "att-owner", password: "secret-pw", display_name: "Att Owner" });
+  assert.equal(reg.status, 201, JSON.stringify(reg.body));
+  const token = reg.body.owner_token as string;
+  const bot = await post(s.base, "/v1/bots", { handle: "att.bot", display_name: "ATT" }, token);
+  assert.equal(bot.status, 201, JSON.stringify(bot.body));
+  const refused = await post(s.base, "/v1/attachments", { name: "plan.md", mime: "text/markdown", content_base64: "aGV=sbG8=" }, token);
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error.code, "invalid_request");
+  assert.match(refused.body.error.message, /canonical base64/);
+  const stored = (s.platform.db.prepare("SELECT COUNT(*) n FROM attachments").get() as any).n as number;
+  assert.equal(stored, 0, "the refused REST upload stored nothing");
+  const ok = await post(s.base, "/v1/attachments", { name: "plan.md", mime: "text/markdown", content_base64: b64("hello") }, token);
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal(ok.body.attachment.sha256, sha256Hex(Buffer.from("hello")));
 });
