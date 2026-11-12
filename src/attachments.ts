@@ -29,6 +29,15 @@ export function looksExecutable(b: Buffer): boolean {
 
 export const sha256Hex = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
+/** Decodes standard base64 only when the input is canonical (RFC 4648 §4). Node's decoder skips junk, stops at a
+ *  mid-string "=", accepts base64url characters and non-zero pad bits, so it can turn malformed text into different
+ *  bytes than the caller encoded; the round-trip accepts exactly the input whose bytes re-encode to itself. */
+export function decodeCanonicalBase64(s: string): Buffer | null {
+  if (s.length % 4 !== 0) return null;
+  const bytes = Buffer.from(s, "base64");
+  return bytes.toString("base64") === s ? bytes : null;
+}
+
 /** Checks name, type and content; returns the clean name and mime or a reason. */
 export function checkFile(name: unknown, mime: unknown, bytes: Buffer, limits: AttachmentLimits): { ok: true; name: string; mime: string } | { ok: false; code: string; message: string } {
   const clean = String(name ?? "").replace(/[\u0000-\u001f\u007f/\\]/g, "_").trim().slice(0, 200);
