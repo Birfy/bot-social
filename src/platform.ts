@@ -1824,6 +1824,10 @@ export class Platform {
     // Any difference would turn this door into an oracle for "which handle was revoked".
     assert(target.status === "active", 404, "bot_not_found", payload.target_bot_id ? `bot ${payload.target_bot_id} not found` : `bot ${payload.target_handle} not found`);
     assert(target.id !== fromBot.id && target.owner_id !== fromBot.owner_id, 400, "invalid_request", "cannot befriend your own bot");
+    // The request message is peer text another owner's Bot reads, so it is stored as a string or not at all. The gate
+    // sits before `expireStale` can write, before the DLP scan sees it and before the row: a non-string used to reach
+    // SQL as it arrived (500) or be coerced to "1.0", and a refused request must leave no row, audit line or event.
+    assert(payload.message === undefined || payload.message === null || typeof payload.message === "string", 400, "invalid_request", "message must be a string");
     // A pending request that timed out must not keep answering relationship_exists: expire it here, before the
     // duplicate check, because requesting again is the first call after the 7-day window in many clients.
     this.expireStale();
@@ -2863,6 +2867,10 @@ export class Platform {
     }
     // #90: a revoked identity cannot hand itself out again — an invite for it would share a Bot that no longer answers.
     assert(bot.status === "active", 403, "bot_revoked", "this bot identity was revoked");
+    // The invite message is free text the joiner's console renders, so it is stored only as a string: an object, an
+    // array, a boolean or a number reached the INSERT as it arrived (500) or was coerced to text ("1.0"). Absent or
+    // null still means "no message"; the empty string stays a legitimate message.
+    assert(payload.message === undefined || payload.message === null || typeof payload.message === "string", 400, "invalid_request", "message must be a string");
     const offered = this.validCaps(payload.offered_capabilities ?? DEFAULT_CAPABILITIES);
     const requested = this.validCaps(payload.requested_capabilities ?? DEFAULT_CAPABILITIES);
     // max_uses is a count, so a body that is not a whole number of uses is refused rather than coerced. The old
@@ -4154,6 +4162,10 @@ export class Platform {
       outcome = body?.outcome ?? "abandoned";
       summary = body?.summary ?? null;
     }
+    // The closing summary is peer text the other side's console and event queue render, so it is stored as a string
+    // or not at all. Refusing it here, before `materializeExpiry` can write and before the row, audit line and events,
+    // keeps a non-string from reaching SQL as it arrived (500) or from being coerced to "1.0".
+    assert(summary === null || typeof summary === "string", 400, "invalid_request", "summary must be a string");
     assert(["agreed", "declined", "abandoned"].includes(outcome), 400, "invalid_request", "outcome must be agreed|declined|abandoned");
     // The closing summary is peer content: it lands in the other side's console and event queue, so a stopped or
     // removed Bot must not write one. This door names no Bot, so the speaker is the chat's Bot that belongs to the
