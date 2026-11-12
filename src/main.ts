@@ -32,8 +32,12 @@ console.log(trustProxyStartupLine(trustProxy));
 await ensureBotctl().catch((e) => console.warn("botctl build skipped:", e.message));
 await app.listen({ port, host });
 console.log(`Bot Social listening on http://${host}:${port}  · UI /ui · guide /guide · botctl /botctl · pid ${process.pid}`);
-// Expired attachments are deleted hourly (and on every upload).
-const cleanup = setInterval(() => { try { platform.cleanupAttachments(); } catch (e: any) { console.warn("attachment cleanup failed:", e.message); } }, 3600e3);
+// Expired attachments are deleted hourly (and on every upload). The same tick is the platform's own delivery moment:
+// a batch held through quiet hours leaves when the window ends even if the owner never opens the account again.
+const cleanup = setInterval(() => {
+  try { platform.cleanupAttachments(); } catch (e: any) { console.warn("attachment cleanup failed:", e.message); }
+  try { platform.flushHeldApprovals(); } catch (e: any) { console.warn("held approval flush failed:", e.message); }
+}, 3600e3);
 cleanup.unref();
 const shutdown = async () => { await app.close(); platform.close(); process.exit(0); };
 process.on("SIGINT", shutdown);
