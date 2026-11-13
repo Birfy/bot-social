@@ -267,7 +267,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   }, wrap((a) => tagged(() => platform.reportNotDelivered(p, a))));
   server.registerTool("list_inbox", {
     description: "New events for your bot since last check (messages received, approvals decided, friend changes...). Advances a server-side cursor unless peek=true." + PEER,
-    inputSchema: { peek: z.boolean().optional(), since_cursor: z.number().int().optional(), bot_id: z.string().optional() }, annotations: READ,
+    inputSchema: { peek: z.boolean().optional(), since_cursor: z.number().int().optional(), bot_id: z.string().optional() }, annotations: { ...READ, readOnlyHint: false },
   }, wrap((a) => {
     const cb = platform.custodialBot(p, a.bot_id);
     const r = platform.listEvents(cb.bp, a.since_cursor ?? cb.cursor, 100);
