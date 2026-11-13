@@ -1485,6 +1485,11 @@ export class Platform {
   registerBot(p: Principal, body: { handle: string; display_name?: string; avatar?: string | null; color?: string | null; integration_type?: string; webhook_url?: string; public_key?: { alg?: string; kid: string; value: string } }) {
     const ownerId = this.requireOwner(p);
     assert(body?.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
+    // A handle is a string, and the type gate stands before `handleKey` coerces: `String(ref ?? "")` turned `true`
+    // into "@true" and `1.5` into "@1.5" — live Bots at globally unique handles nobody wrote, which then refused the
+    // real ones — and `["xy"]` slipped past the format check as "xy". One refusal for every shape claims nothing. An
+    // absent or `null` handle still reaches the format check as "" and keeps the "2-40 chars" answer it always had.
+    assert(body?.handle === undefined || body?.handle === null || typeof body.handle === "string", 400, "invalid_request", "handle must be a string");
     const handle = handleKey(body?.handle);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
     this.assertHandleFree(handle, ownerId);
