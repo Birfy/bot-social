@@ -1918,6 +1918,21 @@ export class Platform {
     assert(r.target_owner === ownerId, 403, "forbidden", "only the target owner can consent");
     assert(r.status === "pending_target", 409, "invalid_state", `relationship is ${r.status}`);
     assert(["accept", "decline"].includes(body?.decision), 400, "invalid_request", "decision must be accept|decline");
+    // The body declares a list of capability names, and `(body.grant_capabilities ?? []).map(...)` below has no
+    // `.map` on a string, a number, an object or a boolean: those answered `500 internal_error` instead of naming
+    // the field they got wrong. An entry that is not a name (a number, `null`, a nested list, an object without one)
+    // reached the capability check as `unknown capability undefined`, which names neither the field nor the entry.
+    // Both are the same mistake - the field is a list of names, as the MCP schema declares - so both are refused
+    // here, before the decision is acted on and before any grant, approval, event or audit row. Absent, `null` and
+    // `[]` keep meaning "the defaults", and a known-name check still refuses an unknown name as before. The object
+    // form (`{capability, scope, expires_in_days}`) stays accepted: the platform's type is a union of a name and
+    // that object, and tests reach it over this route.
+    const caps = body.grant_capabilities;
+    assert(
+      caps === undefined || caps === null ||
+        (Array.isArray(caps) && caps.every((g) => typeof g === "string" || (g !== null && typeof g === "object" && !Array.isArray(g) && typeof (g as any).capability === "string"))),
+      400, "invalid_request", "grant_capabilities must be an array of strings",
+    );
     if (body.decision === "decline") {
       this.run("UPDATE relationships SET status = 'declined', updated_at = ? WHERE id = ?", nowIso(), relId);
       // A declined join never became a friendship: give the invite slot back, exactly as `expireStale` and a
