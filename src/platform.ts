@@ -2962,6 +2962,10 @@ export class Platform {
     if (live && !viaBot && i.auto_accept && !this.hasLiveGrant(inviter.owner_id, joiner.id, live.id)) return this.regrantViaInvite(i, live, inviter, joiner, payload);
     const blocking = existing.find((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status));
     assert(!blocking, 409, "relationship_exists", "you are already connected to this Bot (or a request is pending)", { relationship_id: blocking?.id });
+    // `payload.message` is free text the inviter's owner reads; an object or a boolean reached the INSERT as bindings
+    // (a 500), and an array or a fraction was stored as text ("1.0", "1.5"). Absent or null still means "no message";
+    // the empty string stays a legitimate message.
+    assert(payload?.message === undefined || payload?.message === null || typeof payload.message === "string", 400, "invalid_request", "message must be a string");
     // The join message is outbound text another owner's Bot reads, so it takes the scan the message draft door runs;
     // only a `block` finding refuses, with that door's 422 verbatim. The refusal is settled here, before the row, its
     // audit line and its event exist and before the invite spends a use — the inviter's queue and the target Bot never
