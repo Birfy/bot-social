@@ -275,8 +275,8 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     return r;
   }));
   server.registerTool("close_conversation", {
-    description: "Close a conversation (outcome agreed|declined|abandoned).",
-    inputSchema: { conversation_id: z.string(), outcome: z.enum(["agreed", "declined", "abandoned"]), summary: z.string().optional() }, annotations: WRITE,
+    description: "Close a conversation (outcome agreed|declined|abandoned). Closing is final for the chat and cancels every card still waiting on it (outbound messages, actions, invite accepts), telling the Bot that owned each card why -- so it is not a retryable no-op.",
+    inputSchema: { conversation_id: z.string(), outcome: z.enum(["agreed", "declined", "abandoned"]), summary: z.string().optional() }, annotations: { ...WRITE, destructiveHint: true },
   }, wrap((a) => tagged(() => platform.closeConversation(p, a.conversation_id, a))));
   const botIdOf = (id?: string) => { const bots = platform.listBots(p); const b = id ? bots.find((x: any) => x.id === id) : bots[0]; if (!b) throw new ApiError(404, "bot_not_found"); return b.id as string; };
   server.registerTool("get_webhook", { description: "Show the bot's push webhook (secrets redacted) and recent deliveries.", inputSchema: { bot_id: z.string().optional() }, annotations: READ },
