@@ -3597,11 +3597,26 @@ export class Platform {
     else if (a.kind === "action") result = approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot);
     else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
-      this.run("UPDATE relationships SET status = ?, updated_at = ? WHERE id = ?", approve ? "pending_target" : "cancelled", nowIso(), r.id);
-      if (approve && !this.maybeAutoAcceptInvite(r.id)) this.notifyTarget(r.id);
-      if (!approve) this.releaseInviteUse(r.id);
+      // A card can outlive the request it was written for: the peer's owner accepts through `consent`, and a row an
+      // older build left `active` behind a card that still waits is the same shape. Deciding that card answers with
+      // the relationship it finds and writes neither the row nor its grants — moving a live friendship back to
+      // `pending_target` re-activates it, superseding every grant the pair holds and announcing it a second time.
+      if (r.status === "active") {
+        result = { relationship_id: r.id, status: r.status };
+      } else {
+        // The row and the auto-accept gate are one write. `maybeAutoAcceptInvite` refuses a frozen or revoked Bot
+        // from inside `autoAcceptSpecs` ("a refusal leaves the card pending"), and that refusal must leave no half
+        // write behind: moving the row first let a 403 `bot_frozen` leave the pair at `pending_target`, the card
+        // still waiting, and the peer's owner reading a request nobody announced. In one transaction the refusal
+        // takes the row back with it, and `atomically` holds the announcement until that commit.
+        result = this.atomically(() => {
+          this.run("UPDATE relationships SET status = ?, updated_at = ? WHERE id = ?", approve ? "pending_target" : "cancelled", nowIso(), r.id);
+          if (approve && !this.maybeAutoAcceptInvite(r.id)) this.notifyTarget(r.id);
+          if (!approve) this.releaseInviteUse(r.id);
+          return { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
+        });
+      }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: r.id, decision, note_to_bot: body.note_to_bot ?? null });
-      result = { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
     } else if (a.kind === "invite") {
       // The stored invite state is the same witness here as in `inviteStatus` and the expiry sweep: a link that was
       // revoked, expired or used before this decision is not reopened by it. A card an older build left pending is
