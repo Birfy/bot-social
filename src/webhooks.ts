@@ -32,7 +32,15 @@ export function parseHeader(line: string): Header {
   return { name: line.slice(0, i).trim(), value: line.slice(i + 1).trim() };
 }
 export function validateHeaders(h: unknown): Header[] {
-  const list: Header[] = Array.isArray(h) ? h.map((x) => (typeof x === "string" ? parseHeader(x) : x)) : h && typeof h === "object" ? Object.entries(h).map(([name, value]) => ({ name, value: String(value) })) : [];
+  // A value that is neither a list nor an object is refused instead of read as "no headers": `headers: 42`
+  // used to clear the live set and still answer 200.
+  assert(Array.isArray(h) || (typeof h === "object" && h !== null), 400, "invalid_request", `headers must be a list or an object of header values`);
+  const list: Header[] = Array.isArray(h) ? h.map((x) => (typeof x === "string" ? parseHeader(x) : x)) : Object.entries(h as Record<string, unknown>).map(([name, value]) => {
+    // The object form documents its values as strings (docs/SETUP.md: {"Authorization": "Bearer …"}); the
+    // String() that used to live here turned 1 into "1" and {a:1} into "[object Object]" and sent it.
+    assert(typeof value === "string", 400, "invalid_request", `bad value for header ${name}`);
+    return { name, value };
+  });
   assert(list.length <= 5, 400, "invalid_request", "at most 5 custom headers");
   for (const x of list) {
     assert(typeof x?.name === "string" && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(x.name), 400, "invalid_request", `bad header name`);
