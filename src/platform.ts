@@ -6221,6 +6221,15 @@ export class Platform {
   // ================================================================ presence ("thinking")
   /** The Bot a presence call acts as: an owner names one of theirs (or has one), a Bot token is only itself. */
   private presenceBot(p: Principal, ref?: unknown) {
+    // An owner names one of their Bots with a string, or names none at all. `want` below is what reads the value,
+    // and `String([])` / `String([""])` are the empty string, so an array used to read as "nobody named": the call
+    // quietly acted as the account's home Bot — a "thinking" line published, or cleared, in another Bot's name,
+    // with nothing in the answer to say which Bot it was. Objects, booleans and numbers took the other old path
+    // and were answered 404 `bot_not_found`, naming the wrong problem. An object whose `toString` is not a
+    // function made that read throw before any gate, so the caller was answered 500 `internal_error`. Judge the
+    // type before the value is read at all. In the owner branch only: a Bot token speaks for itself alone, and its
+    // own 403 for a name that is not itself must stay a 403 rather than become a 400 about the field.
+    if (p.kind !== "bot") assert(ref === undefined || ref === null || typeof ref === "string", 400, "invalid_request", "bot_id must be a string");
     const want = String(ref ?? "").replace(/^@/, "");
     let b: any;
     if (p.kind === "bot") {
@@ -6228,14 +6237,6 @@ export class Platform {
       assert(!want || want === b.id || want.toLowerCase() === String(b.handle).replace(/^@/, "").toLowerCase(), 403, "forbidden", "a bot token can only act as itself");
     } else {
       const ownerId = this.requireOwner(p);
-      // An owner names one of their Bots with a string, or names none at all. `want` above is what reads the value,
-      // and `String([])` / `String([""])` are the empty string, so an array used to read as "nobody named": the call
-      // quietly acted as the account's home Bot — a "thinking" line published, or cleared, in another Bot's name,
-      // with nothing in the answer to say which Bot it was. Objects, booleans and numbers took the other old path
-      // and were answered 404 `bot_not_found`, naming the wrong problem. Refuse a wrong-typed name here, before any
-      // Bot is picked. In the owner branch only: a Bot token speaks for itself alone, and its own 403 for a name
-      // that is not itself must stay a 403 rather than become a 400 about the field.
-      assert(ref === undefined || ref === null || typeof ref === "string", 400, "invalid_request", "bot_id must be a string");
       b = want
         ? this.get("SELECT * FROM bots WHERE id = ?", want) ?? this.botByRef(want)
         : this.get("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", ownerId);

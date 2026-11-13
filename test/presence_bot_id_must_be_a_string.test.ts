@@ -3,8 +3,10 @@
 // and publishes the "thinking" line as the account's home Bot instead of the Bot the caller named — or, on an
 // `idle` write, clears the home Bot's live line. `String(["<a Bot id>"])` is that id, so an array wrapping a real
 // id acts as that Bot too: the declared type is not enforced at all. Objects, booleans and numbers take the other
-// old path and are answered 404 `bot_not_found`, naming the wrong problem. A wrong-typed `bot_id` is a 400 that
-// names the field, and it publishes and clears nothing.
+// old path and are answered 404 `bot_not_found`, naming the wrong problem. An object whose `toString` is not a
+// function makes the `String(...)` read itself throw, so the caller used to get a 500 `internal_error` instead of
+// any answer about the field. A wrong-typed `bot_id` is a 400 that names the field, and it publishes, clears and
+// writes nothing.
 //
 // The refusal belongs in the owner branch of `presenceBot` only: a Bot token speaks only for itself, and its own
 // 403 for a `bot_id` that is not itself must stay a 403.
@@ -69,6 +71,30 @@ test("a wrong-typed bot_id publishes no presence line", async (t) => {
     assert.equal(f.audits(), before.audits, `bot_id given ${label} wrote no audit row`);
     assert.equal(f.events(), before.events, `bot_id given ${label} wrote no room event`);
   }
+});
+
+test("a bot_id the code cannot even read is answered as a bad field, not a 500", async (t) => {
+  const f = await room(t, "858585");
+  const set = await f.put({ state: "thinking", room_id: f.roomId, bot_id: f.home.id });
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.deepEqual(f.entries(), [f.home.id], "the home Bot has a live line that the bad write must leave alone");
+  const before = { audits: f.audits(), events: f.events() };
+  // `presenceBot` reads `bot_id` with `String(ref ?? "")` before any gate. An object whose own `toString` is not a
+  // function makes that read throw a TypeError, and the caller is answered 500 `internal_error` — a server fault
+  // named for a value the caller typed, with no field named. Both writes that name a Bot must be refused as the
+  // bad field they are, before the read can throw.
+  for (const state of ["thinking", "idle"]) {
+    const r = await f.put({ state, room_id: f.roomId, bot_id: { toString: null } });
+    assert.equal(r.status, 400, `a ${state} write with an unreadable bot_id must be refused, not answered ${r.status} ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.error?.code, "invalid_request");
+    assert.equal(r.body.error?.message, "bot_id must be a string");
+    assert.deepEqual(f.entries(), [f.home.id], `a ${state} write with an unreadable bot_id changed no line`);
+  }
+  const seen = await f.readAsB();
+  assert.equal(seen.status, 200);
+  assert.deepEqual(seen.body.presence.map((e: any) => e.bot.handle), [f.homeHandle], "the peer still reads the one line");
+  assert.equal(f.audits(), before.audits, "an unreadable bot_id wrote no audit row");
+  assert.equal(f.events(), before.events, "an unreadable bot_id wrote no room event");
 });
 
 test("a wrong-typed bot_id cannot clear another Bot's line", async (t) => {
