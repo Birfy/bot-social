@@ -570,8 +570,9 @@ export class Platform {
       const o = this.registerOwner(body as { username: string; password: string; display_name?: string });
       const p: Principal = { kind: "owner", ownerId: o.owner_id };
       const bot = this.registerBot(p, { handle, display_name: body.bot_display_name || body.display_name || handle, integration_type: body.integration_type || "grok-bot" });
-      // custodial: the platform keeps the (generated) signing key encrypted, so the connector can chat
-      this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
+      // custodial: the platform keeps the (generated) signing key encrypted, so the connector can chat, and the
+      // custody record follows the same transaction (a refused sign-up drops both the row and its record).
+      this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!, { ownerId: o.owner_id, mode: "onboarded" });
       const conn = this.createConnectorToken(p, { label: body.label, attest_typed_by_owner: opts.attestTyped === true });
       out = {
         owner_id: o.owner_id, username: body.username,
@@ -1048,10 +1049,16 @@ export class Platform {
   }
 
   // ================================================================ custodial signing keys
-  private storeCustody(botId: string, kid: string, pem: string) {
+  /** Store the platform-held signing key. Which key an owner's Bot signs with is a governance fact, so a custody
+   *  row is not written without its own `bot.custody_enabled` record: the caller names the owner taking custody and
+   *  how the key arrived. Onboarding writes this inside its transaction, and `auditFollowsCommit` holds the record
+   *  until that transaction commits — a rollback drops the row and the record together, so the chain never names a
+   *  sign-up that was refused. The `enable_custody` door calls the same method, which is why it still writes one. */
+  private storeCustody(botId: string, kid: string, pem: string, audit?: { ownerId: string; mode: string }) {
     const now = nowIso();
     this.run(`INSERT INTO bot_custody (bot_id, kid, sealed_key, created_at, updated_at) VALUES (?,?,?,?,?)
       ON CONFLICT(bot_id) DO UPDATE SET kid = excluded.kid, sealed_key = excluded.sealed_key, updated_at = excluded.updated_at`, botId, kid, seal(this.kmsKey, pem, `${botId}:${kid}`), now, now);
+    if (audit) this.audit.append(`owner:${audit.ownerId}`, "bot.custody_enabled", botId, [audit.ownerId], { kid, mode: audit.mode });
   }
 
   custodyStatus(p: Principal, botId?: string) {
@@ -1078,15 +1085,14 @@ export class Platform {
       // own signing identity while the owner no longer holds the private key to rotate. Only the adopted row loses
       // its date; a window that has already closed never reaches here (the lookup above refuses it, fail-closed).
       this.run("UPDATE bot_keys SET expires_at = NULL WHERE bot_id = ? AND kid = ?", b.id, kid);
-      this.storeCustody(b.id, kid, body.private_key_pem);
+      this.storeCustody(b.id, kid, body.private_key_pem, { ownerId, mode });
     } else {
       const kp = generateEd25519();
       kid = `cust_${new Date().toISOString().slice(0, 10).replaceAll("-", "")}_${randomBytes(2).toString("hex")}`;
       this.run("INSERT INTO bot_keys (bot_id, kid, alg, public_key, created_at) VALUES (?,?,?,?,?)", b.id, kid, "Ed25519", kp.publicKey, nowIso());
       mode = "rotated";
-      this.storeCustody(b.id, kid, kp.privateKeyPem);
+      this.storeCustody(b.id, kid, kp.privateKeyPem, { ownerId, mode });
     }
-    this.audit.append(`owner:${ownerId}`, "bot.custody_enabled", b.id, [ownerId], { kid, mode });
     return { bot_id: b.id, handle: "@" + b.handle, custodial: true, kid, mode, note: mode === "rotated" ? "new platform-held key added; existing keys (e.g. botctl) remain valid" : "uploaded key is now also held by the platform" };
   }
 
