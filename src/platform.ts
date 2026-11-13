@@ -498,6 +498,13 @@ export class Platform {
   createConnectorToken(p: Principal, body: { label?: string; attest_typed_by_owner?: boolean }) {
     const ownerId = this.requireOwner(p);
     assert(p.kind === "owner" && !p.scope, 403, "forbidden", "a connector token cannot mint tokens");
+    // A label is the name the owner will read back in the token list, and `String(...)` below is what reads it:
+    // an object was stored and answered as "[object Object]", a fraction as "1.5", a boolean as "true", and an
+    // array was flattened to its text — a name nobody typed, on a token that is live from that moment. Both
+    // doors (`POST /v1/connector-tokens` and `POST /v1/onboard`) come through here, so the type is judged once,
+    // before the active-token count and the INSERT: a refusal writes no token, and onboard's owner, bot and key
+    // rows roll back with it. An absent, null or empty label still means the default.
+    assert(body?.label === undefined || body?.label === null || typeof body.label === "string", 400, "invalid_request", "label must be a string");
     const label = String(body?.label ?? "Grok Bot").trim().slice(0, 60) || "Grok Bot";
     assert((this.get("SELECT COUNT(*) n FROM tokens WHERE kind='owner' AND scope='connector' AND subject_id = ? AND revoked_at IS NULL", ownerId).n) < 20, 409, "too_many_tokens", "revoke an old connector token first (max 20 active)");
     const id = newId("ctk");
