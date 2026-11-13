@@ -541,6 +541,12 @@ export class Platform {
     // the default without saying so. Only an absent, `null` or string handle goes on, and an empty string still
     // means "use the default" below.
     assert(body.bot_handle === undefined || body.bot_handle === null || typeof body.bot_handle === "string", 400, "invalid_request", "bot_handle must be a string");
+    // A type is a name, not a value to coerce. The `|| "grok-bot"` at the registerBot call below turns `0` and
+    // `false` into the default without saying so, hands `42` and `["x"]` to registerBot which stores them as the
+    // text "42.0"/"x", and lets the SQLite binder answer an object with a 500 after the owner row and its key were
+    // built. Only an absent, `null` or string type goes on; an empty string still means "use the default" and
+    // every string keeps the answer it had.
+    assert(body.integration_type === undefined || body.integration_type === null || typeof body.integration_type === "string", 400, "invalid_request", "integration_type must be a string");
     const generated: { username?: string; password?: string } = {};
     if (!body.username) {
       const base = String(body.display_name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16) || "owner";
