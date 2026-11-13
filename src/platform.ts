@@ -2227,8 +2227,17 @@ export class Platform {
    * The friend is named by `friend_bot_id` (the peer Bot id `list_friends` returns, #592) or by the older
    * `friend_owner_id`; with a Bot id the owner is derived from it, so a caller never needs an owner id.
    */
-  grantBotToFriend(p: Principal, botId: string, friendOwnerId?: string, friendBotId?: string) {
+  grantBotToFriend(p: Principal, botId: string, friendOwnerId?: string | null, friendBotId?: string | null) {
     const ownerId = this.requireOwner(p);
+    // Both fields name the friend: `friend_bot_id` one of their Bots, `friend_owner_id` their account. The reads
+    // below keep only a string, so a wrong type was never refused and never named: it read as "nothing named". With
+    // a valid `friend_owner_id` beside it the door then picked the friend's Bot off the friendship edge and wrote a
+    // live share of a Bot the caller never named — naming Bob's un-friended Bot with an array shared Alice's Bot
+    // with Bob's other Bot — and beside a real `friend_bot_id` a wrong-typed owner was silently dropped where a
+    // string naming another owner is refused. Refuse the field here, before the friendship is read and before
+    // anything is written; absent and null keep their meaning, and both absent still says what it always said.
+    assert(friendOwnerId === undefined || friendOwnerId === null || typeof friendOwnerId === "string", 400, "invalid_request", "friend_owner_id must be a string");
+    assert(friendBotId === undefined || friendBotId === null || typeof friendBotId === "string", 400, "invalid_request", "friend_bot_id must be a string");
     const namedOwner = typeof friendOwnerId === "string" ? friendOwnerId.trim() : "";
     const namedBot = typeof friendBotId === "string" ? friendBotId.trim() : "";
     assert(namedOwner || namedBot, 400, "invalid_request", "friend_owner_id or friend_bot_id required");
