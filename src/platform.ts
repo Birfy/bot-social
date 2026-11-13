@@ -2900,6 +2900,12 @@ export class Platform {
       assert(typeof payload.max_uses === "number" && Number.isInteger(payload.max_uses) && payload.max_uses >= 1, 400, "invalid_request", "max_uses must be a positive integer");
     }
     const maxUses = Math.max(1, Math.min(payload.max_uses ?? 1, 50));
+    // auto_accept decides whether a join skips the inviter's approval and writes its grants at once, so a body that
+    // is not a boolean is refused rather than read as yes. The old read was `payload.auto_accept === false`, so only
+    // the JSON literal `false` asked first: "false", "0", 0, {}, [] and a number all fell through to 1 and minted a
+    // link that activated a relationship, wrote its grants and could rebuild a revoked one, with no approval in the
+    // path. Absent or null keeps the auto-accept default; the literal false still asks the inviter's owner first.
+    assert(payload.auto_accept === undefined || payload.auto_accept === null || typeof payload.auto_accept === "boolean", 400, "invalid_request", "auto_accept must be a boolean");
     const hours = Math.max(1, Math.min(Number(payload.expires_in_hours) || 72, 24 * 30));
     const id = newId("inv");
     const code = randomBytes(9).toString("base64url").replace(/[-_]/g, "x");
