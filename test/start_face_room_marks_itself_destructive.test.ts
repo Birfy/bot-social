@@ -68,6 +68,8 @@ test("no other tool's wire annotations change when start_face_room is called", a
   const tools = (await c.listTools()).tools;
   const leaves = tools.find((t) => t.name === "leave_face_room")!;
   assert.equal(leaves.annotations?.destructiveHint, true);
-  assert.equal(tools.find((t) => t.name === "list_face_rooms")!.annotations?.readOnlyHint, true);
+  // list_invites is a neighbour that really is a read: every face room read now settles lapsed shares, so the
+  // shared-object guard has to name a tool this family did not move.
+  assert.equal(tools.find((t) => t.name === "list_invites")!.annotations?.readOnlyHint, true);
   await c.close();
 });
