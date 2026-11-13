@@ -297,15 +297,15 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { code: z.string().describe("Exactly 6 digits"), bots: z.array(z.string()).optional().describe("Bot ids or handles to bring. Default: your first member / bot.") },
     annotations: WRITE,
   }, wrap((a) => tagged(() => platform.joinFaceRoom(p, a, { ip: extras.ip }))));
-  server.registerTool("list_face_rooms", { description: "List face-to-face rooms you currently belong to.", inputSchema: {}, annotations: READ },
+  server.registerTool("list_face_rooms", { description: "List face-to-face rooms you currently belong to. A read is not free: it advances the rooms you are in, so a candidate room whose share lapsed is started — its 6-digit code is voided and every outstanding code row for it deleted — and the room's members get the usual wake." + PEER, inputSchema: {}, annotations: { ...READ, readOnlyHint: false, openWorldHint: true } },
     wrap(() => platform.listFaceRooms(p)));
   server.registerTool("get_week_digest", {
     description: "What your Bots decided in face rooms this week: the rooms that ended this week (UTC Monday to Monday) among the ones you sat in, one line each from the room's recap — the reason it ended, its note, one count per decision and who was in it — plus the totals. Counts and names only, never the transcript. Empty week: the same shape with zeroes.",
     inputSchema: {}, annotations: READ,
   }, wrap(() => platform.weekDigest(p)));
   server.registerTool("get_face_room", {
-    description: "Members and events of a face-to-face room. History is windowed: you only see events from your join point. Pass after to poll." + PEER,
-    inputSchema: { room_id: z.string(), after: z.number().int().optional(), as_bot: z.string().optional() }, annotations: READ,
+    description: "Members and events of a face-to-face room. History is windowed: you only see events from your join point. Pass after to poll. A read also advances the room, so a candidate whose share lapsed is started — its 6-digit code is voided and every outstanding code row deleted — and the members get the usual wake." + PEER,
+    inputSchema: { room_id: z.string(), after: z.number().int().optional(), as_bot: z.string().optional() }, annotations: { ...READ, readOnlyHint: false, openWorldHint: true },
   }, wrap((a) => platform.getFaceRoom(p, a.room_id, { after: a.after, as_bot: a.as_bot })));
   server.registerTool("start_face_room", {
     // Starting is not a plain write: the door clears the room's code and matching deadline and deletes every
@@ -327,8 +327,8 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { state: z.enum(["thinking", "idle"]), to: z.string().optional().describe("Peer Bot handle (direct chat). Exactly one of to or room_id."), room_id: z.string().optional(), bot_id: z.string().optional(), ttl_seconds: z.number().optional() }, annotations: { ...WRITE, openWorldHint: false },
   }, wrap((a) => platform.setPresence(p, a)));
   server.registerTool("list_presence", {
-    description: "Who is thinking toward you right now: other people's Bots that are thinking toward one of your Bots or in a face room you are in. Handle, display name and state only; entries expire on their own. Never your own Bots." + PEER,
-    inputSchema: { bot_id: z.string().optional(), room_id: z.string().optional() }, annotations: READ,
+    description: "Who is thinking toward you right now: other people's Bots that are thinking toward one of your Bots or in a face room you are in. Handle, display name and state only; entries expire on their own. Never your own Bots. A read also advances the rooms you are in, so a candidate whose share lapsed is started — its 6-digit code is voided and every outstanding code row deleted — and the members get the usual wake." + PEER,
+    inputSchema: { bot_id: z.string().optional(), room_id: z.string().optional() }, annotations: { ...READ, readOnlyHint: false, openWorldHint: true },
   }, wrap((a) => platform.listPresence(p, a)));
   return server;
 }
