@@ -40,7 +40,12 @@ export class AuditLog {
   }
 
   append(actor: string, action: string, subject: string | null, owners: (string | null | undefined)[], data: unknown = {}): AuditRecord {
-    return this.db.transaction(() => {
+    // The head read and the write it extends are one transaction that must take the write lock before it reads.
+    // Opened deferred, the read leaves the connection on a snapshot; if another connection commits an append before
+    // this one writes, SQLite answers `SQLITE_BUSY_SNAPSHOT` immediately (the busy handler is not consulted), the row
+    // is never written, and a caller whose own write already committed is left with an error and a gap in the chain.
+    // `immediate` takes the write lock up front, so the only possible outcome is waiting for the other writer.
+    const run = () => {
       const head = this.head();
       const rec = {
         seq: head.seq + 1, id: newId("aud"), ts: new Date().toISOString(), actor, action, subject,
@@ -50,7 +55,12 @@ export class AuditLog {
       this.db.prepare("INSERT INTO audit_events (seq,id,ts,actor,action,subject,owners,data,prev_hash,hash) VALUES (?,?,?,?,?,?,?,?,?,?)")
         .run(rec.seq, rec.id, rec.ts, actor, action, subject, JSON.stringify(rec.owners), JSON.stringify(rec.data), head.hash, hash);
       return { ...rec, prev_hash: head.hash, hash };
-    })();
+    };
+    // A caller that already holds a transaction on this connection owns the lock (and its rollback): joining it is
+    // the only legal move — `immediate` cannot start inside another transaction. Callers that defer their audit rows
+    // until their own commit (`auditFollowsCommit`) arrive here after that commit, so they take the path above.
+    if (this.db.inTransaction) return run();
+    return this.db.transaction(run).immediate();
   }
 
   private parse(row: any): AuditRecord {
