@@ -6238,6 +6238,12 @@ export class Platform {
     const note = typeof raw === "string" ? raw.trim() : "";
     assert(note.length >= 1 && note.length <= 500, 400, "invalid_note", "note must be 1-500 characters");
     this.run("UPDATE face_rooms SET note = ? WHERE id = ?", note, roomId);
+    // The note is what every seated owner reads back from the roster, and rewriting it is the lead's outbound act.
+    // Every other room mutation already leaves a row (created, joined, left, lead changed, invite minted/revoked,
+    // started, a message drafted or delivered); without one here, a room whose note was replaced reads exactly like a
+    // room whose note was always that way. The text itself is left out: the row records that the note changed, not
+    // the words, so the audit chain never becomes a second copy of what the room was told.
+    this.audit.append(this.actorOf(p), "face_room.note_changed", roomId, this.faceOwnerIds(roomId), { chars: note.length });
     return this.faceRoomView(roomId, viewer);
   }
 
@@ -6266,6 +6272,10 @@ export class Platform {
     // other home's roster while the same Bot could no longer write a line there.
     for (const [botId] of changes) this.assertInvitable(this.bot(botId));
     this.db.transaction(() => { for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId); }).immediate();
+    // A label is read by every member of the room, so relabelling a Bot changes what the other owners see of it. The
+    // other room mutations are all on the audit chain; this one was not, which left a roster that reads as if the
+    // labels it carries now are the labels it always carried. The row names the Bots and their new labels, nothing else.
+    this.audit.append(this.actorOf(p), "face_room.role_changed", roomId, this.faceOwnerIds(roomId), { bots: changes.map(([botId, role]) => ({ bot: botId, role })) });
     return this.faceRoomView(roomId, viewer);
   }
 
