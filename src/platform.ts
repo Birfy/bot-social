@@ -6015,6 +6015,19 @@ export class Platform {
     assert(this.faceCreatorOf(viewer.room) === viewer.ownerId, 403, "not_room_creator", "only the person who created this room picks its lead");
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    // A lead is named by id or handle, and "nobody named" is an absent field, an explicit null, or a blank
+    // string. `String(...)` below is what reads the value, and `String([])` and `String([""])` are both the empty
+    // string, so an array used to read as "nobody named" and clear the room's lead — an UPDATE of
+    // `face_rooms.lead_bot_id`, a `face_room.lead_changed` audit row and a room event the caller never asked for.
+    // Objects, booleans and numbers took the other old path and were answered 400 `bot_not_in_room`, naming the
+    // wrong problem. Refuse a wrong-typed name here, after the room's own refusals above (a closed room still
+    // answers 409, a caller who is not the creator still answers 403) and before anything is read or written, so
+    // "not given" keeps its meaning exactly. The aliases are read in the order below, so the first wrong one is
+    // the one named.
+    for (const field of ["bot", "bot_handle", "handle", "bot_id"] as const) {
+      const named = body?.[field];
+      assert(named === undefined || named === null || typeof named === "string", 400, "invalid_request", `${field} must be a string`);
+    }
     const raw = body?.bot ?? body?.bot_handle ?? body?.handle ?? body?.bot_id ?? null;
     let botId: string | null = null;
     if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
