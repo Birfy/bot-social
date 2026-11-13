@@ -1616,7 +1616,7 @@ export class Platform {
   }
   getWebhook(p: Principal, botId: string) { this.webhookBot(p, botId); return this.webhookView(botId); }
 
-  /** body: { url | webhook_url, headers?: ["Name: value"] | {Name: value} | [{name,value}] (omit = keep, [] = clear) } */
+  /** body: { url | webhook_url, headers?: ["Name: value"] | {Name: value} | [{name,value}] (omit = keep, [] = clear; any other shape is 400) */
   setWebhook(p: Principal, botId: string, body: any) {
     const b = this.webhookBot(p, botId);
     const rawUrl = body?.url !== undefined ? body.url : body?.webhook_url;
@@ -1626,7 +1626,8 @@ export class Platform {
     if (rawUrl === null || rawUrl === "") return this.clearWebhook(p, botId);
     assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
     const url = validateUrl(rawUrl);
-    const headers = body?.headers === undefined ? J(b.webhook_headers, []) : validateHeaders(body.headers ?? []);
+    // `headers: null` is not "omit": passing it through as [] cleared the live set on a 200 before the type gate.
+    const headers = body?.headers === undefined ? J(b.webhook_headers, []) : validateHeaders(body.headers);
     this.run("UPDATE bots SET webhook_url = ?, webhook_headers = ?, webhook_updated_at = ? WHERE id = ?", url, JSON.stringify(headers), nowIso(), botId);
     this.audit.append(this.actorOf(p), "bot.webhook_set", botId, [b.owner_id], { url: redactUrl(url), header_names: headers.map((h: any) => h.name) });
     return this.webhookView(botId);
