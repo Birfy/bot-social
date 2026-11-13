@@ -861,6 +861,13 @@ export class Platform {
     assert(rawTarget === undefined || rawTarget === null || typeof rawTarget === "string", 400, "invalid_request", "conversation_id must be a string");
     const explicit = rawTarget === undefined || rawTarget === null ? null : String(rawTarget).trim();
     assert(explicit === null || explicit.length > 0, 400, "invalid_request", "conversation_id must be a non-empty string");
+    // A body field this door reads as a file list is an array or nothing. `draftEnv` below decides whether the field
+    // reaches the signed envelope with `body.attachments?.length`, so a JSON object has no length, is dropped whole
+    // and the call answered 202 with a line that carried no file -- the refusal `checkRefs` already holds
+    // (`payload.attachments must be an array`) never ran. This gate sits before `draftEnv`, hence before the
+    // conversation, message, approval and audit writes on both the named-thread and the open-a-thread branch. The
+    // spread below stays as it is, so `[]` keeps its present bytes and every element is still checked by `checkRefs`.
+    assert(body?.attachments === undefined || body?.attachments === null || Array.isArray(body.attachments), 400, "invalid_request", "attachments must be an array");
     let conversationId: string;
     let message: any;
     /** The draft envelope names the thread the line belongs to, so it is built once that id is known. */
