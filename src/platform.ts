@@ -3341,6 +3341,11 @@ export class Platform {
    *  is, and a batch already announced has no undelivered row left to send. Returns how many batches left.
    *  Caller: the hourly tick in `src/main.ts`. It must never take that timer down. */
   flushHeldApprovals(): number {
+    // The batch is a delivery moment, so it is also the moment a card that died during the night settles. A summary
+    // names only cards that still wait, and a card settled here is announced by `expireApproval`, which closes its
+    // ledger line with that decision. Skipping the sweep let the digest name a card past its own deadline and close
+    // its ledger line, so the outlet was told the card still needed the owner and never heard it settle.
+    this.expireStale();
     let delivered = 0;
     const waiting = this.all("SELECT DISTINCT owner_id FROM approval_notifications WHERE delivered_at IS NULL");
     for (const r of waiting) {
