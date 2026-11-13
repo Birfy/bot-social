@@ -3779,6 +3779,11 @@ export class Platform {
     const today = this.get("SELECT COUNT(*) n FROM conversations WHERE relationship_id = ? AND created_at > ?", rel.id, since).n;
     if (today >= LIMITS.newConversationsPerPairPerDay) throw new ApiError(429, "rate_limited", "too many new conversations for this relationship today", { retry_after: 3600 });
     const allowed = (pl.intent.allowed_capabilities ?? intentDef.allowed).filter((c: string) => intentDef.allowed.includes(c));
+    // The intent summary is peer text: the other owner's console and event queue render it the moment the chat opens,
+    // so it is stored as a string or not at all. A non-string used to be coerced by `String(...)` ("[object Object]",
+    // "1", "1.5") and then stored and announced; refusing it here, before the DLP scan, the row, the audit entry and
+    // the events, keeps a summary nobody wrote from reaching the peer. Absent or null still means "no summary".
+    assert(pl.intent.summary === undefined || pl.intent.summary === null || typeof pl.intent.summary === "string", 400, "invalid_request", "summary must be a string");
     const intent = { type: intentDef.type, summary: String(pl.intent.summary ?? ""), params: pl.intent.params ?? {}, allowed_capabilities: allowed, success_criteria: pl.intent.success_criteria ?? null, max_turns: null };
     // #512: the peer reads this intent the moment the chat opens (`conversation.started`), so the half the caller
     // wrote is scanned before anything is stored — the same `dlp()` the draft door runs, and the same rule: a `block`
@@ -3865,6 +3870,13 @@ export class Platform {
     assert(pl.structured === undefined || pl.structured === null || (typeof pl.structured === "object" && !Array.isArray(pl.structured)), 400, "invalid_request", "payload.structured must be an object or null");
     const structuredOver = structuredOverLimit(pl.structured);
     if (structuredOver) throw structuredTooLarge(structuredOver);
+    // `expects_reply` is a boolean the peer's console reads as "this line may need a reply": it is stored in
+    // `messages.expects_reply` and rendered to the recipient as `!!m.expects_reply`. The field's contract is
+    // `z.boolean().optional()` and the owner's edit door already refuses a non-boolean (`editedPayloadOf`), but this
+    // door asked only `!== false`, so "false", 0, {} and [] all became true and the peer read the opposite of what
+    // the sender meant. Refused here, ahead of the DLP scan and the row: a refused draft writes no message, no card,
+    // no audit line and spends none of the Bot's draft budget. Absent or null still means "not given", so it stays true.
+    assert(pl.expects_reply === undefined || pl.expects_reply === null || typeof pl.expects_reply === "boolean", 400, "invalid_request", "expects_reply must be a boolean");
     // Refs live in the signed payload, so the sender's signature covers them.
     const refs = this.checkRefs(botId, pl.attachments);
     const chat = roomRel ? this.findRoomGrant(peerB.owner_id, botId, "chat.public", peerB.id, roomContext!) : this.findGrant(peerB.owner_id, botId, "chat.public", peerB.id);
