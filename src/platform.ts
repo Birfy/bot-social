@@ -5631,6 +5631,11 @@ export class Platform {
     this.assertInvitable(inviter);
     const block = this.inviteMintRateLimit(ownerId, ip);
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
+    // The link's name is a string or nothing, and `sanitizePeerName` below starts with `String(value ?? "")`:
+    // an object would be stored as "object Object", `[1,2]` as "1,2", `42` as "42", `true` as "true", and `[]`
+    // as "no name" — a line a stranger reads that the caller never typed. Judge the type before the read, and
+    // before the attempt record, the ticket row and the mint audit entry. Absent and null still mean no name.
+    assert(body?.name === undefined || body?.name === null || typeof body.name === "string", 400, "invalid_request", "name must be a string");
     this.faceRecordAttempt(ownerId, ip, "local", "minted");
     const ticket = newLocalInviteTicket();
     // No deadline: the owner withdraws the link, or a stranger spends it. The column is NOT NULL, so '' means none.
