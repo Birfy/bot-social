@@ -917,6 +917,14 @@ export class Platform {
     assert(body.content_base64.length <= Math.ceil(this.attachmentLimits.maxBytes / 3) * 4 + 4, 413, "attachment_too_large", `file exceeds ${this.attachmentLimits.maxBytes} bytes`);
     const bytes = decodeCanonicalBase64(body.content_base64);
     assert(bytes !== null, 400, "invalid_request", "content_base64 must be canonical base64");
+    // `name` is the one free-text field of an upload, and `checkFile` below reads it with `String(name ?? "")`: an
+    // object was stored as the file name "[object Object]", an array as "1,2" (or "a.png" for `["a.png"]`), a
+    // boolean as "true" and a number as "42". Each answered 201 with a real row, its bytes sealed and the owner's
+    // storage budget charged, and the peer that later receives the file read that string as its name. A name is a
+    // string; refuse every other shape before `checkFile` reads it, before the quota is read or charged, and before
+    // the row and the audit line. An absent or `null` name keeps the "file name required" answer below, and a string
+    // keeps the sanitiser's output byte for byte.
+    assert(body?.name === undefined || body?.name === null || typeof body.name === "string", 400, "invalid_request", "name must be a string");
     const check = checkFile(body.name, body.mime, bytes, this.attachmentLimits);
     if (!check.ok) throw new ApiError(check.code === "attachment_too_large" ? 413 : 415, check.code, check.message);
     this.cleanupAttachments();
