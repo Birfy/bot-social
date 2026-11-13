@@ -5823,6 +5823,12 @@ export class Platform {
     const ownerId = p.ownerId;
     const actor = this.actorOf(p);
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    // The list names the Bots to bring; it is not a value to coerce. `normalizeBotRefs` below would read
+    // `[["@handle"]]` as the handle it prints as (a claim nobody wrote as a name) and a number, object,
+    // boolean or null as the text it prints as, answering `404 bot_not_found` to a shape problem. The
+    // face-room join and leave doors judge the same field with `assertFaceBotRefs`; this door is the one
+    // that was left out.
+    if (p.kind !== "bot") this.assertFaceBotRefs(body);
     const refs = p.kind === "bot" ? [p.botId] : this.normalizeBotRefs(body);
     assert(refs.length >= 1, 400, "invalid_request", "bots: name at least one of your Bots to bring");
     assert(refs.length <= LOCAL_INVITE_MAX_BOTS, 400, "invalid_request", `bots: at most ${LOCAL_INVITE_MAX_BOTS}`);
