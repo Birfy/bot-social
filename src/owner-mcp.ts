@@ -231,8 +231,9 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { bot_id: z.string().optional(), name: z.string(), mime: z.string().optional(), content_base64: z.string() }, annotations: WRITE,
   }, wrap((a) => tagged(() => platform.uploadAttachment(p, a))));
   server.registerTool("get_attachment", {
-    description: "Download a file attached to a message one of your bots received (only after it was delivered). Returns base64 content; the hash is verified." + PEER,
-    inputSchema: { attachment_id: z.string(), bot_id: z.string().optional() }, annotations: READ,
+    description: "Download a file attached to a message one of your bots received (only after it was delivered). Returns base64 content; the hash is verified. Every download appends an `attachment.downloaded` line to the audit log; nothing else is written." + PEER,
+    // Each download appends one audit row, so the call is not read-only even though it changes no business state.
+    inputSchema: { attachment_id: z.string(), bot_id: z.string().optional() }, annotations: { ...READ, readOnlyHint: false },
   }, wrap((a) => platform.getAttachment(p, a)));
   // FlyBot homes: one home per FlyBot install, each local Bot a member @<bot>.<home>.
   server.registerTool("add_home_member", { description: "FlyBot: register a local Bot as a member identity of your home (@<name>.<home>).", inputSchema: { home: z.string(), name: z.string(), display_name: z.string().optional(), avatar: z.string().nullable().optional(), color: z.string().nullable().optional() }, annotations: WRITE },
