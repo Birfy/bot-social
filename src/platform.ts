@@ -2823,7 +2823,15 @@ export class Platform {
   /** The one Bot an owner names as id and/or handle, resolved inside that owner's account with the platform's
    *  usual handle semantics (`resolveOwnBot`). Naming a Bot that does not resolve is a 404 instead of a silent
    *  fallback, and two names that resolve to different Bots are a 400 — `bot_id` never wins silently. */
-  private namedOwnBot(ownerId: string, idRef: unknown, handleRef: unknown): any | undefined {
+  private namedOwnBot(ownerId: string, idRef: unknown, handleRef: unknown, idField = "bot_id", handleField = "bot_handle"): any | undefined {
+    // An id in a body is a string or nothing. `String(...)` below is what reads the value, so a wrong type used to
+    // reach it: an array stringifies to the empty string and reads as "no Bot named", which makes both call sites
+    // fall back to `inviteBotFor` — an invite shared, or a join made, for a different Bot than the caller named,
+    // with no error. Objects, booleans and numbers were answered 404 `bot_not_found` instead, naming the wrong
+    // problem. Refusing the field here, before the lookup and before anything is written, keeps "not given" (absent
+    // or null) exactly as it was.
+    assert(idRef === undefined || idRef === null || typeof idRef === "string", 400, "invalid_request", `${idField} must be a string`);
+    assert(handleRef === undefined || handleRef === null || typeof handleRef === "string", 400, "invalid_request", `${handleField} must be a string`);
     const id = idRef === undefined || idRef === null ? "" : String(idRef).trim();
     const handle = handleRef === undefined || handleRef === null ? "" : String(handleRef).trim();
     const byId = id ? this.resolveOwnBot(ownerId, id) : undefined;
@@ -2941,7 +2949,7 @@ export class Platform {
     if (p.kind === "bot") { const env = this.verifyEnvelope(p, body, "invite.join"); payload = env.payload ?? {}; joiner = this.bot(p.botId); viaBot = true; }
     else {
       payload = ownerWriteBody(body);
-      joiner = this.namedOwnBot(p.ownerId, payload.from_bot_id, payload.bot_handle) ?? this.inviteBotFor(p.ownerId);
+      joiner = this.namedOwnBot(p.ownerId, payload.from_bot_id, payload.bot_handle, "from_bot_id", "bot_handle") ?? this.inviteBotFor(p.ownerId);
       this.assertInvitable(joiner);
     }
     // The code from the body overrides the one in the path and used to reach the invite lookup as it arrived:
