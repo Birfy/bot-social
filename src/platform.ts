@@ -3591,7 +3591,12 @@ export class Platform {
     // decided: a real retry carries a fresh code, so counting it would answer every retry with
     // idempotency_conflict instead of the first outcome. The code itself still travels on `rest`.
     const { confirm_code: _code, ...hashed } = rest;
-    return this.idempotent(p, "decide_approval", key, { approval_id: aprId, ...hashed }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
+    // The card being decided is part of the call, so the path's id goes in last: a client that passes its whole
+    // object through carries an `approval_id` of its own, and spreading the body after the id let that copy replace
+    // the path's inside the fingerprint. Two different cards then shared one fingerprint, and the second call
+    // answered with the first card's result while its own card stayed pending — a decision reported as done and
+    // never performed.
+    return this.idempotent(p, "decide_approval", key, { ...hashed, approval_id: aprId }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
   }
 
   private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
