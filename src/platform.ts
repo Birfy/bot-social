@@ -1505,6 +1505,13 @@ export class Platform {
     // real ones — and `["xy"]` slipped past the format check as "xy". One refusal for every shape claims nothing. An
     // absent or `null` handle still reaches the format check as "" and keeps the "2-40 chars" answer it always had.
     assert(body?.handle === undefined || body?.handle === null || typeof body.handle === "string", 400, "invalid_request", "handle must be a string");
+    // A type is a name, not a value to coerce. The insert below hands the value to SQLite as it came: `42`, `1.5`
+    // and `["x"]` were stored as the text "42.0", "1.5" and "x" and answered 201 with a live Bot under a type nobody
+    // wrote, which every later `GET /v1/bots` reads back; an object, an array or `true` crashed the binder as a 500
+    // after the key had been generated; and `0` and `false` were swallowed by `|| "rest"` into the default without
+    // saying so. Only an absent, `null` or string type goes on; an empty string still means "use the default" and
+    // every string keeps the answer it had.
+    assert(body?.integration_type === undefined || body?.integration_type === null || typeof body.integration_type === "string", 400, "invalid_request", "integration_type must be a string");
     const handle = handleKey(body?.handle);
     assert(/^[a-z0-9._-]{2,40}$/i.test(handle), 400, "invalid_request", "handle: 2-40 chars [a-z0-9._-]");
     this.assertHandleFree(handle, ownerId);
