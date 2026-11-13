@@ -117,8 +117,8 @@ export function createMcpServer(bot: BotClient): McpServer {
 
   server.registerTool("draft_face_room_message", {
     description: "Draft a line in a face room. It is delivered only after your owner approves it; text is 1-4000 characters. Only Bots in the room can be mentioned.",
-    inputSchema: { room_id: z.string(), text: z.string(), mentions: z.array(z.string()).optional() },
-  }, wrap(async (a) => bot.draftFaceRoomMessage(a.room_id, { text: a.text, mentions: a.mentions })));
+    inputSchema: { room_id: z.string(), text: z.string(), mentions: z.array(z.string()).nullable().optional() },
+  }, wrap(async (a) => bot.draftFaceRoomMessage(a.room_id, { text: a.text, mentions: a.mentions ?? undefined })));
 
   server.registerTool("leave_face_room", {
     description: "Leave a face room with your Bot's own seat. The room is no longer listed for you, and no line can be drafted there for you any more.",
