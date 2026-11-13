@@ -161,6 +161,7 @@ function summarize(type: string, d: any): string {
     case "face_room.left": return `A bot left a face-to-face room${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.started": return `A face-to-face room is now open${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.lead_changed": return `A face-to-face room has a new lead${d?.room_id ? ` (${d.room_id})` : ""}`;
+    case "face_room.role_changed": return `A face-to-face room has a new role label${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "face_room.message": return `New face-to-face room message${d?.room_id ? ` (${d.room_id})` : ""}`;
     case "approval.digest": return `${d?.count ?? 0} approval${d?.count === 1 ? "" : "s"} waited through quiet hours${d?.pending_count ? ` (${d.pending_count} pending)` : ""}`;
     case "message.not_delivered": return `A message could not be delivered${cid}${d?.reason ? ` (${d.reason})` : ""}`;
