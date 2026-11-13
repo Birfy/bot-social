@@ -6047,6 +6047,14 @@ export class Platform {
     const viewer = this.faceRequireMember(p, roomId);
     // Only the caller's own Bots leave. A brought guest is the other owner's seat even though this owner
     // added it, and the other owner ends it by revoking the grant (or leaving with their own token).
+    // The list is judged before it is read: `normalizeBotRefs` answers an explicit empty list (or a list of
+    // blanks) with "nothing named", and here "nothing named" means every seat this owner holds — so `{"bots": []}`
+    // used to end them all, revoke the room's grants for those seats and send the room's members a leave event,
+    // and the last member's leave closes the room. The join door states the rule for the same read (#609): an
+    // explicit list names Bots, so an empty list names nobody and is refused, and an element that is not a
+    // non-empty string is refused rather than coerced. An absent field and an explicit null keep their meaning:
+    // every seat of the caller leaves.
+    this.assertFaceBotRefs(body);
     let leaving = viewer.members.filter((m: any) => m.owner_id === p.ownerId);
     const refs = this.normalizeBotRefs(body);
     if (refs.length) {
@@ -6071,7 +6079,12 @@ export class Platform {
     // follows for `face_room.joined`; the response and the room state are unchanged.
     if (leaving.length) this.audit.append(this.actorOf(p), "face_room.left", roomId, [...this.faceOwnerIds(roomId), viewer.ownerId], { bots: leaving.map((m: any) => m.bot_id) });
     const still = this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND owner_id = ? AND left_at IS NULL", roomId, viewer.ownerId);
-    if (!still) return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
+    // `still` asks about the owner, but the read below answers as the caller, and a Bot token is narrowed to its own
+    // seat (`faceRequireMember`). A Bot that leaves while another seat of the same owner stays therefore had its seat
+    // removed, wrote the audit row and the events, and was then answered 404 `face_room_not_found` for the read-back.
+    // A Bot token always gets the summary: its own seat is gone by definition, and a client that reads 404 as "the
+    // leave failed" would retry a leave that already happened.
+    if (!still || p.kind === "bot") return { room_id: roomId, status: this.get("SELECT status FROM face_rooms WHERE id = ?", roomId).status, left: leaving.map((m: any) => m.handle) };
     return this.faceRoomView(roomId, this.faceRequireMember(p, roomId));
   }
 
