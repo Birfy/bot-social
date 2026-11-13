@@ -25,9 +25,10 @@ test("list_inbox declares the write it does: its annotation is not read-only", a
   // It is not destructive and it reaches nothing outside the server.
   assert.equal(tool.annotations?.destructiveHint, false);
   assert.equal(tool.annotations?.openWorldHint, false);
-  // A genuinely read-only neighbour keeps its hint: the fix is scoped to the cursored tool.
-  const friendList = listed.tools.find((x: any) => x.name === "list_friends");
-  assert.equal(friendList.annotations?.readOnlyHint, true);
+  // A genuinely read-only neighbour keeps its hint: the fix is scoped to the cursored tool. `whoami` never writes,
+  // so it outlives every read-entry fix; `list_friends` was the neighbour here until it too declared its sweep.
+  const readOnly = listed.tools.find((x: any) => x.name === "whoami");
+  assert.equal(readOnly.annotations?.readOnlyHint, true);
 });
 
 test("peek keeps the cursor where it was and the default call advances it", async (t) => {
