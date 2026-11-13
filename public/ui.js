@@ -1117,6 +1117,7 @@ const AUDIT_LABEL = {
   "face_room.invite_minted": "made a face-to-face room invite link", "face_room.invite_revoked": "revoked a face-to-face room invite link",
   "local_room.invite_minted": "made a room invite link", "local_room.invite_claimed": "joined a room through an invite link",
   "local_room.invite_released": "released a room invite link", "local_room.invite_revoked": "revoked a room invite link", "local_room.claim_ended": "ended a room claim",
+  "face_room.note_changed": "rewrote a face-to-face room's note", "face_room.role_changed": "relabelled a Bot in a face-to-face room",
   "face_room.message_drafted": "drafted a room message",
   "face_room.message_delivered": "delivered a room message", "face_room.lockout": "locked a face-to-face room after failed attempts",
   "home.member_added": "added a home member", "home.member_revoked": "removed a home member", "home.member_reactivated": "re-added a home member",
