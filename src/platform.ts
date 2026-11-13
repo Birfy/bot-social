@@ -6101,6 +6101,11 @@ export class Platform {
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
+    // The line is stored, shown and announced as text, so the field must be a string. `String(body?.text ?? "")`
+    // turned an object into "[object Object]" and an array into "1,2", which the room then read as a real line, and
+    // with auto_approve_face_rooms on nobody had to approve it. Refused here, after the room_closed 409 so a closed
+    // room keeps its own answer; absent, null and "" still fall through to the length sentence below.
+    assert(body?.text === undefined || body?.text === null || typeof body.text === "string", 400, "invalid_request", "text must be a string");
     const text = String(body?.text ?? "");
     assert(text.length > 0 && text.length <= 4000, 400, "invalid_request", "text (1-4000 chars) required");
     // A room can contain a Bot another owner brought with a grant (added_by_owner_id = this owner). That
