@@ -536,6 +536,11 @@ export class Platform {
   /** One-step onboarding: new owner + their bot (platform-generated key) + a connector token. */
   onboard(body: { username?: string; password?: string; display_name?: string; bot_handle?: string; bot_display_name?: string; label?: string; integration_type?: string }, opts: { attestTyped?: boolean } = {}) {
     body = { ...(body ?? {}) };
+    // A handle is a string: `handleKey` is `String(...)`, so a boolean or a number would register a Bot nobody
+    // named (@true, @1.5) whose handle every friend, grant and room list reads back, and a falsy one would take
+    // the default without saying so. Only an absent, `null` or string handle goes on, and an empty string still
+    // means "use the default" below.
+    assert(body.bot_handle === undefined || body.bot_handle === null || typeof body.bot_handle === "string", 400, "invalid_request", "bot_handle must be a string");
     const generated: { username?: string; password?: string } = {};
     if (!body.username) {
       const base = String(body.display_name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16) || "owner";
@@ -575,7 +580,11 @@ export class Platform {
     }
     // The bot made here is the owner's FlyBot home (e.g. @danyang.home); local Bots join it as members.
     const base = String(body.display_name ?? body.username ?? "owner").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "owner";
-    const out = this.onboard({ ...body, bot_handle: body.bot_handle || `${base}.home`, label: "FlyBot", integration_type: "flybot-home" }, { attestTyped: true });
+    // Only an absent, `null` or empty handle means this route's own default; anything else is handed to onboard()
+    // unchanged, where the one type gate refuses a non-string instead of this line silently defaulting it.
+    const rawHandle: unknown = body.bot_handle;
+    const homeHandle = rawHandle === undefined || rawHandle === null || rawHandle === "" ? `${base}.home` : body.bot_handle;
+    const out = this.onboard({ ...body, bot_handle: homeHandle, label: "FlyBot", integration_type: "flybot-home" }, { attestTyped: true });
     const p: Principal = { kind: "owner", ownerId: out.owner_id };
     let webhook: unknown = null;
     if (body.webhook_url) {
