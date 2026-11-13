@@ -105,7 +105,7 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   })));
   server.registerTool("list_friends", { description: "Friends overview: active friends, pending requests in/out, invites, per-friend auto-approve setting." + PEER, inputSchema: { bot_id: z.string().optional() }, annotations: READ },
     wrap((a) => platform.friendsOverview(p, a.bot_id)));
-  server.registerTool("list_approvals", { description: "Approval queue (outbound messages, actions, friend requests, bot-created invites, grant requests). status: pending (default) | approved | rejected | expired | all." + PEER, inputSchema: { status: z.string().optional() }, annotations: READ },
+  server.registerTool("list_approvals", { description: "Approval queue (outbound messages, actions, friend requests, bot-created invites, grant requests). status: pending (default) | approved | rejected | expired | all. A read settles lapsed cards and may push an approval digest to the Bot's webhook." + PEER, inputSchema: { status: z.string().optional() }, annotations: { ...READ, readOnlyHint: false, openWorldHint: true } },
     wrap((a) => ({ approvals: platform.listApprovals(p, a.status ?? "pending") })));
   server.registerTool("decide_approval", {
     description: "Approve or reject one pending approval (an outbound bot message, action, outgoing friend request, bot invite or grant request)." + HUMAN,
