@@ -5,60 +5,20 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { bulkAuth, friends, startServer } from "./helpers.js";
 
-/** Every other tool's annotation exactly as `tools/list` reported it on master before this fix. Pinned whole rather
- *  than sampled: the 18 genuinely read-only tools share one `READ` object (`src/owner-mcp.ts:23`), so a fix that
- *  mutated that object in place would move tools nobody asked about. `list_approvals` is the one entry this change
- *  moves, so it is asserted on its own. */
-const UNCHANGED: Record<string, Record<string, boolean>> = {
-  "whoami": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "list_friends": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "decide_approval": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "respond_friend_request": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "set_auto_approve": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "remove_friend": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "extend_conversation": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "create_invite": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "list_invites": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "revoke_invite": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "join_invite": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "list_conversations": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "get_conversation": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "list_connector_tokens": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "revoke_connector_token": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "change_password": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "get_bot_profile": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "update_bot_profile": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "custody_status": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "enable_custody": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "start_conversation": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "send_message": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "upload_attachment": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "get_attachment": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "add_home_member": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "remove_home_member": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "list_home_members": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "list_bot_grants": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "grant_bot_to_friend": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "revoke_bot_grant": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "decline_bot_grant": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "list_remote_bots": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "send_as_member": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "report_not_delivered": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "list_inbox": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "close_conversation": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "get_webhook": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "set_webhook": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "test_webhook": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "clear_webhook": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "join_face_room": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "list_face_rooms": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "get_week_digest": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "get_face_room": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  "start_face_room": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "leave_face_room": { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  "send_face_room_message": { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  "set_presence": { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-  "list_presence": { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+/** Tools that are genuinely read-only on master and that no open fix is queued to move. They all share the one
+ *  `READ` object (`src/owner-mcp.ts:23`), so if this change mutated that object in place, every one of them would
+ *  flip — asserting each one byte-for-byte pins the shared constant without making this test fail when an unrelated
+ *  annotation fix lands on another tool. */
+const STAYS_READ_ONLY: Record<string, Record<string, boolean>> = {
+  whoami: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  list_invites: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  list_conversations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  list_connector_tokens: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  get_bot_profile: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  custody_status: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  list_home_members: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  get_webhook: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  get_week_digest: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 };
 
 /** The owner connector as a client reaches it: a real MCP client over HTTP, the door the annotation travels through. */
@@ -89,7 +49,7 @@ test("list_approvals declares the sweep and the webhook that a read performs", a
   assert.equal(tool.annotations?.destructiveHint, false, "an expiry is a settlement, not a deletion");
 });
 
-test("every other tool keeps the annotation master reported", async (t) => {
+test("the shared read-only annotation is not mutated in place", async (t) => {
   const s = await startServer(bulkAuth);
   const { A } = await friends(s.base);
   const c = await connect(s.base, (A.owner as any).token);
@@ -98,8 +58,8 @@ test("every other tool keeps the annotation master reported", async (t) => {
   const tools: any[] = (await c.listTools()).tools;
   assert.equal(tools.length, 50, "the fix moves one annotation, not the tool set");
   const seen = Object.fromEntries(tools.map((x: any) => [x.name, x.annotations ?? {}]));
-  for (const [name, annotations] of Object.entries(UNCHANGED)) {
-    assert.deepEqual(seen[name], annotations, `${name} keeps its annotation`);
+  for (const [name, annotations] of Object.entries(STAYS_READ_ONLY)) {
+    assert.deepEqual(seen[name], annotations, `${name} keeps the annotation it shared with list_approvals`);
   }
 });
 
