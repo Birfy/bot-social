@@ -43,9 +43,9 @@ test("the closing door declares the destruction it does: destructiveHint is true
   const inbox: any = listed.tools.find((x: any) => x.name === "list_inbox");
   assert.equal(inbox.annotations?.readOnlyHint, false);
   assert.equal(inbox.annotations?.destructiveHint, false);
-  const friendsList: any = listed.tools.find((x: any) => x.name === "list_friends");
-  assert.equal(friendsList.annotations?.readOnlyHint, true, "a read-only neighbour keeps the read defaults");
-  assert.equal(friendsList.annotations?.destructiveHint, false);
+  const readNeighbour: any = listed.tools.find((x: any) => x.name === "list_invites");
+  assert.equal(readNeighbour.annotations?.readOnlyHint, true, "a read-only neighbour keeps the read defaults");
+  assert.equal(readNeighbour.annotations?.destructiveHint, false);
 });
 
 test("the behaviour the hint describes: closing cancels the peer's pending card and tells its Bot why", async (t) => {
