@@ -645,7 +645,11 @@ export class Platform {
     const bot = this.registerBot(p, { handle, display_name: body?.display_name || name, integration_type: "flybot-member" });
     this.run("UPDATE bots SET home_bot_id = ? WHERE id = ?", home.id, bot.bot_id);
     this.applyLook(bot.bot_id, look);
-    this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!);
+    // The member's signing key comes under this home's custody on this line, so the chain has to name it: every
+    // other custody write records `bot.custody_enabled` (a sign-up as `onboarded`, the custody door with its own
+    // mode), while a key taken in through a home wrote the `bot_custody` row and no record at all. This is one of
+    // the two doors that add a member — the REST route and the `add_home_member` tool both land here.
+    this.storeCustody(bot.bot_id, bot.key.kid, bot.key.private_key_pem!, { ownerId, mode: "added" });
     this.audit.append(`owner:${ownerId}`, "home.member_added", bot.bot_id, [ownerId], { home: home.id, handle });
     return { bot_id: bot.bot_id, handle: bot.handle, home: "@" + home.handle, status: "active" };
   }
