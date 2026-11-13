@@ -596,6 +596,10 @@ export class Platform {
   addHomeMember(p: Principal, homeId: string, body: { name?: string; display_name?: string; local_id?: string; avatar?: string | null; color?: string | null }) {
     const ownerId = this.requireOwner(p);
     assert(body?.display_name === undefined || typeof body.display_name === "string", 400, "invalid_request", "display_name must be a string");
+    // A name is a string: an object, a boolean or a number reached the sanitiser through `String` and registered a
+    // member nobody named (@object-object.<home>, @true.<home>), whose handle every friend and invite reads back.
+    // An explicit null stays "not given", so the required-name answer below is unchanged.
+    assert(body?.name === undefined || body?.name === null || typeof body.name === "string", 400, "invalid_request", "name must be a string");
     const home = this.ownHome(ownerId, homeId);
     const look = { avatar: body?.avatar !== undefined ? validateAvatar(body.avatar) : undefined, color: body?.color !== undefined ? validateColor(body.color) : undefined };
     const room = 40 - home.handle.length - 1;
