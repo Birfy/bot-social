@@ -308,8 +308,11 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     inputSchema: { room_id: z.string(), after: z.number().int().optional(), as_bot: z.string().optional() }, annotations: READ,
   }, wrap((a) => platform.getFaceRoom(p, a.room_id, { after: a.after, as_bot: a.as_bot })));
   server.registerTool("start_face_room", {
-    description: "Turn a candidate face-to-face room into a normal group now. The 6-digit number becomes void; nobody else can join.",
-    inputSchema: { room_id: z.string() }, annotations: WRITE,
+    // Starting is not a plain write: the door clears the room's code and matching deadline and deletes every
+    // `face_room_codes` row for it, so a 6-digit number already shared with other people stops working at once.
+    // The annotation says that, next to the description.
+    description: "Turn a candidate face-to-face room into a normal group now. Every outstanding 6-digit code for the room is deleted and the number becomes void; nobody else can join.",
+    inputSchema: { room_id: z.string() }, annotations: { ...WRITE, destructiveHint: true },
   }, wrap((a) => tagged(() => platform.startFaceRoom(p, a.room_id))));
   server.registerTool("leave_face_room", {
     description: "Leave a face-to-face room (one action). Optionally name which of your bots leave; default: all of yours in the room.",
