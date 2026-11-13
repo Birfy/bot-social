@@ -890,11 +890,7 @@ export class Platform {
         // draft commit together; the trail and the peer's push wait until that commit is durable.
         let opened: any;
         try {
-          opened = this.db.transaction(() => {
-            const made = this.openConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), roomId);
-            const drafted = this.draftMessage(cb.bp, made.conversation.conversation_id, draftEnv(made.conversation.conversation_id), typed, mentions, roomId);
-            return { made, drafted };
-          }).immediate();
+          opened = this.openConversationWithDraft(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: to.id, intent: { type: "general_chat", summary: "chat" } }, { to: to.id }), draftEnv, typed, mentions, roomId);
         } catch (error) {
           // A reply-only Bot is refused inside this transaction, and the one thing that refusal leaves behind is the
           // target owner's notice, which the rollback took with it. It is written here, in the refusal's own words.
@@ -902,7 +898,7 @@ export class Platform {
           throw error;
         }
         conversationId = opened.made.conversation.conversation_id;
-        message = opened.drafted;
+        message = opened.message;
         opened.made.announce();
       }
     }
@@ -3833,6 +3829,38 @@ export class Platform {
     const opened = this.openConversation(p, env, roomId);
     opened.announce();
     return opened.conversation;
+  }
+
+  /** A thread's row, its event and its first draft as one write: a first line the policy layer refuses takes the
+   *  conversation, its `conversation.started` event and the quota it would have spent with it. The caller announces
+   *  only after that write has committed; a refusal inside the transaction leaves the peer's notice to the caller. */
+  private openConversationWithDraft(p: Principal, env: Envelope, draftEnv: (conversationId: string) => Envelope, typed = false, mentions: string[] = [], roomId: string | null = null) {
+    return this.db.transaction(() => {
+      const made = this.openConversation(p, env, roomId);
+      const message = this.draftMessage(p, made.conversation.conversation_id, draftEnv(made.conversation.conversation_id), typed, mentions, roomId);
+      return { made, message };
+    }).immediate();
+  }
+
+  /** Opens a direct conversation and drafts its first line as one write, then announces it to the peer. A reply-only
+   *  refusal is the one that leaves something behind: its notice is written here, after the rollback, as
+   *  `sendAsMemberOnce` does with its own `to` and `rel.id`. */
+  startConversationWithDraft(p: Principal, env: Envelope, draftEnv: (conversationId: string) => Envelope) {
+    try {
+      const { made, message } = this.openConversationWithDraft(p, env, draftEnv);
+      made.announce();
+      return { conversation: made.conversation, message };
+    } catch (error) {
+      if ((error as ApiError)?.code === "bot_not_shared") {
+        // Looking the notice up must never replace the refusal: if either read fails, the caller still gets `bot_not_shared`.
+        try {
+          const { botId } = this.requireBot(p);
+          const peer = this.bot((env.payload as any)?.peer_bot_id);
+          this.noticeUnshared(botId, peer, this.activeRelationship(botId, peer.id).id, "conversation.create");
+        } catch { /* the refusal is the answer; the notice is best effort */ }
+      }
+      throw error;
+    }
   }
 
   /** The write half of `createConversation`: the conversation row, its event row and the one way to announce it. The

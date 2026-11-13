@@ -210,10 +210,11 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
   }, wrap((a) => tagged(() => {
     const cb = platform.custodialBot(p, a.bot_id);
     const fr = findFriend(cb.bp, a.friend);
-    const conv: any = platform.createConversation(cb.bp, cb.sign("conversation.create", { type: "direct", peer_bot_id: fr.peer.bot_id, intent: { type: "general_chat", summary: "chat" } }, { to: fr.peer.bot_id }));
+    // The conversation and its first line are one write: a refused line leaves no empty conversation for the peer.
     // the intent summary is visible to the peer immediately, so it must never carry the (unapproved) text
-    const msg = platform.draftMessage(cb.bp, conv.conversation_id, cb.sign("message.draft", { text: a.text }, { conversation_id: conv.conversation_id }));
-    return { conversation: conv, message: msg };
+    return platform.startConversationWithDraft(cb.bp,
+      cb.sign("conversation.create", { type: "direct", peer_bot_id: fr.peer.bot_id, intent: { type: "general_chat", summary: "chat" } }, { to: fr.peer.bot_id }),
+      (conversationId) => cb.sign("message.draft", { text: a.text }, { conversation_id: conversationId }));
   })));
   server.registerTool("send_message", {
     description: "Send (draft) a message in an existing conversation." + SEND,
