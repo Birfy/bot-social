@@ -3804,6 +3804,13 @@ export class Platform {
     const { botId, ownerId } = this.requireBot(p);
     const pl: any = env.payload ?? {};
     assert((pl.type ?? "direct") === "direct", 400, "invalid_request", "MVP supports only direct (1:1) conversations");
+    // `peer_bot_id` is handed straight to the Bot lookup below, so the value's type decides what happens: an
+    // array was unrolled as the SQL parameter and opened a real conversation for a value that is not a string;
+    // an object, an array of the wrong length and a boolean made the binding throw and answered 500; a number
+    // answered 404 with the number in the message. A peer id is a string; judge it before the lookup and before
+    // the conversation row, its event and the audit entries. Absent and null fall through to their own message
+    // below, and a present falsy non-string (false, 0) is named as the type error it is.
+    assert(pl.peer_bot_id === undefined || pl.peer_bot_id === null || typeof pl.peer_bot_id === "string", 400, "invalid_request", "peer_bot_id must be a string");
     assert(pl.peer_bot_id, 400, "invalid_request", "peer_bot_id required");
     const peer = this.bot(pl.peer_bot_id);
     // #43: a conversation opened from a claimed room runs on that room's grants, not on a friendship.
