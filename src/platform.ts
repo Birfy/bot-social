@@ -4739,6 +4739,18 @@ export class Platform {
     if (raw === undefined || raw === null || raw === "") return [];
     return (Array.isArray(raw) ? raw : [raw]).map((x) => String(x).trim()).filter(Boolean);
   }
+  /** The owner's `bots` list is a list of names, not a value to coerce. An empty list, or an element that is not a
+   *  non-empty string, used to be read as "no Bot named" and seat the default member instead: the caller
+   *  named a Bot, so the door refuses the shape rather than picking one for them. A Bot token is untouched. */
+  private assertFaceBotRefs(body: any) {
+    const field = (["bots", "handles", "bot_ids", "bot_id", "bot", "handle"] as const).find((k) => body?.[k] !== undefined && body?.[k] !== null);
+    if (!field) return;
+    const raw = body[field];
+    if (typeof raw === "string") return;
+    assert(Array.isArray(raw), 400, "invalid_request", `${field} must be an array of strings`);
+    assert(raw.length > 0, 400, "invalid_request", `${field} must name at least one Bot`);
+    assert(raw.every((x) => typeof x === "string" && x.trim() !== ""), 400, "invalid_request", `${field} must be an array of strings`);
+  }
   private faceBotsToBring(p: Principal, body: any): { bot: any; viaGrant?: any }[] {
     const wrap = (bot: any, viaGrant?: any) => ({ bot, viaGrant });
     if (p.kind === "bot") {
@@ -4748,6 +4760,7 @@ export class Platform {
       this.assertInvitable(b);
       return [wrap(b)];
     }
+    this.assertFaceBotRefs(body);
     const refs = this.normalizeBotRefs(body);
     if (!refs.length) {
       const members = this.all("SELECT * FROM bots WHERE owner_id = ? AND status = 'active' AND integration_type = 'flybot-member' ORDER BY created_at", p.ownerId);
