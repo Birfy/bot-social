@@ -2015,11 +2015,14 @@ export class Platform {
   }
 
   /** A caller-supplied `expires_in_days` becomes an expiry here, before anything is written. `null`/omitted keeps
-   *  LIMITS.grantDefaultDays; anything that is not a finite positive number of days, or that lands outside the Date
-   *  range, is a 400. Doing it in `insertGrant` covers every path that writes a grant (the owner route, the approval
-   *  branch's `edited_params`, consent), so a typo is refused instead of superseding a live grant and then answering
-   *  500 from `toISOString()`. */
+   *  LIMITS.grantDefaultDays; a number or a numeric string is read as days, and anything else (`true`, an array, an
+   *  object) is a type error named as such instead of being coerced. A value that is not a finite positive number of
+   *  days, or that lands outside the Date range, is a 400. Doing it in `insertGrant` covers every path that writes a
+   *  grant (the owner route, the approval branch's `edited_params`, consent), so a typo is refused instead of
+   *  superseding a live grant and then answering 500 from `toISOString()`. */
   private grantExpiry(expiresInDays: unknown): string {
+    // `Number(true)` is 1 and `Number([30])` is 30: without this, a boolean or an array is written as a live grant.
+    assert(expiresInDays == null || typeof expiresInDays === "number" || typeof expiresInDays === "string", 400, "invalid_request", "expires_in_days must be a number of days");
     const days = expiresInDays == null ? LIMITS.grantDefaultDays : Number(expiresInDays);
     assert(Number.isFinite(days) && days > 0, 400, "invalid_request", "expires_in_days must be a positive number of days");
     const ms = Date.now() + days * 86400e3;
