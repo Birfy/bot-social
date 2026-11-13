@@ -801,6 +801,9 @@ export class Platform {
 
   private sendAsMemberOnce(p: Principal, body: { from_bot_id: string; to: string; text: string; attachments?: AttachmentRef[]; typed_by_owner?: boolean; mentions?: string[] | null; room_id?: string; conversation_id?: string }) {
     const ownerId = this.requireOwner(p);
+    // A body field this door hands to SQL is a string or nothing: an object became named parameters and a boolean had
+    // no binding at all, so each answered 500 instead of naming the field.
+    assert(body?.from_bot_id === undefined || body?.from_bot_id === null || typeof body.from_bot_id === "string", 400, "invalid_request", "from_bot_id must be a string");
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
     const cb = this.custodialBot(p, body?.from_bot_id);
@@ -4506,6 +4509,10 @@ export class Platform {
     const ownerId = this.requireOwner(p);
     const s = ms(body?.start), e = ms(body?.end);
     assert(e > s, 400, "invalid_request", "end must be after start");
+    // title and location are free text, and the INSERT binds them as they arrive: a non-string is refused here, before
+    // any row is written.
+    assert(body?.title === undefined || body?.title === null || typeof body.title === "string", 400, "invalid_request", "title must be a string");
+    assert(body?.location === undefined || body?.location === null || typeof body.location === "string", 400, "invalid_request", "location must be a string");
     const id = newId("cal");
     this.run("INSERT INTO calendar_entries (id, owner_id, start, end, title, location, created_at) VALUES (?,?,?,?,?,?,?)", id, ownerId, new Date(s).toISOString(), new Date(e).toISOString(), body.title ?? null, body.location ?? null, nowIso());
     return { id, start: new Date(s).toISOString(), end: new Date(e).toISOString() };
