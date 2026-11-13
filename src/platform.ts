@@ -5599,6 +5599,15 @@ export class Platform {
     let inviter: any;
     if (p.kind === "bot") inviter = this.bot(p.botId);
     else {
+      // A Bot name in this body is a string or nothing. `String(...)` below is what reads it, and an array
+      // stringifies to the empty string — which reads as "no Bot named" and mints the ticket for the account's
+      // default Bot instead of the one the caller named, with no error. Objects, booleans and numbers were
+      // answered 404 `bot_not_found`, naming the wrong problem. Judged here, before the fallback and before the
+      // row, the attempt and the audit entry; absent or null still means the default Bot. The three aliases are
+      // judged in the order `??` reads them, so a wrong-typed one is refused even when an earlier one would win.
+      assert(body?.bot_id === undefined || body?.bot_id === null || typeof body.bot_id === "string", 400, "invalid_request", "bot_id must be a string");
+      assert(body?.bot_handle === undefined || body?.bot_handle === null || typeof body.bot_handle === "string", 400, "invalid_request", "bot_handle must be a string");
+      assert(body?.handle === undefined || body?.handle === null || typeof body.handle === "string", 400, "invalid_request", "handle must be a string");
       const ref = String(body?.bot_id ?? body?.bot_handle ?? body?.handle ?? "").trim();
       inviter = ref
         ? this.get("SELECT * FROM bots WHERE id = ? AND owner_id = ?", ref, ownerId) ?? this.botByRef(ref, "owner_id = ?", [ownerId])
