@@ -1737,6 +1737,13 @@ export class Platform {
       const frozen = b.status === "frozen";
       reject(403, frozen ? "bot_frozen" : "bot_revoked", frozen ? "bot is frozen (emergency stop)" : "this bot identity was revoked");
     }
+    // A key id is a string, and it is judged before the lookup that binds it. `env.sig.kid` went straight into the
+    // bind list: `{}`/`[]` were read as a named-parameter map (RangeError: too few parameter values), booleans threw
+    // the bind TypeError, and both surfaced as a 500 `internal_error` before any reject() — so the refusal was
+    // neither a 4xx nor a `signature.rejected` audit line. A single-element array is worse: SQLite's binder
+    // flattens it as a positional parameter, so `["k1"]` verified exactly as the string `"k1"` and the request ran.
+    // The rejection goes through reject() to keep the audit line that every other envelope refusal writes.
+    if (env.sig.kid !== undefined && env.sig.kid !== null && typeof env.sig.kid !== "string") reject(400, "invalid_envelope", "sig.kid must be a string");
     const key = this.get("SELECT * FROM bot_keys WHERE bot_id = ? AND kid = ? AND status = 'active'", botId, env.sig.kid);
     if (!key || (key.expires_at && Date.parse(key.expires_at) < Date.now())) reject(401, "invalid_signature", "unknown, revoked or expired kid");
     if (env.payload_sha256 !== payloadDigest(env.payload)) reject(401, "invalid_signature", "payload digest mismatch");
