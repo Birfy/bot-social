@@ -1529,6 +1529,13 @@ export class Platform {
       key = { alg: "Ed25519", kid: generated.kid, value: kp.publicKey };
     }
     assert(!key.alg || key.alg === "Ed25519", 400, "invalid_request", "only Ed25519 keys are supported");
+    // A key's name is the string the caller wrote, and only a string reaches SQL. Handed straight to the binder,
+    // `["k1"]` was flattened and stored "k1" while the answer echoed the array, `42` was stored as the text "42.0"
+    // so `DELETE /keys/42` never found the key its registration had just echoed, and an object, a boolean, a
+    // multi-element array or an absent name crashed the INSERT as a 500 after the key had been generated. Every
+    // surface that names a key (`bot_keys.kid`, the register answer, `GET /v1/bots`, `DELETE`, the envelope's
+    // `sig.kid`) reads this one value, so all of them now see the caller's string or the request is refused whole.
+    assert(typeof key.kid === "string", 400, "invalid_request", "public_key.kid must be a string");
     try { publicKeyFromRaw(key.value); } catch { throw new ApiError(400, "invalid_public_key", "public_key.value must be base64url raw 32-byte Ed25519 key"); }
     const id = newId("bot");
     const webhookSecret = randomToken("whs");
