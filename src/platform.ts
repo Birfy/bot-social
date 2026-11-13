@@ -1840,6 +1840,12 @@ export class Platform {
     assert(payload.target_handle || payload.target_bot_id, 400, "invalid_request", "target_handle or target_bot_id required");
     // The target bot id is the other value this route hands to SQL as it arrived; a non-string answered 500.
     assert(payload.target_bot_id === undefined || payload.target_bot_id === null || typeof payload.target_bot_id === "string", 400, "invalid_request", "target_bot_id must be a string");
+    // `target_handle` is read by `handleRef`'s `String(ref ?? "")` below: an array stringifies to its element, so
+    // `[handle]` named the Bot and created a pending relationship with the target's event and audit entry, and an
+    // object, number or boolean stringified into a handle that then answered 404 with a name the caller never
+    // typed. A handle is a string; judge it before the lookup and before the relationship row, the event, the
+    // approval and the audit entry. Absent and null keep the "required" message above.
+    assert(payload.target_handle === undefined || payload.target_handle === null || typeof payload.target_handle === "string", 400, "invalid_request", "target_handle must be a string");
     const target = payload.target_bot_id ? this.bot(payload.target_bot_id) : this.botByHandle(payload.target_handle);
     // #90: a revoked Bot answers exactly like one that never existed — same status, code, message and fields.
     // Any difference would turn this door into an oracle for "which handle was revoked".
