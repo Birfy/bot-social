@@ -838,6 +838,9 @@ export class Platform {
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
     const cb = this.custodialBot(p, body?.from_bot_id);
+    // The recipient is an id or a handle, never a shape. An object or a boolean went into the statement as itself
+    // and answered 500; an array was spread over its parameters, so `["@peer.bot"]` sent that Bot a real line.
+    assert(body?.to === undefined || body?.to === null || typeof body.to === "string", 400, "invalid_request", "to must be a string");
     const to = this.get("SELECT * FROM bots WHERE id = ?", body?.to) ?? this.botByRef(body?.to);
     assert(to && to.status === "active", 404, "bot_not_found", "no such remote bot");
     void ownerId;
