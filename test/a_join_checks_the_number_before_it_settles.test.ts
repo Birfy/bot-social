@@ -191,9 +191,21 @@ test("the room's own read door still starts a lapsed candidate", async (t) => {
 test("the fix narrows the sweeps the join path already made; it adds no sweep site", () => {
   // The door settles a lapsed room through the same two calls it always made - the one inside its transaction and
   // the one behind the room view it answers with. Narrowing them must not be done by adding a new global sweep
-  // somewhere else on the path, so the number of sweep call sites in the file stays what this base has (17 at
-  // `e7305d2`). A door added later changes this number on purpose, together with this pin.
+  // somewhere else on the path, and the calls this door does make must stay scoped: a bare `advanceFaceRooms()`
+  // inside either of them is the defect itself. Judging the shape of those two calls, rather than counting every
+  // site in the file, keeps the pin true when a different door legitimately adds or removes one of its own (the
+  // file's count moved once already, when a refused read stopped sweeping lapsed shares across the platform).
   const src = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
-  const sites = src.match(/this\.advanceFaceRooms\(/g) ?? [];
-  assert.equal(sites.length, 17, "no sweep call site was added or removed");
+  const bodyOf = (name: string): string => {
+    const start = src.search(new RegExp("\\n  (?:private |public )?" + name + "\\("));
+    assert.ok(start >= 0, `${name} is in the file`);
+    const end = src.indexOf("\n  }\n", start);
+    assert.ok(end > start, `${name} has a body`);
+    return src.slice(start, end);
+  };
+  for (const name of ["joinFaceRoom", "faceSettledRoom"]) {
+    const body = bodyOf(name);
+    assert.ok(/this\.advanceFaceRooms\(/.test(body), `${name} still advances the rooms it did before`);
+    assert.ok(!/this\.advanceFaceRooms\(\s*\)/.test(body), `${name} makes no unscoped sweep`);
+  }
 });
