@@ -678,12 +678,12 @@ export class Platform {
       // A revoked identity must not keep in-flight drafts: the owner can otherwise approve one later and the
       // platform would deliver a message as a Bot that no longer exists. `cancelPendingFor` cancels the
       // approvals and marks their messages / actions / face-room drafts cancelled.
-      this.cancelPendingFor("bot_id = ?", [m.id], "member_revoked");
+      this.cancelPendingFor("bot_id = ?", [m.id], "member_revoked", { actor: `owner:${ownerId}` });
       // The other half of the same rule: a line that is held because *this* Bot was to receive it. Its card belongs
       // to the sender's owner, and nothing about it can be delivered any more — approving it answers `bot_revoked`
       // and the sender waits out the card's 24 hours for a line that can never go out. Settle it under its own
       // reason, and tell the sending Bot why: it did not lose its seat, the peer it wrote to is gone.
-      this.cancelPendingFor("kind = 'outbound_message' AND subject_id IN (SELECT id FROM messages WHERE recipient_bot = ?)", [m.id], "recipient_revoked", { notify: true });
+      this.cancelPendingFor("kind = 'outbound_message' AND subject_id IN (SELECT id FROM messages WHERE recipient_bot = ?)", [m.id], "recipient_revoked", { notify: true, actor: `owner:${ownerId}` });
       for (const id of conversations) this.refreshConversationStatus(id);
       // A revoked identity must also leave the rooms it was in; otherwise it stays a visible member and the
       // room keeps writing events (and countersignatures) for a Bot nobody can read.
@@ -1751,7 +1751,7 @@ export class Platform {
       }
       // The stop is told to the Bot that owned each card: for an invite that is also the only honest answer to
       // "what happened to my link?" after its card is settled. The invite row is swept by `cancelPendingFor`.
-      this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop", { notify: true });
+      this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop", { notify: true, actor: `owner:${ownerId}` });
       // The kill switch also stops the outbound side. Settle the queue now, with a terminal row, so a push queued
       // before the stop cannot leave after it or be replayed on resume; the webhook URL itself stays (resume must
       // not make the owner hang it again), so this is a state check, not a URL change.
@@ -2254,7 +2254,7 @@ export class Platform {
     this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", nowIso(), grantId);
     const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
     this.endGrantRooms(this.shareLineage([grantId]), `owner:${ownerId}`);
-    this.settleCardsForEndedShare([g]);
+    this.settleCardsForEndedShare([g], "grant_revoked", `owner:${ownerId}`);
     this.audit.append(`owner:${ownerId}`, "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], { capability: g.capability, grantee_bot: g.grantee_bot });
     this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "revoked" });
     return { grant_id: grantId, status: "revoked" };
@@ -2285,7 +2285,7 @@ export class Platform {
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
-    this.settleCardsForEndedShare(bundle);
+    this.settleCardsForEndedShare(bundle, "grant_revoked", `owner:${ownerId}`);
     this.audit.append(this.actorOf(p), "grant.revoked", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, bundle: ids, rooms,
     });
@@ -2324,7 +2324,7 @@ export class Platform {
     const now = nowIso();
     for (const id of ids) this.run("UPDATE grants SET status = 'declined', revoked_at = ? WHERE id = ?", now, id);
     const rooms = this.endGrantRooms(this.shareLineage(ids), `owner:${ownerId}`);
-    this.settleCardsForEndedShare(bundle);
+    this.settleCardsForEndedShare(bundle, "grant_revoked", `owner:${ownerId}`);
     this.audit.append(this.actorOf(p), "grant.declined", grantId, [r?.requester_owner, r?.target_owner], {
       capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: granted, grantor_owner: g.grantor_owner, bundle: ids, rooms,
     });
@@ -2817,7 +2817,7 @@ export class Platform {
       // Blocked or revoked ends every card hanging off this relationship. Tell each Bot that owned one: the card
       // leaves its owner's list, and without this the Bot kept waiting on a decision that can no longer arrive.
       // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
-      this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true });
+      this.cancelPendingFor("(conversation_id IN (SELECT id FROM conversations WHERE relationship_id = ?) OR subject_id = ?)", [r.id, r.id], status, { notify: true, actor: `owner:${ownerId}` });
       // A join that is still waiting never became a friendship, so cancelling or blocking it gives its invite slot
       // back, exactly as `consent` decline, `expireStale` and a rejected approval do (P9). Only the two pending
       // states: an active row's use is the join it paid for, and a terminal row already gave the slot back (or
@@ -3108,7 +3108,7 @@ export class Platform {
     // The card that was waiting on this invite is decided by the revoke: leaving it pending offers the owner an
     // Approve that can no longer mean anything (the decision path refuses a revoked invite). Same shape as the
     // other revokes: the record stays, settled, with the reason, and the Bot that asked hears it.
-    this.cancelPendingFor("kind = 'invite' AND subject_id = ?", [i.id], "invite_revoked", { notify: true });
+    this.cancelPendingFor("kind = 'invite' AND subject_id = ?", [i.id], "invite_revoked", { notify: true, actor: `owner:${ownerId}` });
     this.audit.append(`owner:${ownerId}`, "invite.revoked", i.id, [ownerId], {});
     return { invite_id: i.id, status: "revoked" };
   }
@@ -3437,7 +3437,7 @@ export class Platform {
    *  thread is the room's business, and an invite acceptance keeps its draft (the peer's answer outlives the chat).
    *  The reason is the door's: a revoke or a decline takes the share back (`grant_revoked`), and a share that ran out
    *  of time lapsed (`grant_expired`) — the owner's card and the drafting Bot read the word for what happened. */
-  private settleCardsForEndedShare(grants: any[], reason = "grant_revoked") {
+  private settleCardsForEndedShare(grants: any[], reason = "grant_revoked", actor = "platform") {
     for (const g of grants) {
       if (g.capability !== "chat.public" || g.room_id) continue;
       const granted = this.grantedBotOf(g);
@@ -3453,6 +3453,7 @@ export class Platform {
         {
           keep: { where: "NOT (kind = 'action' AND subject_id IN (SELECT id FROM actions WHERE action_type = 'calendar.accept_invite'))", args: [] },
           notify: true,
+          actor,
         },
       );
     }
@@ -3480,7 +3481,10 @@ export class Platform {
     return !this.findGrant(recipient.owner_id, sender.id, "chat.public", recipient.id);
   }
 
-  private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean } = {}) {
+  private cancelPendingFor(where: string, args: unknown[], reason: string, opts: { keep?: { where: string; args: unknown[] }; notify?: boolean; actor?: string } = {}) {
+    // Who the line credits: the owner whose own door settled the card, or the platform when a clock or a cascade
+    // did — the same actor the door's other records carry, and `platform` the way `approval.expired` is written.
+    const actor = opts.actor ?? "platform";
     // Which Bots this sweep already tells: the outlet may be one of them, and one Bot must hear one decision.
     const told = new Set<string>();
     // `keep` is one extra condition on the rows to cancel: a row it excludes (the caller spells that as a NOT) keeps
@@ -3489,6 +3493,11 @@ export class Platform {
     const keepArgs = opts.keep ? opts.keep.args : [];
     for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND ${where}${keepSql}`, ...args, ...keepArgs)) {
       this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
+      // The card entered the chain when it was drafted, and two of its three ends name it there: a decision writes
+      // `approval.decided` and the clock writes `approval.expired`. This end wrote nothing, so an owner's own page
+      // read the draft and then stopped. The line belongs to the settlement, not to the announcement: the call sites
+      // that deliberately tell nobody still leave it, and on those it is the only trace there is.
+      this.audit.append(actor, "approval.cancelled", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id, reason });
       if (a.kind === "outbound_message") {
         this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
         // The line dies with the card; the files it held at draft time never reached the peer, so they are free.
@@ -3733,14 +3742,14 @@ export class Platform {
     // Last line of defence for a stale row an older build left pending after its sender was revoked. Cancel it
     // now (same record the revoke leaves behind) instead of delivering as a Bot that no longer exists.
     if (a.bot_id && ["outbound_message", "face_room_message", "action"].includes(a.kind) && this.bot(a.bot_id).status !== "active") {
-      this.cancelPendingFor("id = ?", [a.id], "member_revoked");
+      this.cancelPendingFor("id = ?", [a.id], "member_revoked", { actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", revokedReason);
     }
     // The same defence for the other side: a line addressed to a Bot that has since been revoked. The revoke settles
     // its cards, so this is a row an older build left pending; cancel it now rather than answering `bot_revoked`
     // from deep in the delivery door, where the owner learns nothing about why the card cannot be decided.
     if (a.kind === "outbound_message" && this.get("SELECT 1 FROM messages WHERE id = ? AND recipient_bot IN (SELECT id FROM bots WHERE status = 'revoked')", a.subject_id)) {
-      this.cancelPendingFor("id = ?", [a.id], "recipient_revoked", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "recipient_revoked", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", recipientGoneReason);
     }
     // A card that outlived its conversation is not a decision. Settle the chat first if its own clock ran out, then
@@ -3761,7 +3770,7 @@ export class Platform {
           if (!keepsInvite) {
             // A chat already closed before this line (a row an older build left pending) is settled here, once. When
             // the clock just ran out, `materializeExpiry` above is what cancelled the card: nothing to repeat.
-            if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed", { notify: true });
+            if (wasClosed) this.cancelPendingFor("id = ?", [a.id], c.outcome === "expired" ? "conversation_expired" : "conversation_closed", { notify: true, actor: `owner:${ownerId}` });
             throw new ApiError(409, "invalid_state", c.outcome === "expired"
               ? "the conversation expired; this draft can no longer be approved"
               : "the conversation is closed; this draft can no longer be approved");
@@ -3772,7 +3781,7 @@ export class Platform {
     // Same defence for the other half: a card left pending while the share that allowed the line was revoked under
     // an older build is settled now, not delivered past a door the peer's owner already closed.
     if (this.heldCardShareGone(a)) {
-      this.cancelPendingFor("id = ?", [a.id], "grant_revoked", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "grant_revoked", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", shareGoneReason);
     }
     const decision = body?.decision;
@@ -3786,11 +3795,11 @@ export class Platform {
     const actionGone = "the action this card was for was never written; this card can no longer be approved";
     const draftGone = "the draft this card was for was never written; this card can no longer be approved";
     if (a.kind === "outbound_message" && !this.get("SELECT 1 FROM messages WHERE id = ?", a.subject_id)) {
-      this.cancelPendingFor("id = ?", [a.id], "message_unavailable", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "message_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", messageGone);
     }
     if (a.kind === "relationship_request" && !this.get("SELECT 1 FROM relationships WHERE id = ?", a.subject_id)) {
-      this.cancelPendingFor("id = ?", [a.id], "relationship_unavailable", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "relationship_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", requestGone);
     }
     // The same defence for an action card, and only on the approve side: `draftAction` writes the `actions` row and
@@ -3799,7 +3808,7 @@ export class Platform {
     // card pending, so the owner's queue keeps offering a decision that cannot succeed. Rejecting such a card writes
     // no action row, so that decision never needed the subject and stays available.
     if (approve && a.kind === "action" && !this.get("SELECT 1 FROM actions WHERE id = ?", a.subject_id)) {
-      this.cancelPendingFor("id = ?", [a.id], "action_unavailable", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "action_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", actionGone);
     }
     // The same defence for a room line, and on both decisions: `draftFaceRoomMessage` writes the draft and the card
@@ -3808,7 +3817,7 @@ export class Platform {
     // rejecting reads it in `rejectFaceRoomMessage` to mark it rejected — so both answered a 500 that names nothing
     // and left the card pending. Settle it once, with the reason, and refuse instead.
     if (a.kind === "face_room_message" && !this.get("SELECT 1 FROM face_room_drafts WHERE id = ?", a.subject_id)) {
-      this.cancelPendingFor("id = ?", [a.id], "draft_unavailable", { notify: true });
+      this.cancelPendingFor("id = ?", [a.id], "draft_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", draftGone);
     }
     let result: any = {};
@@ -3844,7 +3853,7 @@ export class Platform {
       const it = this.get("SELECT * FROM invites WHERE id = ?", a.subject_id);
       const state = it ? this.inviteStatus(it) : "gone";
       if (state !== "pending_owner") {
-        this.cancelPendingFor("id = ?", [a.id], state === "revoked" ? "invite_revoked" : "invite_unavailable", { notify: true });
+        this.cancelPendingFor("id = ?", [a.id], state === "revoked" ? "invite_revoked" : "invite_unavailable", { notify: true, actor: `owner:${ownerId}` });
         throw new ApiError(409, "invalid_state", `the invite is ${state}; this card can no longer be approved`);
       }
       this.run("UPDATE invites SET status = ? WHERE id = ?", approve ? "active" : "rejected", a.subject_id);
@@ -4474,7 +4483,7 @@ export class Platform {
     // The invitee's decision about this chat's booking outlives the chat, so that one draft is kept; the subquery is
     // narrowed to this same conversation so an accept drafted in another chat is never exempted. Everything else is
     // cancelled, and each cancellation is announced to the Bot that owned the card.
-    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", { keep: this.acceptInviteCardOf(convId), notify: true });
+    this.cancelPendingFor("conversation_id = ?", [convId], "conversation_closed", { keep: this.acceptInviteCardOf(convId), notify: true, actor });
     this.audit.append(actor, "conversation.closed", convId, owners, { outcome, summary });
     // The summary was written by the Bot (or the owner) that closed the chat, so for the other side it is peer
     // content: it travels inside `untrusted_content` under `trust: "peer_untrusted"`, like every other peer text

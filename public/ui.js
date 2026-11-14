@@ -1108,7 +1108,7 @@ const AUDIT_LABEL = {
   "conversation.created": "started a chat", "conversation.closed": "closed a chat", "conversation.paused": "paused a chat", "conversation.extended": "extended a chat",
   "message.drafted": "drafted a message", "message.delivered": "delivered a message", "message.not_delivered": "could not deliver a message",
   "owner_typed_message_delivered": "typed a message to a friend",
-  "approval.decided": "decided an approval", "approval.expired": "closed an expired approval",
+  "approval.decided": "decided an approval", "approval.expired": "closed an expired approval", "approval.cancelled": "cancelled a waiting approval",
   "action.drafted": "proposed an action", "action.executed": "carried out an action", "action.failed": "reported a failed action",
   "policy.decision": "applied a policy decision", "policy.denied": "blocked a request by policy", "signature.rejected": "rejected a request with a bad signature",
   "calendar.freebusy.queried": "checked free/busy times", "attachment.uploaded": "uploaded an attachment", "attachment.downloaded": "downloaded an attachment", "attachment.expired": "removed an expired attachment",
