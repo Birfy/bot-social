@@ -6260,7 +6260,9 @@ export class Platform {
 
   /**
    * Role labels of your own Bots in a room (FlyBot #476 roster): `{ roles: { "<handle or bot id>": "Writer" | null } }`.
-   * Plain text, sanitized like a name and capped at 80; shown to every member as untrusted data. No room event.
+   * Plain text, sanitized like a name and capped at 80; shown to every member as untrusted data. A successful write
+   * appends a `room.role_changed` event and tells every member (`face_room.role_changed`), like the lead change it
+   * sits next to; a refused one writes nothing and tells nobody.
    */
   setFaceRoomRoles(p: Principal, roomId: string, body: any = {}) {
     this.advanceFaceRooms();
@@ -6282,7 +6284,21 @@ export class Platform {
     // outbound door gives (#196), before a row is written. Without this its owner could keep renaming it in every
     // other home's roster while the same Bot could no longer write a line there.
     for (const [botId] of changes) this.assertInvitable(this.bot(botId));
-    this.db.transaction(() => { for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId); }).immediate();
+    // A label is read by every member of the room, so relabelling a Bot changes what the other homes' rosters show of
+    // it. The lead change next door tells every seat (`room.lead_changed`, then `face_room.lead_changed` on each
+    // member Bot); a label change with only an audit row (#675) left a member polling `?after=<cursor>` with nothing
+    // to read. One event, in the same write, with the lead event's field set: the label itself is peer text and stays in
+    // the view, never in a platform-trusted event or a push. A write that sets the label the Bot already carries
+    // changes nothing to announce and stays silent, the way setting the same lead again does; the audit row below
+    // still records every write, as #675 wrote it.
+    const held = new Map(this.all("SELECT bot_id, role FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((m: any) => [m.bot_id as string, (m.role ?? null) as string | null]));
+    const data = { text: "A role label in this room changed.", trust: "platform" };
+    this.db.transaction(() => {
+      for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId);
+      if (!changes.some(([botId, role]) => (held.get(botId) ?? null) !== role)) return;
+      const ev = this.faceInsertEvent(roomId, "room.role_changed", viewer.botIds[0] ?? null, data);
+      this.faceEmitMembers(roomId, "face_room.role_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
+    }).immediate();
     // A label is read by every member of the room, so relabelling a Bot changes what the other owners see of it. The
     // other room mutations are all on the audit chain; this one was not, which left a roster that reads as if the
     // labels it carries now are the labels it always carried. The row names the Bots and their new labels, nothing else.
