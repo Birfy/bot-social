@@ -3677,8 +3677,10 @@ export class Platform {
 
   private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
     const ownerId = this.requireOwner(p);
-    this.expireStale();
-    const a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
+    // Whether this card is the caller's to decide is answered before anything is settled: a 404 or a 403 must not be
+    // the call that expires another owner's cards, messages and requests. That is the same shape as #712's refused
+    // writes, and it was reachable here with any owner's token naming an id that is missing or not theirs.
+    let a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     assert(a, 404, "approval_not_found");
     assert(a.owner_id === ownerId, 403, "forbidden", "not your approval");
     // A connector token decides only the owner's own default hold (README "Who may decide a hold"). A row that carries
@@ -3702,6 +3704,10 @@ export class Platform {
         throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
       }
     }
+    // The card is this owner's to decide, so this is the delivery moment: settle everything that has lapsed, including
+    // the card itself. Read it again afterwards, because the copy above may be the one that just lapsed.
+    this.expireStale();
+    a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     // #84 follow-up: a settled card stays as a record, never as a decision. Say why, so the owner is not left
     // guessing at "approval is cancelled": a revoked sender and a revoked share have their own sentence, a share
     // that ran out of time has another (a lapse is not a revoke), and so do the two ways the room settles a line
