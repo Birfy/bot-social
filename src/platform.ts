@@ -6523,7 +6523,7 @@ export class Platform {
     const inj = detectInjection(String(payload.text ?? ""));
     const ev = this.faceInsertEvent(d.room_id, "room.message", d.sender_bot, {
       from: snap, trust: "peer_untrusted", untrusted_content: { text: payload.text },
-      security: { injection_suspected: inj.suspected }, edited_by_owner: body.decision === "approved_with_edits",
+      security: { injection_suspected: inj.suspected }, edited_by_owner: edited,
       ...(d.typed_by_owner ? { typed_by_owner: true } : {}),
       ...(listed.length ? { mentions: listed } : {}),
     });
@@ -6536,7 +6536,7 @@ export class Platform {
       ...(listed.length ? { mentions: listed } : {}),
     });
     this.emit(d.sender_bot, "approval.decided", { approval_id: a.id, kind: "face_room_message", message_id: d.id, room_id: d.room_id, decision: body.decision, note_to_bot: body.note_to_bot ?? null });
-    this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq });
+    this.audit.append("platform", "face_room.message_delivered", d.id, this.faceOwnerIds(d.room_id), { room_id: d.room_id, event_seq: ev.seq, edited });
     return { message_id: d.id, status: "delivered", event_cursor: ev.seq };
   }
   private rejectFaceRoomMessage(a: any, note?: string) {
