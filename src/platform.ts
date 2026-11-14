@@ -1830,7 +1830,16 @@ export class Platform {
   private expireStale() {
     this.advanceFaceRooms();
     const now = nowIso();
-    for (const r of this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ?", now)) {
+    this.settlePendingRelationships(this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ?", now));
+    for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
+  }
+
+  /** Settle the pending relationships in `rows`, with the writes the sweep makes. The sweep passes every lapsed row;
+   *  a door whose own check needs this pair, or this link's joins, fresh passes only those rows, so a refused call
+   *  settles nothing of another owner's. */
+  private settlePendingRelationships(rows: any[]) {
+    const now = nowIso();
+    for (const r of rows) {
       this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ?", now, r.id);
       // Flip each pending approval through `expireApproval`, not one bulk UPDATE. The bulk form is why the
       // `relationship_request` Bot was never told: it flipped the row (no `decided_at`, no `approval.expired` audit,
@@ -1840,7 +1849,21 @@ export class Platform {
       this.audit.append("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
       this.releaseInviteUse(r.id);
     }
-    for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
+  }
+
+  /** The lapsed requests between these two Bots. A door that reads this pair to answer `relationship_exists` settles
+   *  these first, and only these: a request that timed out must not keep the pair unreachable, while a refused call
+   *  must not open the delivery moment for the whole platform. */
+  private expirePendingBetween(a: string, b: string) {
+    this.settlePendingRelationships(this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ? AND ((requester_bot = ? AND target_bot = ?) OR (requester_bot = ? AND target_bot = ?))", nowIso(), a, b, b, a));
+  }
+
+  /** The lapsed joins this invite is still counting. A join spends a use when its relationship is written and gives it
+   *  back when that request expires (`releaseInviteUse`); the join door must see that return before it asks whether the
+   *  link has a use left, so it settles exactly the requests recorded against this invite. */
+  private expirePendingOnInvite(inviteId: string) {
+    this.settlePendingRelationships(this.all(`SELECT r.* FROM relationships r JOIN relationship_invites ri ON ri.relationship_id = r.id
+      WHERE ri.invite_id = ? AND r.status IN ('pending_requester_owner','pending_target') AND r.expires_at < ?`, inviteId, nowIso()));
   }
 
   /** The home a FlyBot sub-identity belongs to; any other bot is its own home. Display grouping only — never an access wildcard. */
@@ -1946,9 +1969,10 @@ export class Platform {
     // sits before `expireStale` can write, before the DLP scan sees it and before the row: a non-string used to reach
     // SQL as it arrived (500) or be coerced to "1.0", and a refused request must leave no row, audit line or event.
     assert(payload.message === undefined || payload.message === null || typeof payload.message === "string", 400, "invalid_request", "message must be a string");
-    // A pending request that timed out must not keep answering relationship_exists: expire it here, before the
-    // duplicate check, because requesting again is the first call after the 7-day window in many clients.
-    this.expireStale();
+    // A pending request that timed out must not keep answering relationship_exists: expire this pair's own rows
+    // here, before the duplicate check, because requesting again is the first call after the 7-day window in many
+    // clients. Only this pair: a refusal below settles nothing of another owner's.
+    this.expirePendingBetween(fromBot.id, target.id);
     const existing = this.pairRelationships(fromBot.id, target.id);
     assert(!existing.some((r) => r.status === "blocked"), 403, "blocked", "relationship is blocked");
     assert(!existing.some((r) => ["active", "pending_target", "pending_requester_owner"].includes(r.status)), 409, "relationship_exists");
@@ -1964,6 +1988,10 @@ export class Platform {
     if (blocked.length) {
       throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
     }
+    // This door is about to write a card (a Bot's request waits for its owner), so it opens a delivery moment: the
+    // queue is settled first, so the announcement never counts a card its owner can no longer decide. It sits here,
+    // past every refusal above, so a refused request opens no delivery moment.
+    this.expireStale();
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
     const expires = new Date(Date.now() + LIMITS.relationshipRequestTtlMs).toISOString();
@@ -3140,12 +3168,17 @@ export class Platform {
     // The code from the body overrides the one in the path and used to reach the invite lookup as it arrived:
     // an object, an array or a boolean answered 500. An absent or null code keeps the path's code.
     assert(payload?.code === undefined || payload?.code === null || typeof payload.code === "string", 400, "invalid_request", "code must be a string");
-    // Give back the use of any earlier pending join before reading this invite's status: the expired
-    // relationship may have been the one use this 1-use link had.
-    this.expireStale();
     code = payload.code ?? code;
-    const i = this.get("SELECT * FROM invites WHERE code = ?", code);
+    let i = this.get("SELECT * FROM invites WHERE code = ?", code);
     assert(i, 404, "invite_not_found");
+    // Give back the use of any earlier pending join before reading this invite's status: the expired relationship may
+    // have been the one use this 1-use link had. The lapsed join is found through this invite, and a lapsed request
+    // between these two Bots must not answer relationship_exists either -- both scopes are this door's own business,
+    // so a refused join settles nothing of another owner's. The link is read again after the settle: the use it gave
+    // back is a column of this row, not of the copy read before it.
+    this.expirePendingOnInvite(i.id);
+    this.expirePendingBetween(joiner.id, i.bot_id);
+    i = this.get("SELECT * FROM invites WHERE id = ?", i.id);
     const st = this.inviteStatus(i);
     assert(st === "active", 410, "invite_unavailable", `invite is ${st}`, { invite_status: st });
     const inviter = this.bot(i.bot_id);
@@ -3176,6 +3209,10 @@ export class Platform {
       throw new ApiError(422, "dlp_blocked", "outbound DLP blocked this draft", { categories: blocked.map((b) => b.category) });
     }
     const offered = this.validCaps(payload.offered_capabilities ?? J(i.requested_caps, DEFAULT_CAPABILITIES));
+    // A Bot's join writes a card for its own owner, so this door opens a delivery moment before it writes: the queue is
+    // settled first, so the announcement never counts a card its owner can no longer decide. Past every refusal above,
+    // so a refused join opens no delivery moment.
+    this.expireStale();
     const id = newId("rel");
     const status = viaBot ? "pending_requester_owner" : "pending_target";
     // Per-bot only. Legacy invite.scope / home endpoints are recorded as 'bot' and never cover members.
@@ -4108,7 +4145,6 @@ export class Platform {
     const owners = [ownerId, peerB.owner_id];
     const roomRel = roomContext ? this.roomReach(botId, peer, roomContext) : null;
     if (!roomRel) this.activeRelationship(botId, peer);
-    this.expireStale();
     const c = this.conv(convId);
     this.assertConvActive(c);
     const pl: any = env.payload ?? {};
@@ -4191,6 +4227,10 @@ export class Platform {
       this.audit.append("platform", "message.delivered", id, owners, { conversation_id: convId, turn: c.turn_count + 1, edited: false, injection_suspected: false, delivered_sha256: payloadDigest(payload), platform_countersig: delivered.platform_countersig, typed_by_owner: true });
       return { message_id: id, status: "delivered", approval_id: undefined, typed_by_owner: true, ...(kept.length ? { mentions: kept } : {}), policy: { decision: "allow", reasons: ["owner.typed_by_owner", "dlp.clean"], risk_flags: [], policy_version: POLICY_VERSION } };
     }
+    // A card is a delivery moment: the cards past their deadline settle before it is written, so the announcement and
+    // the digest never count one its owner can no longer decide. This sits past every refusal above, so a refused
+    // draft opens no delivery moment; the owner-typed line below writes no card and needs none.
+    this.expireStale();
     // The card and the row it points at are one write (#516): a refused `messages` insert used to leave the card
     // behind, and nothing in the repository deletes it — one such orphan then took the owner's whole pending list
     // down. The announcement the card queues waits for this commit too (`atomically`), as the action door does.
