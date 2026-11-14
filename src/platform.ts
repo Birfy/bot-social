@@ -2040,10 +2040,18 @@ export class Platform {
 
   consent(p: Principal, relId: string, body: { decision: "accept" | "decline"; grant_capabilities?: (string | { capability: string; scope?: any; expires_in_days?: number })[] }) {
     const ownerId = this.requireOwner(p);
-    this.expireStale();
-    const r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
+    // Whether this request is the caller's to answer is answered before anything is settled: a 404 or a 403 must not
+    // be the call that expires another owner's cards, messages, requests and conversations. That is the same shape as
+    // #712's refused writes and #718's refused decision, and this door was reachable with any owner's token naming an
+    // id that is missing or whose target owner is somebody else. The same function backs the MCP
+    // `respond_friend_request` tool.
+    let r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     assert(r, 404, "relationship_not_found");
     assert(r.target_owner === ownerId, 403, "forbidden", "only the target owner can consent");
+    // The request is this owner's to answer, so this is the delivery moment: settle everything that has lapsed,
+    // including this row. Read it again afterwards, because the copy above may be the one that just lapsed.
+    this.expireStale();
+    r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     assert(r.status === "pending_target", 409, "invalid_state", `relationship is ${r.status}`);
     assert(["accept", "decline"].includes(body?.decision), 400, "invalid_request", "decision must be accept|decline");
     // The body declares a list of capability names, and `(body.grant_capabilities ?? []).map(...)` below has no
