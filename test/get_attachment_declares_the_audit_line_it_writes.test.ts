@@ -60,8 +60,9 @@ test("get_attachment declares the audit line it writes: the read entry is not re
   // It appends an audit line only: nothing is deleted and nothing outside the server is reached.
   assert.equal(tool.annotations?.destructiveHint, false);
   assert.equal(tool.annotations?.openWorldHint, false);
-  // The fix is scoped to the tool: the shared read defaults other tools use must stay intact.
-  for (const name of ["whoami", "list_conversations", "custody_status"]) {
+  // The fix is scoped to the tool: the shared read defaults other tools use must stay intact. `list_conversations` is
+  // not in this set any more, because its read settles lapsed cards and it declares that write itself.
+  for (const name of ["whoami", "custody_status"]) {
     const neighbour = listed.tools.find((x: any) => x.name === name);
     assert.ok(neighbour, `${name} is registered`);
     assert.equal(neighbour.annotations?.readOnlyHint, true, `${name} is a pure read and keeps the read default`);

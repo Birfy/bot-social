@@ -13,12 +13,13 @@ const STARTS_A_ROOM: Record<string, Record<string, boolean>> = {
   list_presence: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
 };
 
-/** Tools that stay genuinely read-only. They all share the one `READ` object (`src/owner-mcp.ts:23`), so if this
- *  change had mutated that object instead of spreading it, every one of them would flip to write-plus-open-world. */
+/** Tools that stay genuinely read-only. They all share the one `READ` object (`src/owner-mcp.ts:23`), so if a change
+ *  had mutated that object instead of spreading it, every one of them would flip to write-plus-open-world.
+ *  `list_conversations` is not one of them any more: it settles lapsed cards in the chats it lists, so it declares its
+ *  own write and reach instead of sharing the read default. */
 const STAYS_READ_ONLY: Record<string, Record<string, boolean>> = {
   whoami: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   list_invites: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  list_conversations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   list_connector_tokens: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   get_bot_profile: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   custody_status: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

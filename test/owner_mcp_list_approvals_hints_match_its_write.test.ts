@@ -5,14 +5,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { bulkAuth, friends, startServer } from "./helpers.js";
 
-/** Tools that are genuinely read-only on master and that no open fix is queued to move. They all share the one
- *  `READ` object (`src/owner-mcp.ts:23`), so if this change mutated that object in place, every one of them would
- *  flip — asserting each one byte-for-byte pins the shared constant without making this test fail when an unrelated
- *  annotation fix lands on another tool. */
+/** Tools that are genuinely read-only and that no open fix is queued to move. They all share the one `READ` object,
+ *  so if a change mutated that object in place, every one of them would flip — asserting each one byte-for-byte pins
+ *  the shared constant without making this test fail when an unrelated annotation fix lands on another tool.
+ *  `list_conversations` left this list on purpose: it settles lapsed cards in the chats it lists, so it no longer
+ *  shares `READ` and declares its own write and reach below. */
 const STAYS_READ_ONLY: Record<string, Record<string, boolean>> = {
   whoami: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   list_invites: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  list_conversations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   list_connector_tokens: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   get_bot_profile: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   custody_status: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -61,6 +61,9 @@ test("the shared read-only annotation is not mutated in place", async (t) => {
   for (const [name, annotations] of Object.entries(STAYS_READ_ONLY)) {
     assert.deepEqual(seen[name], annotations, `${name} keeps the annotation it shared with list_approvals`);
   }
+  // The chat list is out of that constant because its read settles lapsed cards: it must say so, not inherit a lie.
+  assert.deepEqual(seen.list_conversations, { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    "list_conversations declares the settlement its own read performs");
 });
 
 test("one read of the queue expires a lapsed card and pushes exactly one webhook", async (t) => {
