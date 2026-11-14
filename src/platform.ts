@@ -4481,7 +4481,9 @@ export class Platform {
    *  not pending any more: it only waits for the sweep that settles it. The queue and the event feed run that sweep
    *  when they read; the chat read settles the cards its own answer is about, through the same `expireApproval` the
    *  sweep uses, so the page cannot say it waits for a decision the decision door answers 409. This is scoped to
-   *  those rows on purpose: a chat read does not also sweep the grants, rooms and relationships it does not report. */
+   *  those rows on purpose: a chat read does not also sweep the grants, rooms and relationships it does not report.
+   *  The caller passes only chats the reader is a party to, and passes them only after that check: a refused read
+   *  must not settle anything in someone else's chat. */
   private settleLapsedCardsInConversations(idsSql: string, args: unknown[]) {
     const now = nowIso();
     for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ? AND conversation_id IN (${idsSql})`, now, ...args)) {
@@ -4566,8 +4568,7 @@ export class Platform {
 
   /** Conversation view. Peer messages appear only once delivered, always wrapped as untrusted. */
   getConversation(p: Principal, convId: string) {
-    this.settleLapsedCardsInConversations("SELECT id FROM conversations WHERE id = ?", [convId]);
-    const c = this.conv(convId);
+    let c = this.conv(convId);
     let viewerBot: string;
     if (p.kind === "bot") { this.memberConv(p.botId, convId); viewerBot = p.botId; }
     else {
@@ -4575,6 +4576,11 @@ export class Platform {
       assert(mine, 403, "forbidden");
       viewerBot = mine;
     }
+    // Member check first: a read that is refused (403/404) must leave nothing behind, so the settle below runs only
+    // once the caller is known to be a party to this chat. It stays ahead of the message rows on purpose — the page
+    // must report the settled line, not the one the card's clock already ended.
+    this.settleLapsedCardsInConversations("SELECT id FROM conversations WHERE id = ?", [convId]);
+    c = this.conv(convId); // the settle can move this chat's row: report what it says now, not what it said before
     const msgs = this.all("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_ms ASC", convId)
       .filter((m) => m.sender_bot === viewerBot || m.status === "delivered")
       .map((m) => {

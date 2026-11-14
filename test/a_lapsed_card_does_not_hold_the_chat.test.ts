@@ -8,15 +8,17 @@
  * the queue at the same moment reads "(none)" — and the decision the page still offers answers 409 `invalid_state`
  * "approval is expired". The page is the last place that calls the card alive.
  *
- * The conversation read now settles lapsed cards first, through the same sweep the other two read doors run, so the
- * chat reports what the queue already reports and the Bot that drafted the line hears its expiry.
+ * The conversation read now settles the lapsed cards of the chats it is about to answer, through the same
+ * `expireApproval` the sweep uses, so the chat reports what the queue already reports and the Bot that drafted the
+ * line hears its expiry once. Only a member's read settles: a read refused with 403 settles nothing, because a
+ * refused request must not leave a write in someone else's chat.
  *
- * Red first on 1e31e68: the view reports `awaiting_approval` / `pending_approval` for a card whose row is long past
+ * Red first on 93f57b9b: the view reports `awaiting_approval` / `pending_approval` for a card whose row is long past
  * its deadline, and the read leaves it pending.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { friends, startServer } from "./helpers.js";
+import { expectApiError, friends, ownerWithBot, startServer } from "./helpers.js";
 
 const past = () => new Date(Date.now() - 60e3).toISOString();
 
@@ -102,4 +104,55 @@ test("a second read writes no second settlement", async (t) => {
   const again: any = await A.owner.req("GET", `/v1/conversations/${cid}`);
   assert.equal(again.status, "open");
   assert.deepEqual(settled(), first, "the second read settles nothing twice");
+});
+
+test("a read that is refused settles nothing in someone else's chat", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { A, cid, draft } = await chatWithLapsedCard(s);
+  const outsider = await ownerWithBot(s.base, "carol");
+
+  const settled = () => ({
+    expired: (s.platform.audit.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action = 'approval.expired' AND subject = ?").get(draft.approval_id) as any).n,
+    told: (s.platform.db.prepare("SELECT COUNT(*) n FROM events WHERE type = 'approval.decided' AND data LIKE ?").get(`%${draft.approval_id}%`) as any).n,
+  });
+
+  await expectApiError(outsider.owner.req("GET", `/v1/conversations/${cid}`), 403, "forbidden");
+  await expectApiError(outsider.bot.getConversation(cid), 403, "not_a_member");
+  assert.deepEqual(settled(), { expired: 0, told: 0 }, "a refused read is not a settlement, and writes nothing");
+  assert.equal(cardRow(s, draft.approval_id).status, "pending", "the card is still where the member left it");
+  assert.equal(convRow(s, cid).status, "awaiting_approval", "and the chat still waits for the member's own read");
+
+  const view: any = await A.owner.req("GET", `/v1/conversations/${cid}`);
+  assert.equal(view.status, "open", "the member's read still settles the card in their own chat");
+  assert.equal(cardRow(s, draft.approval_id).status, "expired");
+  assert.deepEqual(settled(), { expired: 1, told: 1 }, "and the settlement lands exactly once");
+
+  await A.owner.req("GET", `/v1/conversations/${cid}`);
+  assert.deepEqual(settled(), { expired: 1, told: 1 }, "a second read of a settled chat writes nothing again");
+});
+
+test("a refused read leaves a live card pending", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  const cid = (await A.bot.startConversation(B.bot.id, { type: "general_chat", summary: "hi" })).conversation_id as string;
+  const draft: any = await A.bot.draftMessage(cid, { text: "a line with time on its clock" });
+  const outsider = await ownerWithBot(s.base, "dave");
+
+  const settled = () => ({
+    expired: (s.platform.audit.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action = 'approval.expired' AND subject = ?").get(draft.approval_id) as any).n,
+    told: (s.platform.db.prepare("SELECT COUNT(*) n FROM events WHERE type = 'approval.decided' AND data LIKE ?").get(`%${draft.approval_id}%`) as any).n,
+  });
+  const untouched = { expired: 0, told: 0 };
+  assert.deepEqual(settled(), untouched, "the fixture starts unsettled");
+
+  await expectApiError(outsider.owner.req("GET", `/v1/conversations/${cid}`), 403, "forbidden");
+  assert.deepEqual(settled(), untouched, "only a card past its own clock is a card a read settles");
+  assert.equal(cardRow(s, draft.approval_id).status, "pending", "this one still has time, so it is still pending");
+
+  const view: any = await A.owner.req("GET", `/v1/conversations/${cid}`);
+  assert.equal(view.status, "awaiting_approval", "a live card is what the chat still waits for");
+  assert.equal(cardRow(s, draft.approval_id).status, "pending", "and no read settles a card that can still be decided");
+  assert.deepEqual(settled(), untouched, "so no read writes anything about it either");
 });
