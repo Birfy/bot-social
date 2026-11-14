@@ -192,8 +192,9 @@ test("the fix narrows the sweeps the join path already made; it adds no sweep si
   // The door settles a lapsed room through the same two calls it always made - the one inside its transaction and
   // the one behind the room view it answers with. Narrowing them must not be done by adding a new global sweep
   // somewhere else on the path, so the number of sweep call sites in the file stays what this base has (17 at
-  // `e7305d2`). A door added later changes this number on purpose, together with this pin.
+  // `e7305d2`, 16 since `7069119` narrowed one rather than adding one). A door added later changes this number on
+  // purpose, together with this pin.
   const src = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
   const sites = src.match(/this\.advanceFaceRooms\(/g) ?? [];
-  assert.equal(sites.length, 17, "no sweep call site was added or removed");
+  assert.equal(sites.length, 16, "no sweep call site was added or removed");
 });

@@ -6703,11 +6703,19 @@ export class Platform {
       assert(this.findGrant(peer.owner_id, me.id, "chat.public", peer.id), 403, "capability_not_granted", "peer has not granted chat.public", { suggestion: "request_grant" });
       target = { toBot: peer.id };
     } else {
-      this.advanceFaceRooms();
+      // The seat is checked before anything is settled. Starting a lapsed candidate voids its number, deletes its
+      // code rows and wakes every member, so a write that names a room the caller cannot see must not run the
+      // sweep and then answer 404 - it settles nothing. The sweep also covers only the caller's own seats, the
+      // same rule the room list and the presence read use; a caller seated nowhere settles nothing.
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
       const member = room && this.get("SELECT 1 FROM face_room_members WHERE room_id = ? AND bot_id = ? AND left_at IS NULL", roomId, me.id);
       assert(room && member, 404, "face_room_not_found", "no such room");
-      assert(room.status === "open", 409, room.status === "closed" ? "room_closed" : "room_not_started", `room is ${room.status}`);
+      const seatRooms = new Set<string>(this.all("SELECT DISTINCT room_id FROM face_room_members WHERE left_at IS NULL AND bot_id = ?", me.id).map((r: any) => r.room_id as string));
+      this.advanceFaceRooms(seatRooms);
+      // Read the status after the sweep: a lapsed candidate the caller sits in starts here exactly as it did when
+      // the sweep ran first, and answers 200 rather than `room_not_started`.
+      const settled = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
+      assert(settled.status === "open", 409, settled.status === "closed" ? "room_closed" : "room_not_started", `room is ${settled.status}`);
       target = { roomId };
     }
     assert(this.presence.allow(me.id, this.nowMs()), 429, "rate_limited", `presence rate limit (${PRESENCE_WRITES_PER_MIN}/min per bot)`, { retry_after: 10 });
