@@ -5341,7 +5341,9 @@ export class Platform {
   }
   /** The room row after any lapsed matching window is settled, so every door answers the same status as a GET. */
   private faceSettledRoom(roomId: string) {
-    this.advanceFaceRooms();
+    // A view is the room's own door: it settles that room, never the platform. The join reply and a member's room
+    // GET used to promote every lapsed candidate here after already answering, which is the same flaw one layer up.
+    this.advanceFaceRooms(new Set([roomId]));
     return this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
   }
   /**
@@ -5591,10 +5593,16 @@ export class Platform {
     const rawCode = body?.code;
     const codeOk = isFaceCode(rawCode);
     const code = codeOk ? String(rawCode).trim() : "";
+    // The sweep this door runs settles only the lapsed rooms the request itself already holds a seat in. Promotion
+    // voids the number, deletes its rows and wakes every member, so a caller seated nowhere must not start another
+    // home's room by knocking - the number is read after this, and a stranger's fabricated one settles nothing.
+    const seatRooms = new Set<string>(bots.length
+      ? this.all(`SELECT DISTINCT room_id FROM face_room_members WHERE left_at IS NULL AND bot_id IN (${bots.map(() => "?").join(",")})`, ...bots.map((b) => b.id)).map((r: any) => r.room_id as string)
+      : []);
     type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
     type Ok = { ok: true; created: boolean; roomId: string; seated: string[] };
     const txn = this.db.transaction((): Ok | Fail => {
-      this.advanceFaceRooms();
+      this.advanceFaceRooms(seatRooms);
       const locked = this.faceLockoutUntil(ownerId, ip);
       if (locked) {
         this.faceRecordAttempt(ownerId, ip, code || String(rawCode ?? ""), "locked_out");
