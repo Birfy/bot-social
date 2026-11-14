@@ -2758,6 +2758,13 @@ export class Platform {
     this.validCaps([pl.capability]);
     this.assertScope(pl.capability, pl.scope);
     const peerOwner = r.requester_bot === botId ? r.target_owner : r.requester_owner;
+    // Writing a card is a delivery moment: the new card is announced, and outside the owner's quiet window any batch
+    // that waited through it goes out with that announcement. So the queue is settled first. A card whose own deadline
+    // passed is not waiting any more, and a summary that named it would close its ledger line as if it had been
+    // announced, leaving the outlet never told the card settled (`flushHeldApprovals` sweeps first for the same
+    // reason). Without it, the requester's peer owner hears "one item needs your decision" about a card they can no
+    // longer decide.
+    this.expireStale();
     const aprId = this.createApproval(peerOwner, "grant_request", r.id, botId, null, `@${this.bot(botId).handle} requests capability ${pl.capability}`, ["grant.requires_owner"], [], LIMITS.approvalTtlMs,
       { capability: pl.capability, scope: pl.scope ?? {}, reason: pl.reason ?? null, grantee_bot: botId });
     this.audit.append(`bot:${botId}`, "grant.requested", r.id, [ownerId, peerOwner], { capability: pl.capability, scope: pl.scope ?? {}, approval_id: aprId });
@@ -3031,6 +3038,10 @@ export class Platform {
     // path. Absent or null keeps the auto-accept default; the literal false still asks the inviter's owner first.
     assert(payload.auto_accept === undefined || payload.auto_accept === null || typeof payload.auto_accept === "boolean", 400, "invalid_request", "auto_accept must be a boolean");
     const hours = Math.max(1, Math.min(Number(payload.expires_in_hours) || 72, 24 * 30));
+    // A Bot-created invite writes an approval card, and writing a card is a delivery moment (see `requestGrant`): the
+    // queue is settled before this door's own writes, so a card that lapsed while the batch waited is settled and its
+    // outlet told, instead of being named in the summary as still waiting.
+    if (viaBot) this.expireStale();
     const id = newId("inv");
     const code = randomBytes(9).toString("base64url").replace(/[-_]/g, "x");
     const status = viaBot ? "pending_owner" : "active";
@@ -4598,6 +4609,10 @@ export class Platform {
     const id = newId("act");
     const reasons = [...def.reasons];
     const hold = this.actionHold(ownerId, params, pl.justification ?? null);
+    // This door writes an approval card, so it opens a delivery moment; the queue is settled first, outside the
+    // transaction below. A card that lapsed while the owner's batch waited must be settled and its outlet told, not
+    // named by the summary that leaves with this card (`requestGrant` carries the full reasoning).
+    this.expireStale();
     // The card and the row it points at are one write: a pending card whose action row was never written takes the
     // owner's whole list down (`approvalCard`), so a refusal must leave neither behind. The announcement the card
     // queues waits for this commit too (`atomically`), or a refused insert still pages the owner's Bot about a card
@@ -6380,6 +6395,10 @@ export class Platform {
     const found = holdReasonOf({ riskFlags: flags, injectionSuspected });
     const holdReason: HoldReason = found === "blanket_outbound" ? "face_room_auto_send_off" : found;
     const snap = this.faceSnapshot(sender);
+    // A room draft writes an approval card, so it opens a delivery moment; settle the queue first, outside the
+    // transaction below, so a card that lapsed while the owner's batch waited is not named as still waiting
+    // (`requestGrant` carries the full reasoning).
+    this.expireStale();
     // One write, as the message and action doors do (#516): a refused `face_room_drafts` insert used to leave the
     // card behind, and the card named a draft that was never written.
     const aprId = this.atomically(() => {
