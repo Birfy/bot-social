@@ -96,3 +96,45 @@ test("a block names them with its own reason, and a second call names nothing tw
   assert.equal(undoRows.filter((r) => r.action === "grant.revoked").length, 0, "an undo revokes nothing, so it names no share");
   assert.equal(undoRows.filter((r) => r.action === "conversation.closed").length, 0, "and no chat");
 });
+
+test("a block names the room-scoped shares it revokes too, and the room door names none of them twice", async (t) => {
+  const s = await startServer({ faceRooms: { attemptsPerAccount: 50, attemptsPerIp: 200 } });
+  t.after(s.stop);
+  const { A, B } = await friends(s.base);
+  const join = async (o: any) => {
+    const r = await o.owner.req("POST", "/v1/face-rooms/join", { code: "787878", bots: [o.bot.id] });
+    return r.room_id as string;
+  };
+  const roomId = await join(A);
+  assert.equal(await join(B), roomId, "both sides sit in the same room");
+
+  // A room writes a share per capability for each side of every pair seated in it, on the room's own relationship
+  // row. A block ends every row of the pair, the room's row included, so those room-scoped shares end with it — and
+  // this door has to name them, because the room door only settles shares that are still `active`.
+  const pairActive = () => s.platform.db.prepare(`SELECT g.id, g.capability, g.room_id FROM grants g
+      JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.status = 'active' AND r.requester_bot IN (?,?) AND r.target_bot IN (?,?)`)
+    .all(A.bot.id, B.bot.id, A.bot.id, B.bot.id) as any[];
+  const before = pairActive();
+  const roomScoped = before.filter((g) => g.room_id === roomId);
+  assert.ok(roomScoped.length >= 2, `the room wrote room-scoped shares to end: ${JSON.stringify(before)}`);
+
+  const mark = head(s);
+  await A.owner.req("POST", "/v1/blocks", { bot_id: B.bot.id });
+  const rows = since(s, mark);
+
+  // The room-scoped shares first: those are the ones this door used to end without a word, while the room door
+  // found nothing left to settle.
+  const ordered = [...roomScoped, ...before.filter((g) => g.room_id !== roomId)];
+  for (const g of ordered) {
+    const named = rows.filter((r) => r.action === "grant.revoked" && r.subject === g.id);
+    assert.equal(named.length, 1, `one grant.revoked for the ${g.capability} share scoped to ${g.room_id ?? "the relationship"}, got ${named.length}`);
+    assert.equal(data(named[0]).room_id, g.room_id ?? null, "the row carries the scope it ended in");
+    assert.equal(data(named[0]).reason, "blocked", "with the reason the block settles cards by");
+    assert.equal(named[0].actor, `owner:${A.owner_id}`, "attributed to the owner who blocked");
+  }
+  // The rows this door writes are the rows it changed: the room door runs afterwards, finds these shares already
+  // revoked, and must not add a second entry under `room_left`/`room_closed`.
+  assert.equal(rows.filter((r) => r.action === "grant.revoked").length, before.length, "one row per share the block revoked, none twice");
+  assert.equal(pairActive().length, 0, "no share of the pair is left active");
+});
