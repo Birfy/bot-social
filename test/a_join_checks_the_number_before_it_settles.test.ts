@@ -9,7 +9,6 @@
 // Bot already sits in the lapsed room still settles it, and the refusals the door already gave (an ill-shaped code,
 // a number whose room is gone) keep their answers. The call count on this door does not move: one sweep, now scoped.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ownerWithBot, startServer } from "./helpers.js";
 
@@ -188,24 +187,44 @@ test("the room's own read door still starts a lapsed candidate", async (t) => {
   assert.ok(pushes(calls) >= 1);
 });
 
-test("the fix narrows the sweeps the join path already made; it adds no sweep site", () => {
-  // The door settles a lapsed room through the same two calls it always made - the one inside its transaction and
-  // the one behind the room view it answers with. Narrowing them must not be done by adding a new global sweep
-  // somewhere else on the path, and the calls this door does make must stay scoped: a bare `advanceFaceRooms()`
-  // inside either of them is the defect itself. Judging the shape of those two calls, rather than counting every
-  // site in the file, keeps the pin true when a different door legitimately adds or removes one of its own (the
-  // file's count moved once already, when a refused read stopped sweeping lapsed shares across the platform).
-  const src = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
-  const bodyOf = (name: string): string => {
-    const start = src.search(new RegExp("\\n  (?:private |public )?" + name + "\\("));
-    assert.ok(start >= 0, `${name} is in the file`);
-    const end = src.indexOf("\n  }\n", start);
-    assert.ok(end > start, `${name} has a body`);
-    return src.slice(start, end);
-  };
-  for (const name of ["joinFaceRoom", "faceSettledRoom"]) {
-    const body = bodyOf(name);
-    assert.ok(/this\.advanceFaceRooms\(/.test(body), `${name} still advances the rooms it did before`);
-    assert.ok(!/this\.advanceFaceRooms\(\s*\)/.test(body), `${name} makes no unscoped sweep`);
+test("the join path settles no room but the caller's own, so a global sweep anywhere on it shows up here", async (t) => {
+  // The door settles a lapsed room through the two calls it always made - the one inside its transaction and the one
+  // behind the room view it answers with. Narrowing them must not be done by slipping a new global sweep onto this
+  // path, so this test asks the behaviour instead of counting call sites: two other homes each hold a lapsed
+  // candidate room, a caller with no seat anywhere knocks with a number nobody minted, and neither room may move.
+  // A global sweep added anywhere on the path would start both of them and be caught here; it also fails when a door
+  // elsewhere in the file legitimately adds or removes its own sweep, which is what a file-wide count could not say.
+  const { s, calls } = await server();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "ann", PUSH);
+  const B = await ownerWithBot(s.base, "ben");
+  const C = await ownerWithBot(s.base, "carl");
+  const D = await ownerWithBot(s.base, "dee");
+  const stranger = await ownerWithBot(s.base, "sam");
+  const first = await candidate(s, A, B, "545454");
+  const second = await candidate(s, C, D, "565656");
+  lapse(s, first);
+  lapse(s, second);
+  await quiet(s, calls);
+  const sweeps = spySweeps(s);
+
+  const answer = await stranger.owner.req("POST", "/v1/face-rooms/join", { code: "979797", bots: [stranger.bot.id] });
+  await s.platform.flushWebhooks();
+
+  for (const [who, roomId] of [["the first home's", first], ["the second home's", second]] as const) {
+    assert.equal(roomRow(s, roomId).status, "candidate", `${who} room is still a candidate`);
+    assert.equal(roomRow(s, roomId).code, roomId === first ? "545454" : "565656", `${who} room keeps its number`);
+    assert.equal(codeRows(s, roomId), 1, `${who} room keeps its number row`);
+    assert.equal(startedEvents(s, roomId), 0, `${who} room wakes nobody`);
+    assert.equal(startedAudits(s, roomId), 0, `${who} room records no start`);
   }
+  assert.equal(pushes(calls), 0, "no push went out for either room");
+  assert.ok(sweeps.length >= 1, "the door still sweeps, as before");
+  assert.equal(sweeps.filter((scope) => !(scope instanceof Set)).length, 0, "no sweep on this path is left unscoped");
+  assert.equal(
+    sweeps.some((scope) => (scope as ReadonlySet<string>).has(first) || (scope as ReadonlySet<string>).has(second)),
+    false,
+    "and none of them names either other home's room",
+  );
+  assert.equal(answer.status, "candidate", "the caller still gets their own candidate room for the made-up number");
 });
