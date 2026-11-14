@@ -6414,8 +6414,10 @@ export class Platform {
     }).immediate();
     // A label is read by every member of the room, so relabelling a Bot changes what the other owners see of it. The
     // other room mutations are all on the audit chain; this one was not, which left a roster that reads as if the
-    // labels it carries now are the labels it always carried. The row names the Bots and their new labels, nothing else.
-    this.audit.append(this.actorOf(p), "face_room.role_changed", roomId, this.faceOwnerIds(roomId), { bots: changes.map(([botId, role]) => ({ bot: botId, role })) });
+    // labels it carries now are the labels it always carried. The row names the Bots and their new labels, nothing else:
+    // one entry per seat, holding the value the write ends it on, so an entry the same body later replaced never reaches
+    // the chain and a seat named twice is still listed once.
+    this.audit.append(this.actorOf(p), "face_room.role_changed", roomId, this.faceOwnerIds(roomId), { bots: [...settled].map(([botId, role]) => ({ bot: botId, role })) });
     return this.faceRoomView(roomId, viewer);
   }
 
