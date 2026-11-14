@@ -1831,7 +1831,14 @@ export class Platform {
   }
 
   private expireStale() {
-    this.advanceFaceRooms();
+    // Only the share half of the face-room sweep belongs here. `expireLapsedShares` writes down a share whose own
+    // clock ran out (and settles the cards it was holding), which any door may do: the share already ended, this only
+    // records it. Room promotion is the other half and is not a bystander's to run — `advanceFaceRooms` flips a
+    // candidate room to `open`, voids its number, deletes the `face_room_codes` rows, writes `room.started` and wakes
+    // every member, so the six reads that reach this sweep (relationships, friends-overview, approvals, a Bot's
+    // grants, remote bots, the Bot's own events) each turned one read into another home's room start. A room is
+    // settled by the room's own read and write doors, which call `advanceFaceRooms` themselves (#661).
+    this.expireLapsedShares();
     const now = nowIso();
     this.settlePendingRelationships(this.all("SELECT * FROM relationships WHERE status IN ('pending_requester_owner','pending_target') AND expires_at < ?", now));
     for (const a of this.all("SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ?", now)) this.expireApproval(a);
