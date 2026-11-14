@@ -1739,7 +1739,14 @@ export class Platform {
     this.db.transaction(() => {
       this.run("UPDATE bots SET status = 'frozen' WHERE id = ?", b.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
-      this.run("UPDATE conversations SET status = 'paused_stop', updated_at = ? WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", nowIso(), b.id, b.id);
+      // The chats are paused through the one door a pause is written by, so both ends learn why: the
+      // `conversation.paused` entry `pauseConversation` records and the event each side reads. A bare UPDATE here
+      // moved the status with neither, so the peer -- whose own token still worked -- met a refusal on its next
+      // line and had nothing telling it why. A chat that is already `paused_stop` does not move, so a repeated
+      // stop announces nothing twice.
+      for (const c of this.all("SELECT * FROM conversations WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", b.id, b.id)) {
+        if (c.status !== "paused_stop") this.pauseConversation(c, "paused_stop", "emergency_stop");
+      }
       // The stop is told to the Bot that owned each card: for an invite that is also the only honest answer to
       // "what happened to my link?" after its card is settled. The invite row is swept by `cancelPendingFor`.
       this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop", { notify: true });
