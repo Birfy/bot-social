@@ -1736,10 +1736,19 @@ export class Platform {
     // resumeBot accepts, handing the owner a working token for an identity whose invites, drafts, rooms and
     // seats were already torn down. Re-adding the handle through the home is the supported way back.
     assert(b.status !== "revoked", 403, "bot_revoked", "this bot identity was revoked");
-    this.db.transaction(() => {
+    // `atomically`, not a plain transaction: a pause's push waits for this commit, so a throw later in the stop
+    // (the card sweep below) cannot leave the other Bot told about a pause the rollback takes back.
+    this.atomically(() => {
       this.run("UPDATE bots SET status = 'frozen' WHERE id = ?", b.id);
       this.run("UPDATE tokens SET revoked_at = ? WHERE kind = 'bot' AND subject_id = ? AND revoked_at IS NULL", nowIso(), b.id);
-      this.run("UPDATE conversations SET status = 'paused_stop', updated_at = ? WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", nowIso(), b.id, b.id);
+      // The chats are paused through the one door a pause is written by, so both ends learn why: the
+      // `conversation.paused` entry `pauseConversation` records and the event each side reads. A bare UPDATE here
+      // moved the status with neither, so the peer -- whose own token still worked -- met a refusal on its next
+      // line and had nothing telling it why. A chat that is already `paused_stop` does not move, so a repeated
+      // stop announces nothing twice.
+      for (const c of this.all("SELECT * FROM conversations WHERE (initiator_bot = ? OR peer_bot = ?) AND status != 'closed'", b.id, b.id)) {
+        if (c.status !== "paused_stop") this.pauseConversation(c, "paused_stop", "emergency_stop");
+      }
       // The stop is told to the Bot that owned each card: for an invite that is also the only honest answer to
       // "what happened to my link?" after its card is settled. The invite row is swept by `cancelPendingFor`.
       this.cancelPendingFor("bot_id = ?", [b.id], "emergency_stop", { notify: true });
@@ -1747,7 +1756,7 @@ export class Platform {
       // before the stop cannot leave after it or be replayed on resume; the webhook URL itself stays (resume must
       // not make the owner hang it again), so this is a state check, not a URL change.
       this.webhooks.drop(b.id, "frozen");
-    })();
+    });
     this.audit.append(`owner:${ownerId}`, "bot.emergency_stop", b.id, [ownerId], {});
     return { bot_id: b.id, status: "frozen", tokens_revoked: true };
   }
