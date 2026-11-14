@@ -4462,7 +4462,23 @@ export class Platform {
     return { conversation_id: convId, status: "closed", outcome };
   }
 
+  /** A chat reports `awaiting_approval` exactly while one of its cards is pending, and a card past its own clock is
+   *  not pending any more: it only waits for the sweep that settles it. The queue and the event feed run that sweep
+   *  when they read; the chat read settles the cards its own answer is about, through the same `expireApproval` the
+   *  sweep uses, so the page cannot say it waits for a decision the decision door answers 409. This is scoped to
+   *  those rows on purpose: a chat read does not also sweep the grants, rooms and relationships it does not report. */
+  private settleLapsedCardsInConversations(idsSql: string, args: unknown[]) {
+    const now = nowIso();
+    for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND expires_at < ? AND conversation_id IN (${idsSql})`, now, ...args)) {
+      this.expireApproval(a);
+    }
+  }
+
   listConversations(p: Principal) {
+    const scope = p.kind === "owner"
+      ? { sql: "SELECT c.id FROM conversations c WHERE c.initiator_bot IN (SELECT id FROM bots WHERE owner_id = ?) OR c.peer_bot IN (SELECT id FROM bots WHERE owner_id = ?)", args: [p.ownerId, p.ownerId] }
+      : { sql: "SELECT id FROM conversations WHERE initiator_bot = ? OR peer_bot = ?", args: [p.botId, p.botId] };
+    this.settleLapsedCardsInConversations(scope.sql, scope.args);
     const rows = p.kind === "owner"
       ? this.all("SELECT c.* FROM conversations c WHERE c.initiator_bot IN (SELECT id FROM bots WHERE owner_id = ?) OR c.peer_bot IN (SELECT id FROM bots WHERE owner_id = ?) ORDER BY c.created_at DESC", p.ownerId, p.ownerId)
       : this.all("SELECT * FROM conversations WHERE initiator_bot = ? OR peer_bot = ? ORDER BY created_at DESC", p.botId, p.botId);
@@ -4535,6 +4551,7 @@ export class Platform {
 
   /** Conversation view. Peer messages appear only once delivered, always wrapped as untrusted. */
   getConversation(p: Principal, convId: string) {
+    this.settleLapsedCardsInConversations("SELECT id FROM conversations WHERE id = ?", [convId]);
     const c = this.conv(convId);
     let viewerBot: string;
     if (p.kind === "bot") { this.memberConv(p.botId, convId); viewerBot = p.botId; }
