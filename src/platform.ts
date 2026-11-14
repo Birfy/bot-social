@@ -2775,11 +2775,30 @@ export class Platform {
     // The shares this row still had alive end with it, and so do the seats they made: the same `endGrantRooms` the
     // three revoke paths call. Rows scoped to one room are the door a seat wrote, not the share that paid for it, so
     // they are left out here — `endGrantRooms` ends them together with the seat itself.
-    const endedShares = this.all("SELECT id FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL", r.id).map((g: any) => g.id);
+    const endedShareRows = this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL", r.id);
+    const endedShares = endedShareRows.map((g: any) => g.id);
+    // The chats this call closes, read before the write closes them: the door that closes a chat is the door that
+    // names it, and the same row read afterwards only says `closed`.
+    const endedChats = this.all("SELECT * FROM conversations WHERE relationship_id = ? AND status != 'closed'", r.id);
     this.db.transaction(() => {
       this.run("UPDATE relationships SET status = ?, blocked_by = ?, updated_at = ? WHERE id = ?", status, status === "blocked" ? ownerId : null, nowIso(), r.id);
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE relationship_id = ? AND status = 'active'", nowIso(), r.id);
       this.run("UPDATE conversations SET status = 'closed', outcome = 'revoked', updated_at = ? WHERE relationship_id = ? AND status != 'closed'", nowIso(), r.id);
+      // One row per row this door ends, as every other revoke door writes one: the pair's own row below says the
+      // relationship ended, but not which capability a Bot lost with it. The reason is the word this door settles
+      // its cards by (`revoked`/`blocked`), and the rows go in inside the transaction so the chain commits with the
+      // state they describe. A row scoped to one room keeps its room door's own entry (`room_left`/`room_closed`):
+      // that end is the room's settlement, not this one.
+      for (const g of endedShareRows) {
+        this.audit.append(`owner:${ownerId}`, "grant.revoked", g.id, [r.requester_owner, r.target_owner], {
+          capability: g.capability, grantee_bot: g.grantee_bot, relationship_id: r.id, reason: status,
+        });
+      }
+      // A chat closed here is closed as the clock and the owner's own door close one, so it carries the same entry
+      // and, after the commit, tells both Bots the same thing.
+      for (const c of endedChats) {
+        this.audit.append(`owner:${ownerId}`, "conversation.closed", c.id, [r.requester_owner, r.target_owner], { outcome: "revoked" });
+      }
       // Blocked or revoked ends every card hanging off this relationship. Tell each Bot that owned one: the card
       // leaves its owner's list, and without this the Bot kept waiting on a decision that can no longer arrive.
       // Only this call site opts in — member_revoked and emergency_stop must stay silent (the Bot has no token).
@@ -2793,6 +2812,11 @@ export class Platform {
     if (endedShares.length) this.endGrantRooms(this.shareLineage(endedShares), `owner:${ownerId}`);
     this.audit.append(`owner:${ownerId}`, `relationship.${status}`, r.id, [r.requester_owner, r.target_owner], {});
     for (const b of [r.requester_bot, r.target_bot]) this.emit(b, "relationship.changed", { relationship_id: r.id, status });
+    // Same event every other close sends, to the same two Bots: a chat that stopped working without a word is the
+    // defect this door had. Sent after the commit, like the pair's own event above.
+    for (const c of endedChats) {
+      for (const b of [c.initiator_bot, c.peer_bot]) this.emit(b, "conversation.closed", { conversation_id: c.id, outcome: "revoked", trust: "platform", summary: null });
+    }
   }
 
   removeRelationship(p: Principal, relId: string) {
