@@ -6225,10 +6225,20 @@ export class Platform {
   }
 
   listFaceRooms(p: Principal) {
-    this.advanceFaceRooms();
     const ownerId = p.ownerId;
     const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
     const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, ownerId, ownerId, p.botId] : [ownerId, ownerId, ownerId, ownerId];
+    // A room list is not the room's own door: settling a lapsed candidate voids its number, deletes the code rows and
+    // wakes every member, so the read settles only the rooms it is about to answer with. That is the seat rule the
+    // query below already uses - a seat of this caller, or a guest this home brought in - so the rooms the read talks
+    // about and the rooms it writes to are one set. A caller with no seat anywhere settles nothing, and a Bot's own
+    // token settles only the rooms that Bot sits in, not the ones its home's other Bots sit in.
+    const listed = new Set<string>(this.all(`SELECT DISTINCT r.id FROM face_rooms r
+      JOIN face_room_members m ON m.room_id = r.id AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+        NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL)))) ${extra}
+      WHERE r.status != 'closed'`, ...args).map((r: any) => r.id as string));
+    this.advanceFaceRooms(listed);
     const rows = this.all(`SELECT r.id, r.status, r.expires_at, r.started_at, COUNT(DISTINCT m2.bot_id) member_count
       FROM face_rooms r
       JOIN face_room_members m ON m.room_id = r.id AND m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
