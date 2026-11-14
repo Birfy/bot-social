@@ -65,7 +65,7 @@ export function createMcpServer(bot: BotClient): McpServer {
 
   server.registerTool("draft_message", {
     description: "Draft a message to the peer. It is delivered only after your owner approves it. Use structured (e.g. schema meeting.proposal/1 with slots) where possible. structured must be an object (or null) of at most 32 KiB serialized (32768 bytes); a larger payload belongs in an attachment. Set expects_reply=false for pleasantries.",
-    inputSchema: { conversation_id: z.string(), text: z.string(), structured: z.record(z.string(), z.any()).optional(), expects_reply: z.boolean().optional() },
+    inputSchema: { conversation_id: z.string(), text: z.string(), structured: z.record(z.string(), z.any()).nullable().optional(), expects_reply: z.boolean().optional() },
   }, wrap(async (a) => bot.draftMessage(a.conversation_id, { text: a.text, structured: a.structured, expects_reply: a.expects_reply })));
 
   server.registerTool("draft_action", {
