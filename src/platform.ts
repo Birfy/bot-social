@@ -2777,6 +2777,11 @@ export class Platform {
     // they are left out here — `endGrantRooms` ends them together with the seat itself.
     const endedShareRows = this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NULL", r.id);
     const endedShares = endedShareRows.map((g: any) => g.id);
+    // The same share holding a seat: the UPDATE below ends it too (a Block ends every row of the pair, the room's own
+    // row included), but the room door settles only rows that are still `active` -- it runs after this call and finds
+    // these already `revoked`, so it writes nothing for them. Read with the UPDATE's predicate and named here, or the
+    // rows this door changes and the rows it writes down are two different counts.
+    const endedRoomRows = this.all("SELECT * FROM grants WHERE relationship_id = ? AND status = 'active' AND room_id IS NOT NULL", r.id);
     // The chats this call closes, read before the write closes them: the door that closes a chat is the door that
     // names it, and the same row read afterwards only says `closed`.
     const endedChats = this.all("SELECT * FROM conversations WHERE relationship_id = ? AND status != 'closed'", r.id);
@@ -2785,13 +2790,14 @@ export class Platform {
       this.run("UPDATE grants SET status = 'revoked', revoked_at = ? WHERE relationship_id = ? AND status = 'active'", nowIso(), r.id);
       this.run("UPDATE conversations SET status = 'closed', outcome = 'revoked', updated_at = ? WHERE relationship_id = ? AND status != 'closed'", nowIso(), r.id);
       // One row per row this door ends, as every other revoke door writes one: the pair's own row below says the
-      // relationship ended, but not which capability a Bot lost with it. The reason is the word this door settles
-      // its cards by (`revoked`/`blocked`), and the rows go in inside the transaction so the chain commits with the
-      // state they describe. A row scoped to one room keeps its room door's own entry (`room_left`/`room_closed`):
-      // that end is the room's settlement, not this one.
-      for (const g of endedShareRows) {
+      // relationship ended, but not which capability a Bot lost with it -- nor in which room. Both scopes are named,
+      // because the UPDATE above ends both; `room_id` carries the row's own scope (`null` for a relationship-level
+      // share) and is the field the room doors write, so the two readings join on it. The reason is the word this
+      // door settles its cards by (`revoked`/`blocked`), and the rows go in inside the transaction so the chain
+      // commits with the state they describe.
+      for (const g of [...endedShareRows, ...endedRoomRows]) {
         this.audit.append(`owner:${ownerId}`, "grant.revoked", g.id, [r.requester_owner, r.target_owner], {
-          capability: g.capability, grantee_bot: g.grantee_bot, relationship_id: r.id, reason: status,
+          capability: g.capability, grantee_bot: g.grantee_bot, relationship_id: r.id, room_id: g.room_id ?? null, reason: status,
         });
       }
       // A chat closed here is closed as the clock and the owner's own door close one, so it carries the same entry
