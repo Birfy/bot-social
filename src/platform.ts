@@ -6297,10 +6297,14 @@ export class Platform {
     // changes nothing to announce and stays silent, the way setting the same lead again does; the audit row below
     // still records every write, as #675 wrote it.
     const held = new Map(this.all("SELECT bot_id, role FROM face_room_members WHERE room_id = ? AND left_at IS NULL", roomId).map((m: any) => [m.bot_id as string, (m.role ?? null) as string | null]));
+    // A seat can be named more than once in one body, by handle and by bot id: the write ends each seat on the last
+    // value its entries give it, so the question "did anything change" is about that value, not about every entry.
+    // Comparing entry by entry counted a label that walked away and back as a change and told the room about it.
+    const settled = new Map(changes);
     const data = { text: "A role label in this room changed.", trust: "platform" };
     this.db.transaction(() => {
-      for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId);
-      if (!changes.some(([botId, role]) => (held.get(botId) ?? null) !== role)) return;
+      for (const [botId, role] of settled) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId);
+      if (![...settled].some(([botId, role]) => (held.get(botId) ?? null) !== role)) return;
       const ev = this.faceInsertEvent(roomId, "room.role_changed", viewer.botIds[0] ?? null, data);
       this.faceEmitMembers(roomId, "face_room.role_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
     }).immediate();
