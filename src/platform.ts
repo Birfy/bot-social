@@ -5238,11 +5238,21 @@ export class Platform {
     this.faceEmitMembers(room.id, "face_room.started", { room_id: room.id, event_id: ev.id, event_cursor: ev.seq, text, reason, trust: "platform" });
     this.audit.append(actor ? actor.actor : "platform", "face_room.started", room.id, this.faceOwnerIds(room.id), { reason });
   }
-  /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often. */
-  advanceFaceRooms() {
+  /** Promote expired candidate rooms to normal groups and void their numbers. Safe to call often.
+   *
+   *  `onlyRoomIds` narrows the sweep to the rooms the caller already holds a seat in. Promotion is not a private
+   *  act - it voids the number, deletes its code rows and wakes every member - so a door that is not the room's own
+   *  must not settle a room it cannot see. A caller with no seat anywhere settles nothing. */
+  advanceFaceRooms(onlyRoomIds?: ReadonlySet<string>) {
     // The face-room doors that read or move a seat call this first; the invite and join-by-invite doors settle it
     // through `faceSettledRoom` before they answer.
     this.expireLapsedShares();
+    if (onlyRoomIds) {
+      const ids = [...onlyRoomIds];
+      if (!ids.length) return;
+      for (const r of this.all(`SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ? AND id IN (${ids.map(() => "?").join(",")})`, this.ts(), ...ids)) this.faceStartRoom(r, "expired");
+      return;
+    }
     // No lapsed window, nothing to promote: read doors (a preview is one) must not turn a read into a table sweep.
     if (!this.get("SELECT 1 FROM face_rooms WHERE status = 'candidate' AND expires_at <= ? LIMIT 1", this.ts())) return;
     for (const r of this.all("SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ?", this.ts())) this.faceStartRoom(r, "expired");
@@ -6629,7 +6639,13 @@ export class Platform {
     const handle = (h: string) => "@" + String(h).replace(/^@/, "");
     const out: any[] = [];
     const now = this.nowMs();
-    this.advanceFaceRooms();
+    // A presence read is not a room door: it settles the candidate rooms this caller's own Bots are already seated
+    // in, and nothing else. Settling a room voids its number and wakes its members, so a read from someone with no
+    // seat there must not do it.
+    const seatRooms = new Set<string>(mine.length
+      ? this.all(`SELECT DISTINCT room_id FROM face_room_members WHERE left_at IS NULL AND bot_id IN (${mine.map(() => "?").join(",")})`, ...mine.map((b: any) => b.id)).map((r: any) => r.room_id as string)
+      : []);
+    this.advanceFaceRooms(seatRooms);
     for (const e of this.presence.live(now)) {
       const writer = this.get("SELECT * FROM bots WHERE id = ?", e.botId);
       if (!writer || writer.status !== "active" || writer.owner_id === viewerOwner) continue;
