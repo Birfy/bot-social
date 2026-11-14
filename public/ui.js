@@ -1111,7 +1111,7 @@ const AUDIT_LABEL = {
   "approval.decided": "decided an approval", "approval.expired": "closed an expired approval",
   "action.drafted": "proposed an action", "action.executed": "carried out an action", "action.failed": "reported a failed action",
   "policy.decision": "applied a policy decision", "policy.denied": "blocked a request by policy", "signature.rejected": "rejected a request with a bad signature",
-  "calendar.freebusy.queried": "checked free/busy times", "attachment.uploaded": "uploaded an attachment", "attachment.downloaded": "downloaded an attachment",
+  "calendar.freebusy.queried": "checked free/busy times", "attachment.uploaded": "uploaded an attachment", "attachment.downloaded": "downloaded an attachment", "attachment.expired": "removed an expired attachment",
   "face_room.created": "opened a face-to-face room", "face_room.joined": "joined a face-to-face room", "face_room.started": "started a face-to-face room",
   "face_room.left": "left a face-to-face room", "face_room.lead_changed": "changed who leads a face-to-face room",
   "face_room.invite_minted": "made a face-to-face room invite link", "face_room.invite_revoked": "revoked a face-to-face room invite link",

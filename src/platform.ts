@@ -1032,14 +1032,40 @@ export class Platform {
    * not waiting for anything, even on an instance whose queue nobody reads (`expireStale` has not run), so the file
    * is collected instead of being held forever. A rejected, cancelled or expired line unbinds its file
    * (`freeDraftAttachments`) and a delivered one keeps its binding on the TTL it always had.
+   *
+   * Each destroyed row leaves its own `attachment.expired` line. The upload and the download write theirs, and every
+   * other settled row in this family names its end (`approval.expired`, `grant.expired`, `relationship.expired`), so
+   * a file the sweep deletes in silence leaves the uploader's chain reading uploaded, maybe downloaded, and nothing
+   * while the delivered message keeps naming the file: the bytes are gone and no line says why the link stopped
+   * resolving. The line names the home that received the ref as well as the uploader's when the message was
+   * delivered, and carries the name, size and hash the signed payload already holds. A file a waiting card still
+   * holds is not destroyed, so it gets no line, and a second sweep over the same rows writes nothing twice.
    */
   cleanupAttachments(now = Date.now()) {
     const at = new Date(now).toISOString();
+    // The rows this run destroys are read before the delete so each one's line can name what went. Both statements
+    // ask the same question of the same instant, and the sweep is the only writer of these rows.
+    const doomed = this.all(`SELECT a.id, a.owner_id, a.name, a.size, a.sha256, a.message_id, m.status AS message_status, m.recipient_bot
+      FROM attachments a LEFT JOIN messages m ON m.id = a.message_id
+      WHERE a.expires_at <= ? AND (a.message_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM messages am JOIN approvals ap ON ap.id = am.approval_id
+        WHERE am.id = a.message_id AND am.status = 'pending_approval'
+          AND ap.status = 'pending' AND ap.expires_at > ?))`, at, at) as any[];
+    if (!doomed.length) return 0;
     const r = this.run(`DELETE FROM attachments WHERE expires_at <= ?
       AND (message_id IS NULL OR NOT EXISTS (
         SELECT 1 FROM messages m JOIN approvals a ON a.id = m.approval_id
         WHERE m.id = attachments.message_id AND m.status = 'pending_approval'
           AND a.status = 'pending' AND a.expires_at > ?))`, at, at) as any;
+    for (const row of doomed) {
+      // A received file is both homes' business, as its `attachment.downloaded` line already is; one no message held,
+      // or one whose message never reached the peer, is the uploader's alone.
+      const peer = row.message_status === "delivered" && row.recipient_bot
+        ? this.get("SELECT owner_id FROM bots WHERE id = ?", row.recipient_bot)?.owner_id
+        : null;
+      this.audit.append("platform", "attachment.expired", row.id, [row.owner_id, peer],
+        { name: row.name, size: row.size, sha256: row.sha256, ...(row.message_id ? { message_id: row.message_id } : {}) });
+    }
     return r?.changes ?? 0;
   }
 
