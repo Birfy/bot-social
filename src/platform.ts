@@ -6294,7 +6294,11 @@ export class Platform {
       botId = m.bot_id;
     }
     if ((room.lead_bot_id ?? null) !== botId) {
-      this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", viewer.botIds[0] ?? null)).immediate();
+      // The event names the Bot whose lead state actually changed: the pick for a `set`, and the lead being taken
+      // away for a `cleared`. The caller's own first seat is a poor stand-in — a creator may seat several Bots and
+      // the pick may be the other home's — and every reader of the transcript would be pointed at the wrong Bot.
+      const changed = botId ?? (room.lead_bot_id ?? null);
+      this.db.transaction(() => this.faceSetLead(roomId, botId, botId ? "set" : "cleared", changed)).immediate();
       this.audit.append(this.actorOf(p), "face_room.lead_changed", roomId, this.faceOwnerIds(roomId), { lead_bot: botId });
     }
     return this.faceRoomView(roomId, viewer);
