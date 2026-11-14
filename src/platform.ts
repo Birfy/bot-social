@@ -4591,10 +4591,19 @@ export class Platform {
     });
     // Rooms: the same seat rule `listFaceRooms` answers with (my own seat, or a guest this home brought in), closed
     // rooms and seats that were given up left out. The title face is the note plus every seated handle.
-    this.advanceFaceRooms();
     const ownerId = p.ownerId;
     const extra = p.kind === "bot" ? "AND m.bot_id = ?" : "";
     const args: unknown[] = p.kind === "bot" ? [ownerId, ownerId, ownerId, ownerId, p.botId] : [ownerId, ownerId, ownerId, ownerId];
+    // The sweep below is not the room's own door and settling a room is not a private act: it voids the number,
+    // deletes its code rows and wakes every member. A search therefore settles only the rooms this caller holds a
+    // seat in, read with that same seat rule before the sweep runs; a caller seated nowhere settles nothing. The
+    // share sweep inside `advanceFaceRooms` still runs, as the other read doors keep it.
+    const seatRooms = new Set<string>(this.all(`SELECT DISTINCT m.room_id FROM face_room_members m
+      WHERE m.left_at IS NULL AND (m.owner_id = ? OR (m.added_by_owner_id = ? AND (
+        NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = m.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = m.room_id AND seated.owner_id = ? AND seated.left_at IS NULL)))) ${extra}`,
+      ...args).map((r: any) => r.room_id as string));
+    this.advanceFaceRooms(seatRooms);
     const roomRows = this.all(`SELECT r.id, r.status, r.note, r.started_at, r.created_at,
         COALESCE((SELECT MAX(e.created_at) FROM face_room_events e WHERE e.room_id = r.id), r.started_at, r.created_at) activity_at,
         (SELECT COUNT(*) FROM face_room_members c WHERE c.room_id = r.id AND c.left_at IS NULL) member_count
