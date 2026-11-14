@@ -6341,8 +6341,11 @@ export class Platform {
     const data = { text: "A role label in this room changed.", trust: "platform" };
     this.db.transaction(() => {
       for (const [botId, role] of changes) this.run("UPDATE face_room_members SET role = ? WHERE room_id = ? AND bot_id = ?", role, roomId, botId);
-      if (!changes.some(([botId, role]) => (held.get(botId) ?? null) !== role)) return;
-      const ev = this.faceInsertEvent(roomId, "room.role_changed", viewer.botIds[0] ?? null, data);
+      const changed = changes.filter(([botId, role]) => (held.get(botId) ?? null) !== role);
+      if (!changed.length) return;
+      // The event credits the Bot whose label changed, not whoever the caller happens to list first: an owner with
+      // several seated Bots gets an event that names the one it touched, the way `room.lead_changed` names the lead.
+      const ev = this.faceInsertEvent(roomId, "room.role_changed", changed[0][0], data);
       this.faceEmitMembers(roomId, "face_room.role_changed", { room_id: roomId, event_id: ev.id, event_cursor: ev.seq, ...data });
     }).immediate();
     // A label is read by every member of the room, so relabelling a Bot changes what the other owners see of it. The
