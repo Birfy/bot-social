@@ -6388,12 +6388,15 @@ export class Platform {
   }
 
   startFaceRoom(p: Principal, roomId: string) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its
     // own, not the wider membership that also admits a home which only brought a guest in.
     const viewer = this.faceRequireOwnSeat(p, roomId);
+    // The sweep is the room's own act, so it settles the one room this request names. Reading the seat first matters
+    // here: `faceSeatRooms` also counts a home that only brought a guest, which `faceRequireOwnSeat` refuses, and
+    // that refused caller used to settle the very room it was refused on.
+    this.advanceFaceRooms(new Set([roomId]));
     this.db.transaction(() => {
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
       if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
@@ -6455,10 +6458,14 @@ export class Platform {
    * Bot token); `bot` must be a Bot in the room now; null / "" goes back to the default lead.
    */
   setFaceRoomLead(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     assert(p.kind === "owner", 403, "forbidden", "only the room creator picks the lead, from their own app; a Bot token cannot");
     assert(this.faceCreatorOf(viewer.room) === viewer.ownerId, 403, "not_room_creator", "only the person who created this room picks its lead");
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
@@ -6501,10 +6508,14 @@ export class Platform {
    * it never depends on when a member joined and writing it never moves a cursor. Trimmed, 1-500 characters.
    */
   setFaceRoomNote(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const room = this.faceRequireLead(p, roomId, "set the room note");
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
     // The note speaks for the whole room, so writing it is the lead's outbound act rather than room metadata anyone
@@ -6533,10 +6544,14 @@ export class Platform {
    * sits next to; a refused one writes nothing and tells nobody.
    */
   setFaceRoomRoles(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const roles = body?.roles;
     assert(roles && typeof roles === "object" && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.keys(roles).length <= this.faceRoomLimits.maxMembers,
       400, "invalid_request", "roles must be an object of your Bots in this room: { \"@handle\": \"role\" | null }");
@@ -6588,10 +6603,14 @@ export class Platform {
   draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean; mentions?: string[] | null } = {}) {
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A draft for another room
+    // must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check above
+    // settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
     // The line is stored, shown and announced as text, so the field must be a string. `String(body?.text ?? "")`
