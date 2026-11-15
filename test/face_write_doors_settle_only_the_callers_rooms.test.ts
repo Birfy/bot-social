@@ -12,6 +12,11 @@
  * no seat settles nothing. The doors keep their order (the sweep still runs before the seat is read), their
  * permissions, their status answers and their error codes.
  *
+ * The leave door has since been narrowed once more: it names one room, so it settles that room alone, and it judges
+ * the caller first (a refused leave settles no room). It is therefore pinned as its own shape below rather than with
+ * the five doors whose sweep is the caller's whole seat set. Lapsed shares are still expired before the caller is
+ * judged, so a refused leave still records the share it declares; that is #739's shape and this lane does not move it.
+ *
  * Each case below proves both halves at once: a stranger's refused call leaves the third party's lapsed room exactly
  * as it was, and then the room's own member makes the same call and that settles the room. A change that drops the
  * sweep to pass the first half fails the second.
@@ -136,9 +141,26 @@ test("none of the six write doors sweeps without a scope", () => {
     assert.ok(end > start, `${name} still closes after its opening line`);
     return src.slice(start, end);
   };
-  for (const name of ["startFaceRoom", "leaveFaceRoom", "setFaceRoomLead", "setFaceRoomNote", "setFaceRoomRoles", "draftFaceRoomMessage"]) {
+  for (const name of ["startFaceRoom", "setFaceRoomLead", "setFaceRoomNote", "setFaceRoomRoles", "draftFaceRoomMessage"]) {
     const body = doorBody(name);
     assert.ok(body.includes("this.advanceFaceRooms(seatRooms)"), `${name} sweeps the rooms its caller already sits in`);
     assert.ok(!body.includes("this.advanceFaceRooms()"), `${name} has no unscoped sweep`);
   }
+  // The leave door is narrower than the other five: a leave names one room, so it settles that room and no other, and
+  // it does so only after the caller is judged a member (a refused leave must settle no room — though the lapsed-share
+  // sweep still runs first, so a refused leave still records the share it declares, #739). Its own behaviour is
+  // pinned case by case in `face_room_leave_settles_only_the_room_it_names.test.ts`; here only the shape is pinned so
+  // the door cannot drift back to a whole-seat-set sweep or to the unscoped one.
+  const leaveBody = doorBody("leaveFaceRoom");
+  // The gate is pinned as the assignment statement, not by the bare call: the door's read-back at the end calls
+  // `faceRequireMember` again, so a bare-call pin would still find that one after the gate itself was deleted, and
+  // `indexOf` would then return the read-back's position instead of -1.
+  const gate = "= this.faceRequireMember(p, roomId);";
+  assert.ok(leaveBody.includes(gate), "the leave door still judges the caller a member");
+  assert.ok(leaveBody.includes("this.advanceFaceRooms(new Set([roomId]))"), "the leave door settles only the room it names");
+  assert.ok(!leaveBody.includes("this.advanceFaceRooms()"), "leaveFaceRoom has no unscoped sweep");
+  assert.ok(
+    leaveBody.indexOf(gate) < leaveBody.indexOf("this.advanceFaceRooms(new Set([roomId]))"),
+    "the leave door judges the caller before it settles the room",
+  );
 });
