@@ -847,6 +847,9 @@ export class Platform {
     // #45: optional room context. The line names the room it belongs to; the server checks that a room-scoped grant
     // exists (the owners put both Bots in that room, so that click was the consent) and only then lifts the blanket
     // outbound hold. A room id with no such grant is refused whole: never an approval, never a message.
+    // The room this line names is an id, never a shape. An object or a boolean went into the statement as itself
+    // (an object answered 500) and an array was stringified, so `["<room>"]` wrote a real line into that room.
+    assert(body?.room_id === undefined || body?.room_id === null || typeof body.room_id === "string", 400, "invalid_request", "room_id must be a string");
     const roomId = body?.room_id === undefined || body?.room_id === null ? null : String(body.room_id).trim();
     if (roomId !== null) {
       assert(/^[A-Za-z0-9._:-]{1,64}$/.test(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
