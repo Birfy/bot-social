@@ -971,7 +971,20 @@ export class Platform {
         id, ownerId, botId, check.name, check.mime, bytes.length, sha256, sealBytes(this.kmsKey, bytes, `attachment:${id}:${sha256}`), new Date(now).toISOString(), new Date(now + this.attachmentLimits.ttlMs).toISOString());
       return used + bytes.length;
     })();
-    this.audit.append(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
+    // The row and the charge landed above, and the line that names them goes to the audit store -- a second SQLite
+    // file that can refuse it (its disk full, or a trigger). A refusal there used to leave the file stored and the
+    // owner's budget charged while the caller was answered `500 internal_error`: an orphan no door can remove, still
+    // counted against the budget. Take the row and its charge back instead, in one transaction on this same
+    // connection, so a parallel upload never reads the abandoned total and the caller's end state equals the end
+    // state of a refused upload -- no row, nothing charged, no budget figure in the `500` it already gets.
+    try {
+      this.audit.append(`bot:${botId}`, "attachment.uploaded", id, [ownerId], { name: check.name, mime: check.mime, size: bytes.length, sha256 });
+    } catch (err) {
+      this.db.transaction(() => {
+        this.run("DELETE FROM attachments WHERE id = ?", id);
+      })();
+      throw err;
+    }
     return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: { ...this.attachmentLimits, used_bytes: usedBytes } };
   }
 
