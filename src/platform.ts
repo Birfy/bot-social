@@ -2490,7 +2490,6 @@ export class Platform {
     const friendOwner = this.get("SELECT * FROM owners WHERE id = ?", friendOwnerKey);
     assert(friendOwner, 404, "friend_not_found", "no such owner");
 
-    this.expireStale();
     const friendships = this.all(
       `SELECT * FROM relationships WHERE status = 'active'
         AND ((requester_owner = ? AND target_owner = ?) OR (requester_owner = ? AND target_owner = ?))
@@ -2512,6 +2511,14 @@ export class Platform {
     const blockedPair = (otherBot: string) => this.pairRelationships(bot.id, otherBot).some((r: any) => r.status === "blocked");
     const usable = friendships.filter((r: any) => !blockedPair(pairBotOf(r)));
     assert(usable.length > 0, 403, "blocked", "relationship is blocked");
+
+    // A delivery moment, not a gate. This door refuses a stranger and a blocked pair above it, and a refused share
+    // must not be the call that expires another owner's cards -- the rule `a_refused_write_settles_nothing_else` pins
+    // on the three doors before this one. The sweep used to stand in front of those refusals, so a 404 or a 403 here
+    // settled the whole platform: a third owner's waiting card, its `approval.expired` line, its Bot told, and the
+    // `pending_owner` invite the card was holding expired for good. Every refusal of this door is behind us now, so
+    // the queue is settled once, here, before the first write.
+    this.expireStale();
 
     // Idempotent: already a live full share of this Bot to any of the friend's bots.
     for (const rel of usable) {
