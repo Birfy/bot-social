@@ -18,29 +18,37 @@ const post = async (base: string, path: string, token: string, body: unknown) =>
   return { status: r.status, body: (await r.json()) as any };
 };
 
-/** An owner with a home Bot and one more member Bot, so "the default Bot" is a real second choice. */
+/** An owner with a home Bot and two member Bots: `defaultBot` is the Bot the platform itself answers for "no Bot
+ *  named", and `member` is the other one, so a body that names a Bot names a different Bot from the default. */
 async function homeOwnerWithTwoBots(s: any) {
   const p: any = s.platform;
   const fly: any = p.onboardFlybot({ display_name: "Wes" });
-  // Two members so the account's default Bot (the oldest member) is a different Bot from the one a body names.
-  p.addHomeMember({ kind: "owner", ownerId: fly.owner_id }, fly.home.bot_id, { name: "writer" });
-  const member: any = p.addHomeMember({ kind: "owner", ownerId: fly.owner_id }, fly.home.bot_id, { name: "reader" });
+  // Two members make "the default Bot" a real second choice, but which of them is the default is not a fixture
+  // decision and cannot be read off the order they were built in: `inviteBotFor` takes the oldest member, and two
+  // rows minted in the same millisecond share `created_at` — the tie then falls to a ULID whose random suffix does
+  // not record which row was built first. So the fixture asks the platform for its answer and names the other
+  // member, instead of assuming the first one built is the default.
+  const first: any = p.addHomeMember({ kind: "owner", ownerId: fly.owner_id }, fly.home.bot_id, { name: "writer" });
+  const second: any = p.addHomeMember({ kind: "owner", ownerId: fly.owner_id }, fly.home.bot_id, { name: "reader" });
+  const defaultBot: any = p.inviteBotFor(fly.owner_id);
+  assert(defaultBot.id === first.bot_id || defaultBot.id === second.bot_id, "the default Bot is one of the fixture's two members");
+  const member: any = defaultBot.id === first.bot_id ? second : first;
   const login = await fetch(s.base + "/v1/auth/login", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ username: fly.username, password: fly.generated_password }),
   });
   const token = ((await login.json()) as any).owner_token as string;
-  return { p, fly, member, token };
+  return { p, fly, defaultBot, member, token };
 }
 
 test("an invite names its Bot with a string or not at all", async (t) => {
   const s = await startServer(bulkAuth);
   t.after(s.stop);
-  const { p, fly, member, token } = await homeOwnerWithTwoBots(s);
+  const { p, defaultBot, member, token } = await homeOwnerWithTwoBots(s);
   const invites = () => (p.get("SELECT COUNT(*) n FROM invites") as any).n;
   const lastInviteBot = () => p.bot(p.get("SELECT bot_id FROM invites ORDER BY created_at DESC, rowid DESC LIMIT 1").bot_id).handle;
-  const defaultBot = p.inviteBotFor(fly.owner_id).handle;
-  assert.notEqual(defaultBot, p.bot(member.bot_id).handle, "the fixture needs a default that is not the named Bot");
+  const defaultHandle = p.bot(defaultBot.id).handle;
+  assert.notEqual(defaultHandle, p.bot(member.bot_id).handle, "the fixture names a Bot that is not the default Bot");
 
   // Controls first: they must keep their answers.
   for (const [label, body] of [["omitted", {}], ["null", { bot_id: null }]] as [string, any][]) {
@@ -48,7 +56,7 @@ test("an invite names its Bot with a string or not at all", async (t) => {
     const r = await post(s.base, "/v1/invites", token, body);
     assert.equal(r.status, 201, `${label} bot_id still mints an invite`);
     assert.equal(invites(), before + 1);
-    assert.equal(lastInviteBot(), defaultBot, `${label} bot_id still means "the default Bot"`);
+    assert.equal(lastInviteBot(), defaultHandle, `${label} bot_id still means "the default Bot"`);
   }
   {
     const r = await post(s.base, "/v1/invites", token, { bot_id: member.bot_id });
