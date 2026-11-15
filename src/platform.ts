@@ -5495,13 +5495,22 @@ export class Platform {
     const when = g.expires_at ?? this.ts();
     // One claim, so two sweeps racing on the same row cannot both announce it. A row a reader already settled has
     // no `revoked_at` and is still announced here: settling the status is not settling the record.
-    const claim = this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", when, g.id);
-    if (!claim.changes) return;
-    const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
-    this.audit.append("platform", "grant.expired", g.id, [r?.requester_owner, r?.target_owner], {
-      relationship_id: g.relationship_id, capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: this.grantedBotOf(g, r),
+    // The claim is also the mark that silences every later sweep, so it cannot be durable before what it marks is:
+    // a refusal of the `events` write used to leave the row claimed and the Bot that lost the access silent for
+    // good, because each later sweep returns on the claim it finds. One transaction holds the claim and the
+    // `grant.changed` event, so a refusal rolls both back and the next sweep can still announce the lapse; the push
+    // waits for that commit (`afterCommitPushes`). The `grant.expired` audit row lives in another file: the append is
+    // held by `auditFollowsCommit` and written after this commit, so a refusal there is a separate, older boundary
+    // this transaction cannot close, while a rollback here still drops the held record unwritten.
+    this.atomically(() => {
+      const claim = this.run("UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", when, g.id);
+      if (!claim.changes) return;
+      const r = this.get("SELECT * FROM relationships WHERE id = ?", g.relationship_id);
+      this.audit.append("platform", "grant.expired", g.id, [r?.requester_owner, r?.target_owner], {
+        relationship_id: g.relationship_id, capability: g.capability, grantee_bot: g.grantee_bot, granted_bot: this.grantedBotOf(g, r),
+      });
+      this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "expired" });
     });
-    this.emit(g.grantee_bot, "grant.changed", { relationship_id: g.relationship_id, capability: g.capability, status: "expired" });
   }
 
   private faceRequireMember(p: Principal, roomId: string, asBot?: string) {
