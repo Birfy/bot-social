@@ -847,6 +847,9 @@ export class Platform {
     // #45: optional room context. The line names the room it belongs to; the server checks that a room-scoped grant
     // exists (the owners put both Bots in that room, so that click was the consent) and only then lifts the blanket
     // outbound hold. A room id with no such grant is refused whole: never an approval, never a message.
+    // The room this line names is an id, never a shape. An object or a boolean went into the statement as itself
+    // (an object answered 500) and an array was stringified, so `["<room>"]` wrote a real line into that room.
+    assert(body?.room_id === undefined || body?.room_id === null || typeof body.room_id === "string", 400, "invalid_request", "room_id must be a string");
     const roomId = body?.room_id === undefined || body?.room_id === null ? null : String(body.room_id).trim();
     if (roomId !== null) {
       assert(/^[A-Za-z0-9._:-]{1,64}$/.test(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
@@ -3601,53 +3604,59 @@ export class Platform {
   }
 
   private expireApproval(a: any) {
-    this.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ?", nowIso(), a.id);
-    // Which Bots this settlement already tells: the outlet may be one of them, and one Bot must hear one decision.
-    const told = new Set<string>();
-    const tell = (botId: string, data: Record<string, unknown>) => { told.add(botId); this.emit(botId, "approval.decided", data); };
-    if (a.kind === "outbound_message") {
-      this.run("UPDATE messages SET status = 'expired' WHERE id = ?", a.subject_id);
-      // Same as a rejection: the line never went out, so the files it held are not "already sent".
-      this.freeDraftAttachments(a.subject_id);
-      const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
-      if (m) {
-        // An expired draft is settled like a rejected one (`rejectMessage`): the peer never sees it and is not told.
-        // It never received the line, so there is nothing for it to act on, and its queue and webhook stay quiet.
-        tell(m.sender_bot, { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
+    // One card is one write: the card and the row it holds are settled together, so a store that refuses the second
+    // write must not leave the first behind (the torn-write shape of #516, read at the settle end). `atomically`, not
+    // a plain transaction: the settlement is announced through `emit`, and a push naming a decision the rollback
+    // takes back would tell the Bot about a settlement that is in no table.
+    this.atomically(() => {
+      this.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ?", nowIso(), a.id);
+      // Which Bots this settlement already tells: the outlet may be one of them, and one Bot must hear one decision.
+      const told = new Set<string>();
+      const tell = (botId: string, data: Record<string, unknown>) => { told.add(botId); this.emit(botId, "approval.decided", data); };
+      if (a.kind === "outbound_message") {
+        this.run("UPDATE messages SET status = 'expired' WHERE id = ?", a.subject_id);
+        // Same as a rejection: the line never went out, so the files it held are not "already sent".
+        this.freeDraftAttachments(a.subject_id);
+        const m = this.get("SELECT * FROM messages WHERE id = ?", a.subject_id);
+        if (m) {
+          // An expired draft is settled like a rejected one (`rejectMessage`): the peer never sees it and is not told.
+          // It never received the line, so there is nothing for it to act on, and its queue and webhook stay quiet.
+          tell(m.sender_bot, { approval_id: a.id, kind: a.kind, message_id: m.id, decision: "expired" });
+        }
       }
-    }
-    if (a.kind === "action") {
-      this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
-      tell(a.bot_id, { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
-    }
-    if (a.kind === "face_room_message") {
-      this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
-      const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
-      if (d) tell(d.sender_bot, { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
-    }
-    if (a.kind === "grant_request") {
-      // The request exists only as this approval: the grant row is created when the owner approves, so there is
-      // nothing else to sweep. Without this branch the card simply left the owner's pending list and the Bot that
-      // asked for the capability was never told; the peer owner is not the addressee (same as the invite, #104).
-      tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
-    }
-    if (a.kind === "invite") {
-      // A Bot-created invite waits at status pending_owner for this approval. Expiring only the approval row left
-      // the link stuck: decide answered 409, the joining side read 410 pending_owner, and the Bot heard nothing.
-      // Only a still-waiting invite is expired, so an invite approved earlier is never flipped by a later sweep.
-      this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
-      tell(a.bot_id, { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
-    }
-    if (a.kind === "relationship_request") {
-      // The relationship row is the business object: `expireStale` flips it before working the approvals, so this
-      // branch must not touch any row — it only tells the Bot that asked. Without it the card left the owner's list
-      // and the Bot sat in "waiting for my owner" with nothing to read (same shape as #104's invite, P19's grant
-      // request). The peer Bot is not the addressee: the requester's owner owns this decision.
-      tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
-    }
-    this.tellSettledCardToOutlet(a, told);
-    if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
-    this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
+      if (a.kind === "action") {
+        this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
+        tell(a.bot_id, { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
+      }
+      if (a.kind === "face_room_message") {
+        this.run("UPDATE face_room_drafts SET status = 'expired' WHERE id = ?", a.subject_id);
+        const d = this.get("SELECT * FROM face_room_drafts WHERE id = ?", a.subject_id);
+        if (d) tell(d.sender_bot, { approval_id: a.id, kind: a.kind, message_id: d.id, room_id: d.room_id, decision: "expired" });
+      }
+      if (a.kind === "grant_request") {
+        // The request exists only as this approval: the grant row is created when the owner approves, so there is
+        // nothing else to sweep. Without this branch the card simply left the owner's pending list and the Bot that
+        // asked for the capability was never told; the peer owner is not the addressee (same as the invite, #104).
+        tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
+      }
+      if (a.kind === "invite") {
+        // A Bot-created invite waits at status pending_owner for this approval. Expiring only the approval row left
+        // the link stuck: decide answered 409, the joining side read 410 pending_owner, and the Bot heard nothing.
+        // Only a still-waiting invite is expired, so an invite approved earlier is never flipped by a later sweep.
+        this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
+        tell(a.bot_id, { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision: "expired" });
+      }
+      if (a.kind === "relationship_request") {
+        // The relationship row is the business object: `expireStale` flips it before working the approvals, so this
+        // branch must not touch any row — it only tells the Bot that asked. Without it the card left the owner's list
+        // and the Bot sat in "waiting for my owner" with nothing to read (same shape as #104's invite, P19's grant
+        // request). The peer Bot is not the addressee: the requester's owner owns this decision.
+        tell(a.bot_id, { approval_id: a.id, kind: a.kind, relationship_id: a.subject_id, decision: "expired" });
+      }
+      this.tellSettledCardToOutlet(a, told);
+      if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
+      this.audit.append("platform", "approval.expired", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id });
+    });
   }
 
   /** A card that waited through quiet hours and settled before the window ended was announced to nobody: the held batch
@@ -6385,12 +6394,15 @@ export class Platform {
   }
 
   startFaceRoom(p: Principal, roomId: string) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its
     // own, not the wider membership that also admits a home which only brought a guest in.
     const viewer = this.faceRequireOwnSeat(p, roomId);
+    // The sweep is the room's own act, so it settles the one room this request names. Reading the seat first matters
+    // here: `faceSeatRooms` also counts a home that only brought a guest, which `faceRequireOwnSeat` refuses, and
+    // that refused caller used to settle the very room it was refused on.
+    this.advanceFaceRooms(new Set([roomId]));
     this.db.transaction(() => {
       const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
       if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
@@ -6459,10 +6471,14 @@ export class Platform {
    * Bot token); `bot` must be a Bot in the room now; null / "" goes back to the default lead.
    */
   setFaceRoomLead(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     assert(p.kind === "owner", 403, "forbidden", "only the room creator picks the lead, from their own app; a Bot token cannot");
     assert(this.faceCreatorOf(viewer.room) === viewer.ownerId, 403, "not_room_creator", "only the person who created this room picks its lead");
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
@@ -6505,10 +6521,14 @@ export class Platform {
    * it never depends on when a member joined and writing it never moves a cursor. Trimmed, 1-500 characters.
    */
   setFaceRoomNote(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const room = this.faceRequireLead(p, roomId, "set the room note");
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
     // The note speaks for the whole room, so writing it is the lead's outbound act rather than room metadata anyone
@@ -6537,10 +6557,14 @@ export class Platform {
    * sits next to; a refused one writes nothing and tells nobody.
    */
   setFaceRoomRoles(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A write against another
+    // room must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check
+    // above settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const roles = body?.roles;
     assert(roles && typeof roles === "object" && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.keys(roles).length <= this.faceRoomLimits.maxMembers,
       400, "invalid_request", "roles must be an object of your Bots in this room: { \"@handle\": \"role\" | null }");
@@ -6592,10 +6616,14 @@ export class Platform {
   draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean; mentions?: string[] | null } = {}) {
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // Lapsed shares settle here as they always have, before this door reads anything.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
+    // The sweep is the room's own act - it voids the number, deletes its code rows, names the promotion in the
+    // transcript and wakes every member - so it settles the one room this request names. A draft for another room
+    // must not promote a lapsed candidate the caller happens to sit in, and a caller refused at the seat check above
+    // settles nothing at all.
+    this.advanceFaceRooms(new Set([roomId]));
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
     // The line is stored, shown and announced as text, so the field must be a string. `String(body?.text ?? "")`
@@ -6722,6 +6750,10 @@ export class Platform {
     // type before the value is read at all. In the owner branch only: a Bot token speaks for itself alone, and its
     // own 403 for a name that is not itself must stay a 403 rather than become a 400 about the field.
     if (p.kind !== "bot") assert(ref === undefined || ref === null || typeof ref === "string", 400, "invalid_request", "bot_id must be a string");
+    // A Bot token speaks for itself alone, so a ref it cannot read is the same refusal as naming another Bot: a 403,
+    // not a 400 about the field. Judged before the value is read, so an object whose `toString` is not a function is
+    // answered here instead of throwing 500, and `String([])` can no longer read as "nobody named".
+    if (p.kind === "bot") assert(ref === undefined || ref === null || typeof ref === "string", 403, "forbidden", "a bot token can only act as itself");
     const want = String(ref ?? "").replace(/^@/, "");
     let b: any;
     if (p.kind === "bot") {
@@ -6747,7 +6779,13 @@ export class Platform {
   setPresence(p: Principal, body: { bot_id?: string; state?: string; to?: string; room_id?: string; ttl_seconds?: number } = {}) {
     const state = body?.state;
     assert(state === "thinking" || state === "idle", 400, "invalid_request", "state must be \"thinking\" or \"idle\"");
+    // Judge the type before the value is read. `String()` rewrites what the caller wrote - an array wrapping a real
+    // handle or room id becomes that string, so the call used to land a line, and `{}` became a name nobody sent - and
+    // an object whose `toString` is not a function made the read throw a 500. A value that is neither absent nor a
+    // string is the bad field it is, refused here before any read, entry, rate-limit spend, row or room sweep.
+    assert(body?.to === undefined || body?.to === null || typeof body?.to === "string", 400, "invalid_request", "to must be a string");
     const to = body?.to === undefined || body?.to === null ? "" : String(body.to);
+    assert(body?.room_id === undefined || body?.room_id === null || typeof body?.room_id === "string", 400, "invalid_request", "room_id must be a string");
     const roomId = body?.room_id === undefined || body?.room_id === null ? "" : String(body.room_id);
     assert(!!to !== !!roomId, 400, "invalid_request", "exactly one of to (a Bot handle) or room_id is required");
     let ttl = PRESENCE_DEFAULT_TTL_S;
