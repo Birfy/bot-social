@@ -149,6 +149,7 @@ export function buildServer(platform: Platform, opts: { logger?: boolean; fixedB
   app.post("/v1/homes/:id/members", async (req, reply) => reply.status(201).send(platform.addHomeMember(auth(req), P(req).id, B(req))));
   app.delete("/v1/homes/:id/members/:member", async (req) => platform.removeHomeMember(auth(req), P(req).id, P(req).member));
   app.post("/v1/attachments", { bodyLimit: Math.ceil(platform.attachmentLimits.maxBytes / 3) * 4 + 64 * 1024 }, async (req, reply) => reply.status(201).send(platform.uploadAttachment(auth(req), B(req))));
+  app.get("/v1/attachments", async (req) => platform.listAttachments(ownerAny(req)));
   app.get("/v1/attachments/:id", async (req) => platform.getAttachment(auth(req), { attachment_id: P(req).id, bot_id: oneQ(Q(req).bot_id, "bot_id") }));
   app.get("/v1/homes/:id/remote-bots", async (req) => platform.remoteBots(ownerAny(req), P(req).id));
   app.get("/v1/remote-bots", async (req) => {

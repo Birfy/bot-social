@@ -42,7 +42,7 @@ test("a face room read declares the start it performs", async (t) => {
   t.after(async () => { await c.close(); await s.stop(); });
 
   const tools: any[] = (await c.listTools()).tools;
-  assert.equal(tools.length, 50, "the fix moves annotations, not the tool set");
+  assert.equal(tools.length, 51, "the fix moves annotations, not the tool set");
   const seen = Object.fromEntries(tools.map((x: any) => [x.name, x.annotations ?? {}]));
 
   for (const [name, annotations] of Object.entries(STARTS_A_ROOM)) {

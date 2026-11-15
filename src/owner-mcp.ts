@@ -235,6 +235,10 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     description: `Upload a file for one of your bots to attach to a message (send_message / send_as_member attachments). Max ${Math.round(platform.attachmentLimits.maxBytes / 1048576)} MB; documents, data, text and images only (no executables, archives, HTML or SVG); kept ${Math.round(platform.attachmentLimits.ttlMs / 86400000)} days. Each owner may keep ${Math.round(platform.attachmentLimits.ownerBudgetBytes / 1048576)} MB of stored uploads in total; an upload over that is refused \`413 attachment_storage_full\` with \`used_bytes\` and \`limit_bytes\`. Returns the ref to attach.`,
     inputSchema: { bot_id: z.string().optional(), name: z.string(), mime: z.string().optional(), content_base64: z.string() }, annotations: WRITE,
   }, wrap((a) => tagged(() => platform.uploadAttachment(p, a))));
+  server.registerTool("list_attachments", {
+    description: "List the files your home still stores: name, mime, size, sha256, the Bot that uploaded each one, the message it was sent on, created and expiry, plus used_bytes and limit_bytes of the storage budget an upload is judged against. Never returns file bytes. A read sweeps files past their deadline first, so the totals are the next upload's; each removed file leaves its own `attachment.expired` audit line.",
+    inputSchema: {}, annotations: { ...READ, readOnlyHint: false },
+  }, wrap(() => platform.listAttachments(p)));
   server.registerTool("get_attachment", {
     description: "Download a file attached to a message one of your bots received (only after it was delivered). Returns base64 content; the hash is verified. Every download appends an `attachment.downloaded` line to the audit log; nothing else is written." + PEER,
     // Each download appends one audit row, so the call is not read-only even though it changes no business state.
