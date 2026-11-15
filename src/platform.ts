@@ -3550,57 +3550,66 @@ export class Platform {
     const keepSql = opts.keep ? ` AND ${opts.keep.where}` : "";
     const keepArgs = opts.keep ? opts.keep.args : [];
     for (const a of this.all(`SELECT * FROM approvals WHERE status = 'pending' AND ${where}${keepSql}`, ...args, ...keepArgs)) {
-      this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
-      // The card entered the chain when it was drafted, and two of its three ends name it there: a decision writes
-      // `approval.decided` and the clock writes `approval.expired`. This end wrote nothing, so an owner's own page
-      // read the draft and then stopped. The line belongs to the settlement, not to the announcement: the call sites
-      // that deliberately tell nobody still leave it, and on those it is the only trace there is.
-      this.audit.append(actor, "approval.cancelled", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id, reason });
-      if (a.kind === "outbound_message") {
-        this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
-        // The line dies with the card; the files it held at draft time never reached the peer, so they are free.
-        this.freeDraftAttachments(a.subject_id);
-      }
-      if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
-      if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
-      // A Bot-created invite waits at status `pending_owner` for this card, so settling only the card leaves a link
-      // nobody can use: the owner's list keeps offering it, the decision door answers 409 and the join door reports
-      // `pending_owner` until its own 72h clock. `expireApproval` settles the same two rows for the same reason; the
-      // guard keeps an invite the owner already approved (or one the Bot itself revoked) out of the sweep.
-      if (a.kind === "invite") this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
-      // A Bot-created friend request waits at `pending_requester_owner` for this card, so settling only the card
-      // leaves the pair unreachable: no door decides a cancelled card, so only the 7-day TTL in `expireStale` would
-      // ever move the row, and every later request to the same peer answers `relationship_exists` until then — the
-      // stop locks the pair out for a week by itself. `expireApproval` settles the same row for the same reason; the
-      // guard keeps a request the owner already approved (or one a block/unfriend settled) out of the sweep, and
-      // `updated_at` is written so a row settled here has the same shape as one `expireStale` settles.
-      if (a.kind === "relationship_request") this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending_requester_owner'", nowIso(), a.subject_id);
-      // A cancelled room line names its room, as its approved, rejected and expired decisions do: the Bot reads the
-      // room off the event, and it can hold the same kind of line in more than one room.
-      const roomId = a.kind === "face_room_message"
-        ? this.get("SELECT room_id FROM face_room_drafts WHERE id = ?", a.subject_id)?.room_id
-        : undefined;
-      // A cancelled card is not pending any more: the chat it was holding must stop saying it waits for one.
-      if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
-      // A cancelled card is never silent: the Bot that owned it hears the outcome and the reason it can show.
-      if (opts.notify && a.bot_id) {
-        told.add(a.bot_id);
-        this.emit(a.bot_id, "approval.decided", {
-          approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
-          ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
-          ...(roomId ? { room_id: roomId } : {}),
-          ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
-          ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
-          // These two kinds carry the relationship in subject_id; without it the Bot cannot tell which relationship
-          // the cancelled card belonged to (the expiry path in `expireApproval` already sends it).
-          ...(a.kind === "relationship_request" || a.kind === "grant_request" ? { relationship_id: a.subject_id } : {}),
-        });
-      }
-      // The same settlement reaches the owner's designated outlet: quiet hours hold a card that still waits, and the
-      // batch only ever names cards that still wait, so a card cancelled in the night is silence for good. Only the
-      // call sites that opt into `notify` announce it; the silent ones keep their ledger line undelivered on purpose.
-      if (opts.notify) this.tellSettledCardToOutlet(a, told, "cancelled", reason);
-    }
+      // One card is one settlement: a refused write rolls this card back whole, so no card is left `cancelled`
+      // beside a subject row that still waits, and no audit line or event describes a cancellation that never
+      // happened.
+      const settle = () => {
+        this.run("UPDATE approvals SET status = 'cancelled', decision = ?, decided_at = ? WHERE id = ?", reason, nowIso(), a.id);
+        // The card entered the chain when it was drafted, and two of its three ends name it there: a decision writes
+        // `approval.decided` and the clock writes `approval.expired`. This end wrote nothing, so an owner's own page
+        // read the draft and then stopped. The line belongs to the settlement, not to the announcement: the call sites
+        // that deliberately tell nobody still leave it, and on those it is the only trace there is.
+        this.audit.append(actor, "approval.cancelled", a.id, [a.owner_id], { kind: a.kind, subject_id: a.subject_id, reason });
+        if (a.kind === "outbound_message") {
+          this.run("UPDATE messages SET status = 'cancelled' WHERE id = ?", a.subject_id);
+          // The line dies with the card; the files it held at draft time never reached the peer, so they are free.
+          this.freeDraftAttachments(a.subject_id);
+        }
+        if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
+        if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
+        // A Bot-created invite waits at status `pending_owner` for this card, so settling only the card leaves a link
+        // nobody can use: the owner's list keeps offering it, the decision door answers 409 and the join door reports
+        // `pending_owner` until its own 72h clock. `expireApproval` settles the same two rows for the same reason; the
+        // guard keeps an invite the owner already approved (or one the Bot itself revoked) out of the sweep.
+        if (a.kind === "invite") this.run("UPDATE invites SET status = 'expired' WHERE id = ? AND status = 'pending_owner'", a.subject_id);
+        // A Bot-created friend request waits at `pending_requester_owner` for this card, so settling only the card
+        // leaves the pair unreachable: no door decides a cancelled card, so only the 7-day TTL in `expireStale` would
+        // ever move the row, and every later request to the same peer answers `relationship_exists` until then — the
+        // stop locks the pair out for a week by itself. `expireApproval` settles the same row for the same reason; the
+        // guard keeps a request the owner already approved (or one a block/unfriend settled) out of the sweep, and
+        // `updated_at` is written so a row settled here has the same shape as one `expireStale` settles.
+        if (a.kind === "relationship_request") this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending_requester_owner'", nowIso(), a.subject_id);
+        // A cancelled room line names its room, as its approved, rejected and expired decisions do: the Bot reads the
+        // room off the event, and it can hold the same kind of line in more than one room.
+        const roomId = a.kind === "face_room_message"
+          ? this.get("SELECT room_id FROM face_room_drafts WHERE id = ?", a.subject_id)?.room_id
+          : undefined;
+        // A cancelled card is not pending any more: the chat it was holding must stop saying it waits for one.
+        if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
+        // A cancelled card is never silent: the Bot that owned it hears the outcome and the reason it can show.
+        if (opts.notify && a.bot_id) {
+          told.add(a.bot_id);
+          this.emit(a.bot_id, "approval.decided", {
+            approval_id: a.id, kind: a.kind, decision: "cancelled", reason,
+            ...(a.kind === "outbound_message" || a.kind === "face_room_message" ? { message_id: a.subject_id } : {}),
+            ...(roomId ? { room_id: roomId } : {}),
+            ...(a.kind === "action" ? { action_id: a.subject_id } : {}),
+            ...(a.kind === "invite" ? { invite_id: a.subject_id } : {}),
+            // These two kinds carry the relationship in subject_id; without it the Bot cannot tell which relationship
+            // the cancelled card belonged to (the expiry path in `expireApproval` already sends it).
+            ...(a.kind === "relationship_request" || a.kind === "grant_request" ? { relationship_id: a.subject_id } : {}),
+          });
+        }
+        // The same settlement reaches the owner's designated outlet: quiet hours hold a card that still waits, and the
+        // batch only ever names cards that still wait, so a card cancelled in the night is silence for good. Only the
+        // call sites that opt into `notify` announce it; the silent ones keep their ledger line undelivered on purpose.
+        if (opts.notify) this.tellSettledCardToOutlet(a, told, "cancelled", reason);
+      };
+      // A caller that already opened a transaction (the stop, a block) owns the commit, so this adds none: an inner
+      // `atomically` would hand its pushes over before the outer commit, the shape #702 fixed. On its own - a
+      // revoke, a close, a lapse - the card gets a transaction of its own, one card at a time, never the sweep.
+      if (this.db.inTransaction) settle(); else this.atomically(settle);
+}
   }
 
   private expireApproval(a: any) {
