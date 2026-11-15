@@ -5739,10 +5739,14 @@ export class Platform {
    */
   mintFaceRoomInvite(p: Principal, roomId: string, ctx: { ip?: string } = {}) {
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
-    this.advanceFaceRooms();
+    // Settlement follows the authorization: the sweep is the room's own act (it voids the number, deletes its rows,
+    // wakes every member and writes the audit row), so it runs only once the caller is this room's lead, and only over
+    // this room. It used to open the door, so a caller holding a token but no seat here started another home's room by
+    // being refused. A lapsed candidate the lead mints on is still settled, exactly as before.
     const viewer = this.faceRequireMember(p, roomId);
     if (viewer.room.status === "closed") throw new ApiError(410, "ended", "this room has ended");
     this.faceRequireLead(p, roomId, "mint an invite");
+    this.advanceFaceRooms(new Set([roomId]));
     const block = this.inviteMintRateLimit(p.ownerId, ip);
     if (block) throw new ApiError(block.status, block.code, block.message, block.extra);
     this.faceRecordAttempt(p.ownerId, ip, "invite", "minted");
@@ -5760,9 +5764,11 @@ export class Platform {
    * revoke lands after it and only later uses are affected.
    */
   revokeFaceRoomInvite(p: Principal, roomId: string, ticketRaw: unknown) {
-    this.advanceFaceRooms();
+    // Same order as the mint above: the caller has to be this room's lead before the door settles it. A caller who is
+    // not in the room gets its 404 without the sweep opening the number it came to touch.
     this.faceRequireMember(p, roomId);
     this.faceRequireLead(p, roomId, "revoke an invite");
+    this.advanceFaceRooms(new Set([roomId]));
     const ticket = String(ticketRaw ?? "").trim();
     const invite = this.get("SELECT * FROM face_room_invites WHERE ticket = ? AND room_id = ?", ticket, roomId);
     if (!invite) throw new ApiError(404, "invite_not_found", "this invite link is not valid");
@@ -5816,10 +5822,17 @@ export class Platform {
     const bring = this.faceBotsToBring(p, body);
     const bots = bring.map((x) => x.bot);
     const ticket = String(body?.ticket ?? "").trim();
+    // The sweep this door runs settles only the lapsed rooms the request itself already holds a seat in - the same
+    // seat rule the 6-digit door adopted (#724). Promotion voids the number, deletes its rows and wakes every member,
+    // so a caller seated nowhere must not start another home's room by handing in a ticket it was never given; the
+    // ticket is read after this, and its refusal settles nothing.
+    const seatRooms = new Set<string>(bots.length
+      ? this.all(`SELECT DISTINCT room_id FROM face_room_members WHERE left_at IS NULL AND bot_id IN (${bots.map(() => "?").join(",")})`, ...bots.map((b) => b.id)).map((r: any) => r.room_id as string)
+      : []);
     type Fail = { ok: false; status: number; code: string; message: string; extra?: Record<string, unknown>; lockout?: boolean };
     type Ok = { ok: true; roomId: string; seated: string[] };
     const txn = this.db.transaction((): Ok | Fail => {
-      this.advanceFaceRooms();
+      this.advanceFaceRooms(seatRooms);
       const locked = this.faceLockoutUntil(ownerId, ip);
       if (locked) {
         this.faceRecordAttempt(ownerId, ip, "invite", "locked_out");
