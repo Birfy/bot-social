@@ -6412,10 +6412,17 @@ export class Platform {
   }
 
   leaveFaceRoom(p: Principal, roomId: string, body: any = {}) {
-    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
-    const seatRooms = this.faceSeatRooms(p);
-    this.advanceFaceRooms(seatRooms);
+    // A leave names one room, so it settles one room, and it does that only after the caller is judged a member of
+    // it. The sweep is not a private act: it voids the number, deletes the codes, writes a start event and an audit
+    // row, and wakes every member. Settling the caller's whole seat set here therefore opened rooms the request never
+    // named (another home's lapsed room the caller sat in went `candidate` -> `open`), and a leave the door then
+    // refused had already settled the caller's own lapsed rooms before it answered 404.
+    // The lapsed shares still expire before the member gate, in the same place they did: a share's own clock is not
+    // the room's business, and moving that half after the gate would turn the lapse a refused leave declares into
+    // silence (#739). What moves is only the promotion half: after the gate, over the one room this request names.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId);
+    this.advanceFaceRooms(new Set([roomId]));
     // Only the caller's own Bots leave. A brought guest is the other owner's seat even though this owner
     // added it, and the other owner ends it by revoking the grant (or leaving with their own token).
     // The list is judged before it is read: `normalizeBotRefs` answers an explicit empty list (or a list of
