@@ -1096,12 +1096,19 @@ export class Platform {
         WHERE am.id = a.message_id AND am.status = 'pending_approval'
           AND ap.status = 'pending' AND ap.expires_at > ?))`, at, at) as any[];
     if (!doomed.length) return 0;
-    const r = this.run(`DELETE FROM attachments WHERE expires_at <= ?
-      AND (message_id IS NULL OR NOT EXISTS (
-        SELECT 1 FROM messages m JOIN approvals a ON a.id = m.approval_id
-        WHERE m.id = attachments.message_id AND m.status = 'pending_approval'
-          AND a.status = 'pending' AND a.expires_at > ?))`, at, at) as any;
+    // The audit log is a second SQLite file (§9.13), so no transaction here can hold a line and the row it names
+    // together; `auditFollowsCommit` only ever makes a line arrive after the write it describes. The line is
+    // therefore written first and the destructive statement last. A store that refuses a line throws before a
+    // single byte is destroyed, and the next sweep — the next read, the next upload — finds the file still stored
+    // and writes the line it owed. The other order destroyed the rows first and then had no line left to write:
+    // the row a line named was the row the delete had just taken, so no later run could ever repair the gap, and
+    // the chain read `attachment.uploaded`, maybe `attachment.downloaded`, and nothing while a delivered message
+    // kept naming a file that was gone. What this order leaves behind instead is a line for a row a failed DELETE
+    // left standing, so the chain is asked about each row first and a row already named is not named twice; `has`
+    // asks the table rather than a page of it, so the answer does not depend on how old the line is. Both callers
+    // sweep outside a transaction, so each line is durable here before the delete below runs.
     for (const row of doomed) {
+      if (this.audit.has("attachment.expired", row.id)) continue;
       // A received file is both homes' business, as its `attachment.downloaded` line already is; one no message held,
       // or one whose message never reached the peer, is the uploader's alone.
       const peer = row.message_status === "delivered" && row.recipient_bot
@@ -1110,6 +1117,11 @@ export class Platform {
       this.audit.append("platform", "attachment.expired", row.id, [row.owner_id, peer],
         { name: row.name, size: row.size, sha256: row.sha256, ...(row.message_id ? { message_id: row.message_id } : {}) });
     }
+    const r = this.run(`DELETE FROM attachments WHERE expires_at <= ?
+      AND (message_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM messages m JOIN approvals a ON a.id = m.approval_id
+        WHERE m.id = attachments.message_id AND m.status = 'pending_approval'
+          AND a.status = 'pending' AND a.expires_at > ?))`, at, at) as any;
     return r?.changes ?? 0;
   }
 

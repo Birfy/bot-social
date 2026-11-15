@@ -67,6 +67,13 @@ export class AuditLog {
     return { ...row, owners: JSON.parse(row.owners), data: JSON.parse(row.data) };
   }
 
+  /** Whether the chain holds any record with exactly this action and subject, however old. `list` answers a page
+   *  (the newest N, default 1000), so a caller asking "was this already written?" cannot ask it that way: a record
+   *  outside the page is simply absent from the answer. This reads the table for the question itself. */
+  has(action: string, subject: string): boolean {
+    return this.db.prepare("SELECT 1 FROM audit_events WHERE action = ? AND subject = ? LIMIT 1").get(action, subject) !== undefined;
+  }
+
   list(opts: { owner?: string; subject?: string; limit?: number } = {}): AuditRecord[] {
     const where: string[] = [];
     const args: unknown[] = [];
