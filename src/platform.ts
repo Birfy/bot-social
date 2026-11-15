@@ -6715,6 +6715,10 @@ export class Platform {
     // type before the value is read at all. In the owner branch only: a Bot token speaks for itself alone, and its
     // own 403 for a name that is not itself must stay a 403 rather than become a 400 about the field.
     if (p.kind !== "bot") assert(ref === undefined || ref === null || typeof ref === "string", 400, "invalid_request", "bot_id must be a string");
+    // A Bot token speaks for itself alone, so a ref it cannot read is the same refusal as naming another Bot: a 403,
+    // not a 400 about the field. Judged before the value is read, so an object whose `toString` is not a function is
+    // answered here instead of throwing 500, and `String([])` can no longer read as "nobody named".
+    if (p.kind === "bot") assert(ref === undefined || ref === null || typeof ref === "string", 403, "forbidden", "a bot token can only act as itself");
     const want = String(ref ?? "").replace(/^@/, "");
     let b: any;
     if (p.kind === "bot") {
@@ -6740,7 +6744,13 @@ export class Platform {
   setPresence(p: Principal, body: { bot_id?: string; state?: string; to?: string; room_id?: string; ttl_seconds?: number } = {}) {
     const state = body?.state;
     assert(state === "thinking" || state === "idle", 400, "invalid_request", "state must be \"thinking\" or \"idle\"");
+    // Judge the type before the value is read. `String()` rewrites what the caller wrote - an array wrapping a real
+    // handle or room id becomes that string, so the call used to land a line, and `{}` became a name nobody sent - and
+    // an object whose `toString` is not a function made the read throw a 500. A value that is neither absent nor a
+    // string is the bad field it is, refused here before any read, entry, rate-limit spend, row or room sweep.
+    assert(body?.to === undefined || body?.to === null || typeof body?.to === "string", 400, "invalid_request", "to must be a string");
     const to = body?.to === undefined || body?.to === null ? "" : String(body.to);
+    assert(body?.room_id === undefined || body?.room_id === null || typeof body?.room_id === "string", 400, "invalid_request", "room_id must be a string");
     const roomId = body?.room_id === undefined || body?.room_id === null ? "" : String(body.room_id);
     assert(!!to !== !!roomId, 400, "invalid_request", "exactly one of to (a Bot handle) or room_id is required");
     let ttl = PRESENCE_DEFAULT_TTL_S;
