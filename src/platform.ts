@@ -330,6 +330,14 @@ export class Platform {
       throw e;
     }
     this.afterCommitPushes = outer;
+    // A nested `atomically` is a savepoint inside the transaction around it: its writes are not durable when it
+    // returns, so handing the pushes to the queue here would page a Bot about a write the outer rollback takes back
+    // (`settlePendingRelationships` settles a request's cards through `expireApproval`, which opens one of its own).
+    // Hand them up instead, exactly as `auditFollowsCommit` hands its records up, and let the outermost commit enqueue.
+    if (outer) {
+      for (const p of queued) outer.push(p);
+      return out;
+    }
     for (const p of queued) this.webhooks.enqueue(p.botId, p.ev);
     return out;
   }
@@ -1883,14 +1891,23 @@ export class Platform {
   private settlePendingRelationships(rows: any[]) {
     const now = nowIso();
     for (const r of rows) {
-      this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ?", now, r.id);
-      // Flip each pending approval through `expireApproval`, not one bulk UPDATE. The bulk form is why the
-      // `relationship_request` Bot was never told: it flipped the row (no `decided_at`, no `approval.expired` audit,
-      // no event) before the approval sweep below could see it, so the real-world path stayed silent. The
-      // relationship row above is already terminal, so a reader reacting to the event sees the end state.
-      for (const a of this.all("SELECT * FROM approvals WHERE subject_id = ? AND status = 'pending'", r.id)) this.expireApproval(a);
-      this.audit.append("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
-      this.releaseInviteUse(r.id);
+      // One request is one write: the relationship row, its cards, the audit line and the invite use the join spent
+      // settle together or not at all. `expireApproval` settles a card in a transaction of its own, but the row that
+      // made the sweep pick this request (`pending_*`) used to be flipped outside any transaction, so a refusal while
+      // a card was settling left the request already terminal. The sweep selects `pending_*` rows only, so nothing
+      // ever reached this request again: `releaseInviteUse` never ran and the invite's use was spent for good, and the
+      // `relationship.expired` audit line was never written. Transaction per request, not one for the loop: a refused
+      // request rolls back alone and the sweep's other rows settle on the next run.
+      this.atomically(() => {
+        this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ?", now, r.id);
+        // Flip each pending approval through `expireApproval`, not one bulk UPDATE. The bulk form is why the
+        // `relationship_request` Bot was never told: it flipped the row (no `decided_at`, no `approval.expired` audit,
+        // no event) before the approval sweep below could see it, so the real-world path stayed silent. The
+        // relationship row above is already terminal, so a reader reacting to the event sees the end state.
+        for (const a of this.all("SELECT * FROM approvals WHERE subject_id = ? AND status = 'pending'", r.id)) this.expireApproval(a);
+        this.audit.append("platform", "relationship.expired", r.id, [r.requester_owner, r.target_owner], {});
+        this.releaseInviteUse(r.id);
+      });
     }
   }
 
