@@ -967,6 +967,36 @@ export class Platform {
     return { attachment: { id, name: check.name, size: bytes.length, mime: check.mime, sha256 }, expires_at: new Date(now + this.attachmentLimits.ttlMs).toISOString(), limits: { ...this.attachmentLimits, used_bytes: usedBytes } };
   }
 
+  /**
+   * What this home is storing: the files behind the `used_bytes` an upload judges, never their contents. A read
+   * sweeps files past their deadline first, so its totals are the ones the next upload sees and each removed file
+   * leaves the `attachment.expired` line every removal writes. The budget is the owner's, so this is an owner door:
+   * a Bot token sees neither the home's files nor its totals.
+   */
+  listAttachments(p: Principal) {
+    const ownerId = this.requireOwner(p);
+    this.cleanupAttachments();
+    const rows = this.all(`SELECT a.id, a.bot_id, a.name, a.mime, a.size, a.sha256, a.message_id, a.created_at, a.expires_at, b.handle AS bot_handle
+      FROM attachments a LEFT JOIN bots b ON b.id = a.bot_id
+      WHERE a.owner_id = ?
+      ORDER BY a.created_at DESC, a.id DESC`, ownerId) as any[];
+    return {
+      attachments: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        mime: r.mime,
+        size: r.size,
+        sha256: r.sha256,
+        bot: { id: r.bot_id, handle: r.bot_handle ? "@" + String(r.bot_handle).replace(/^@/, "") : null },
+        message_id: r.message_id ?? null,
+        created_at: r.created_at,
+        expires_at: r.expires_at,
+      })),
+      used_bytes: rows.reduce((n, r) => n + (r.size as number), 0),
+      limit_bytes: this.attachmentLimits.ownerBudgetBytes,
+    };
+  }
+
   private attachmentBot(p: Principal, botId?: string) {
     if (p.kind === "owner") {
       const ownerId = this.requireOwner(p);
