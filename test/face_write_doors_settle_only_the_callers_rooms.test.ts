@@ -9,8 +9,12 @@
  * platform and was refused afterwards — and the room id it named did not even have to exist.
  *
  * The sweep on these six doors now settles only the lapsed rooms the caller's own Bots already sit in; a caller with
- * no seat settles nothing. The doors keep their order (the sweep still runs before the seat is read), their
- * permissions, their status answers and their error codes.
+ * no seat settles nothing. The doors keep their permissions, their status answers and their error codes.
+ *
+ * Five of them - every door but `leaveFaceRoom` - later narrowed that set again to the one room the request names,
+ * and with it the order: the seat is read first, the sweep of that one room follows, so a call refused at the seat
+ * check writes nothing at all. The cases below hold for both shapes; the pin at the end of this file tells them
+ * apart.
  *
  * Each case below proves both halves at once: a stranger's refused call leaves the third party's lapsed room exactly
  * as it was, and then the room's own member makes the same call and that settles the room. A change that drops the
@@ -136,9 +140,42 @@ test("none of the six write doors sweeps without a scope", () => {
     assert.ok(end > start, `${name} still closes after its opening line`);
     return src.slice(start, end);
   };
-  for (const name of ["startFaceRoom", "leaveFaceRoom", "setFaceRoomLead", "setFaceRoomNote", "setFaceRoomRoles", "draftFaceRoomMessage"]) {
+  // The five doors that now hand the sweep the room the request names are pinned one test below; the list here and
+  // the two assertions it drives are `leaveFaceRoom`'s, untouched.
+  for (const name of ["leaveFaceRoom"]) {
     const body = doorBody(name);
     assert.ok(body.includes("this.advanceFaceRooms(seatRooms)"), `${name} sweeps the rooms its caller already sits in`);
     assert.ok(!body.includes("this.advanceFaceRooms()"), `${name} has no unscoped sweep`);
+  }
+});
+
+test("the five write doors settle only the room they name, after the seat is read", () => {
+  // The five doors that narrowed the sweep after #741: each must hand it `new Set([roomId])`, none may fall back to
+  // the caller's rooms or to the unscoped call, and the seat must be read first so a call refused at the seat check
+  // writes nothing at all - the bringer that `faceSeatRooms` alone would admit on `start` included.
+  const src = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
+  const doorBody = (name: string) => {
+    const start = src.indexOf(`\n  ${name}(`);
+    assert.ok(start >= 0, `${name} is still a method of Platform`);
+    const end = src.indexOf("\n  }\n", start);
+    assert.ok(end > start, `${name} still closes after its opening line`);
+    return src.slice(start, end);
+  };
+  for (const [name, gate] of [
+    ["startFaceRoom", "this.faceRequireOwnSeat(p, roomId)"],
+    ["setFaceRoomLead", "this.faceRequireMember(p, roomId)"],
+    ["setFaceRoomNote", "this.faceRequireMember(p, roomId)"],
+    ["setFaceRoomRoles", "this.faceRequireMember(p, roomId)"],
+    ["draftFaceRoomMessage", "this.faceRequireMember(p, roomId, body.bot_id ?? body.bot)"],
+  ] as const) {
+    const body = doorBody(name);
+    const seated = body.indexOf(gate);
+    const settled = body.indexOf("this.advanceFaceRooms(new Set([roomId]))");
+    assert.ok(body.includes("this.expireLapsedShares();"), `${name} still settles lapsed shares before its seat check`);
+    assert.ok(!body.includes("this.advanceFaceRooms(seatRooms)"), `${name} no longer sweeps the caller's other rooms`);
+    assert.ok(!body.includes("this.advanceFaceRooms()"), `${name} has no unscoped sweep`);
+    assert.ok(seated >= 0, `${name} still reads the caller's seat with ${gate}`);
+    assert.ok(settled >= 0, `${name} settles the room the request names`);
+    assert.ok(seated < settled, `${name} settles the room only after it has read the caller's seat`);
   }
 });
