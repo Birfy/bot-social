@@ -5339,6 +5339,21 @@ export class Platform {
     if (!this.get("SELECT 1 FROM face_rooms WHERE status = 'candidate' AND expires_at <= ? LIMIT 1", this.ts())) return;
     for (const r of this.all("SELECT * FROM face_rooms WHERE status = 'candidate' AND expires_at <= ?", this.ts())) this.faceStartRoom(r, "expired");
   }
+  /** The rooms this caller already holds a seat in, read with the seat rule the doors themselves answer with.
+   *
+   *  A sweep is not a private act: it voids the room's number, deletes its code rows, writes a `room.started` event,
+   *  wakes every member and appends an audit row. A door that is not the room's own therefore settles only the lapsed
+   *  rooms its caller is a member of - the predicate `faceRequireMember` admits (`owner_id`, or a seat this home
+   *  brought another home's Bot into and still stands behind), narrowed to its own Bot when the token is a Bot's - and a
+   *  caller seated nowhere settles nothing. */
+  private faceSeatRooms(p: Principal): ReadonlySet<string> {
+    const args: unknown[] = [p.ownerId, p.ownerId, p.ownerId, p.ownerId];
+    let sql = `SELECT DISTINCT room_id FROM face_room_members WHERE left_at IS NULL AND (owner_id = ? OR (added_by_owner_id = ? AND (
+      NOT EXISTS (SELECT 1 FROM face_room_members gone WHERE gone.room_id = face_room_members.room_id AND gone.owner_id = ? AND gone.left_at IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM face_room_members seated WHERE seated.room_id = face_room_members.room_id AND seated.owner_id = ? AND seated.left_at IS NULL))))`;
+    if (p.kind === "bot") { sql += " AND bot_id = ?"; args.push(p.botId); }
+    return new Set(this.all(sql, ...args).map((r: any) => r.room_id as string));
+  }
   /** The room row after any lapsed matching window is settled, so every door answers the same status as a GET. */
   private faceSettledRoom(roomId: string) {
     // A view is the room's own door: it settles that room, never the platform. The join reply and a member's room
@@ -6370,7 +6385,9 @@ export class Platform {
   }
 
   startFaceRoom(p: Principal, roomId: string) {
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its
     // own, not the wider membership that also admits a home which only brought a guest in.
     const viewer = this.faceRequireOwnSeat(p, roomId);
@@ -6383,7 +6400,9 @@ export class Platform {
   }
 
   leaveFaceRoom(p: Principal, roomId: string, body: any = {}) {
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     const viewer = this.faceRequireMember(p, roomId);
     // Only the caller's own Bots leave. A brought guest is the other owner's seat even though this owner
     // added it, and the other owner ends it by revoking the grant (or leaving with their own token).
@@ -6433,7 +6452,9 @@ export class Platform {
    * Bot token); `bot` must be a Bot in the room now; null / "" goes back to the default lead.
    */
   setFaceRoomLead(p: Principal, roomId: string, body: any = {}) {
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     const viewer = this.faceRequireMember(p, roomId);
     assert(p.kind === "owner", 403, "forbidden", "only the room creator picks the lead, from their own app; a Bot token cannot");
     assert(this.faceCreatorOf(viewer.room) === viewer.ownerId, 403, "not_room_creator", "only the person who created this room picks its lead");
@@ -6477,7 +6498,9 @@ export class Platform {
    * it never depends on when a member joined and writing it never moves a cursor. Trimmed, 1-500 characters.
    */
   setFaceRoomNote(p: Principal, roomId: string, body: any = {}) {
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     const viewer = this.faceRequireMember(p, roomId);
     const room = this.faceRequireLead(p, roomId, "set the room note");
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
@@ -6507,7 +6530,9 @@ export class Platform {
    * sits next to; a refused one writes nothing and tells nobody.
    */
   setFaceRoomRoles(p: Principal, roomId: string, body: any = {}) {
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     const viewer = this.faceRequireMember(p, roomId);
     const roles = body?.roles;
     assert(roles && typeof roles === "object" && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.keys(roles).length <= this.faceRoomLimits.maxMembers,
@@ -6560,7 +6585,9 @@ export class Platform {
   draftFaceRoomMessage(p: Principal, roomId: string, body: { text?: string; bot_id?: string; bot?: string; typed_by_owner?: boolean; mentions?: string[] | null } = {}) {
     const typed = this.typedByOwner(p, body);
     const mentions = this.mentionList(body?.mentions);
-    this.advanceFaceRooms();
+    // The sweep settles only the lapsed rooms this caller already sits in, never another home's (`faceSeatRooms`).
+    const seatRooms = this.faceSeatRooms(p);
+    this.advanceFaceRooms(seatRooms);
     const viewer = this.faceRequireMember(p, roomId, body.bot_id ?? body.bot);
     const room = this.get("SELECT * FROM face_rooms WHERE id = ?", roomId);
     if (room.status === "closed") throw new ApiError(409, "room_closed", "this room is closed");
