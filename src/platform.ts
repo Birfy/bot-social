@@ -3650,7 +3650,22 @@ export class Platform {
         // stop locks the pair out for a week by itself. `expireApproval` settles the same row for the same reason; the
         // guard keeps a request the owner already approved (or one a block/unfriend settled) out of the sweep, and
         // `updated_at` is written so a row settled here has the same shape as one `expireStale` settles.
-        if (a.kind === "relationship_request") this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending_requester_owner'", nowIso(), a.subject_id);
+        if (a.kind === "relationship_request") {
+          // A join that never became a friendship gives its invite slot back and names its end, exactly as a declined
+          // consent, a rejected approval and the expiry sweep do (the invariant is written over `releaseInviteUse`).
+          // This end — the stop, a removed home member, a block — flipped the row and did neither, so the link read
+          // "used" for a relationship that never existed: for a 1-use link that was the link, permanently.
+          // The row's own pending check is read rather than assumed: `endRelationship` (Remove/Block) writes this row
+          // to `revoked` before it cancels the cards hanging off it, and gives the use back itself, so a refund here
+          // would pay twice — a free join on a `max_uses` link — and an `expired` line would name a row that ended
+          // another way. Both writes ride the settlement's transaction, so a refusal takes them back whole.
+          const moved = this.run("UPDATE relationships SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'pending_requester_owner'", nowIso(), a.subject_id).changes;
+          if (moved) {
+            const rel = this.get("SELECT requester_owner, target_owner FROM relationships WHERE id = ?", a.subject_id);
+            this.releaseInviteUse(a.subject_id);
+            this.audit.append(actor, "relationship.expired", a.subject_id, [rel.requester_owner, rel.target_owner], {});
+          }
+        }
         // A cancelled room line names its room, as its approved, rejected and expired decisions do: the Bot reads the
         // room off the event, and it can hold the same kind of line in more than one room.
         const roomId = a.kind === "face_room_message"
