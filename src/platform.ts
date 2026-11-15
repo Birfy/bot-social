@@ -6252,7 +6252,14 @@ export class Platform {
   }
 
   getFaceRoom(p: Principal, roomId: string, opts: { after?: number; as_bot?: string } = {}) {
-    this.advanceFaceRooms();
+    // This method used to open with an unscoped `advanceFaceRooms()`, so a home with no seat settled another home's
+    // lapsed room (status `open`, number voided, `room.started` written and every member woken) and was answered 404
+    // only afterwards. Room promotion is the room's own act and is not run here at all: the answer below comes from
+    // `faceRoomView`, whose `faceSettledRoom` settles exactly the room this call read, after the caller was checked —
+    // a member's read still starts their own room, a home with no seat starts none. The share half stays and stays
+    // first: a share that ran out on its own clock takes the seat it made back with it, so the guest whose share just
+    // lapsed is refused by the membership check below, not handed the room one last time.
+    this.expireLapsedShares();
     const viewer = this.faceRequireMember(p, roomId, opts.as_bot);
     const floor = viewer.joinSeq - 1;
     const after = Math.max(this.faceCursor(opts.after, floor), floor);
