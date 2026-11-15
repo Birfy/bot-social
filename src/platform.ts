@@ -330,6 +330,14 @@ export class Platform {
       throw e;
     }
     this.afterCommitPushes = outer;
+    // A nested `atomically` is a savepoint inside the transaction around it: its writes are not durable when it
+    // returns, so handing the pushes to the queue here would page a Bot about a write the outer rollback takes back
+    // (`settlePendingRelationships` settles a request's cards through `expireApproval`, which opens one of its own).
+    // Hand them up instead, exactly as `auditFollowsCommit` hands its records up, and let the outermost commit enqueue.
+    if (outer) {
+      for (const p of queued) outer.push(p);
+      return out;
+    }
     for (const p of queued) this.webhooks.enqueue(p.botId, p.ev);
     return out;
   }
