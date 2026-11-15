@@ -46,10 +46,10 @@ const delta = (after: ReturnType<typeof snap>, before: ReturnType<typeof snap>) 
 });
 
 /** A Bot's invite join that waits on its own owner: one pending relationship, one card, one spent use. */
-async function lapsedJoinRequest(s: any) {
+async function lapsedJoinRequest(s: any, botWebhook?: string) {
   const p = s.platform as any;
   const A = await ownerWithBot(s.base, "requse-a");
-  const B = await ownerWithBot(s.base, "requse-b");
+  const B = await ownerWithBot(s.base, "requse-b", botWebhook);
   const inv = p.createInvite({ kind: "owner" as const, ownerId: A.owner_id }, { bot_id: A.bot.id, auto_accept: false, max_uses: 1 });
   const join: any = await B.bot.signed(`/v1/invites/${inv.code}/join`, "invite.join", { code: inv.code });
   assert.equal(join.status, "pending_requester_owner", JSON.stringify(join));
@@ -168,4 +168,43 @@ test("a refused request does not take the other lapsed requests of the same swee
   assert.equal(first.uses(), 0, "both uses come back");
   assert.equal(second.uses(), 0);
   assert.equal(auditCount(s, "relationship.expired"), 2, "with one audit line each");
+});
+
+/** Every push the platform hands to its own sender, by the event type it names. */
+const pushes = (calls: { body: string }[], type: string) => calls.filter((c) => c.body?.includes(`"${type}"`)).length;
+
+test("a card settled inside a rolled-back request pushes nothing", async (t) => {
+  const calls: { url: string; body: string }[] = [];
+  const fetchImpl = (async (url: string, init: any) => {
+    calls.push({ url, body: init.body });
+    return new Response("ok", { status: 200 });
+  }) as unknown as typeof fetch;
+  const s = await startServer({ fetchImpl, webhooks: { debounceMs: 15, retryBaseMs: 5 } });
+  t.after(s.stop);
+  const f = await lapsedJoinRequest(s, "https://requse.test/hook");
+  lapse(s, f.relId, f.approvalId);
+  const usesBefore = f.uses();
+
+  // The card settles first, in the transaction `expireApproval` opens for itself, and the request's own transaction
+  // then meets a store that will not take the invite-use write. The push naming the card decision is queued by that
+  // inner settlement, but the outer rollback takes the card, its event and the decision back with it: a push that
+  // left here would page the Bot about a settlement that is in no table.
+  s.platform.db.exec(`CREATE TEMP TRIGGER refuse_release_use BEFORE UPDATE ON invites
+    WHEN NEW.uses < OLD.uses BEGIN SELECT RAISE(ABORT, 'store refused the invite use write'); END`);
+
+  await assert.rejects(
+    f.A.owner.req("GET", "/v1/relationships"),
+    (e: any) => e.status === 500 && e.code === "internal_error",
+    "the refusal reaches the caller",
+  );
+  await s.platform.flushWebhooks();
+
+  assert.equal(pushes(calls, "approval.decided"), 0, "a push names a settlement the rollback took back");
+  const rel = s.platform.db.prepare("SELECT status FROM relationships WHERE id = ?").get(f.relId) as any;
+  const card = s.platform.db.prepare("SELECT status FROM approvals WHERE id = ?").get(f.approvalId) as any;
+  assert.equal(rel.status, "pending_requester_owner", "the request is still waiting");
+  assert.equal(card.status, "pending", "and so is the card the inner settlement wrote");
+  assert.equal(f.uses(), usesBefore, "the invite use is where the join left it, neither spent nor refunded");
+  assert.equal(auditCount(s, "relationship.expired"), 0, "no audit line names the expiry either");
+  assert.doesNotThrow(() => s.platform.audit.verify(), "the audit chain is intact");
 });
