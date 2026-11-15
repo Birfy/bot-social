@@ -6059,6 +6059,12 @@ export class Platform {
   mintLocalRoomInvite(p: Principal, body: any, ctx: { ip?: string } = {}) {
     const ownerId = p.ownerId;
     const ip = String(ctx.ip ?? "").slice(0, 80) || null;
+    // The room this ticket opens is an id, never a shape. `String(...)` below would turn `["loc-room-2"]` into
+    // `loc-room-2`, `true` into `true` and `7` into `7`, minting a ticket for a room id the caller never typed;
+    // an object whose `toString` is not a function made the coercion throw and answered 500. Judge the type before
+    // the read, and before the attempt record, the ticket row and the mint audit entry. Absent and null still read
+    // as "no room id" and keep the characters refusal below, as does a malformed string.
+    assert(body?.room_id === undefined || body?.room_id === null || typeof body.room_id === "string", 400, "invalid_request", "room_id must be a string");
     const roomId = String(body?.room_id ?? "").trim();
     assert(isLocalRoomId(roomId), 400, "invalid_request", "room_id: 1-64 chars [A-Za-z0-9._:-]");
     // A face room has its own invitation, and its grants must never be written by someone outside it.
