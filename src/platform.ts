@@ -3947,9 +3947,11 @@ export class Platform {
     // removal took down) is an answer about this card, not a delivery moment: the platform-wide sweep here used to
     // settle every other owner's cards, burn their links and tell their Bots on the way to that answer. A card that
     // lapsed under its own owner's hand is still settled here, so it still answers `409` rather than being decided.
-    // The other kinds keep the sweep at this point, unchanged: `grant_request` settles its own card here and
-    // `relationship_request` its own request, and both doors take the platform-wide sweep in their branch below, once
-    // the decision has actually been taken.
+    // Every kind settles only what this door has to judge before it knows whether the call is the caller's:
+    // `grant_request` its own card, `relationship_request` its own request and card, and the remaining kinds their own
+    // card. A card that lapsed under its own owner's hand is still settled here, so it still answers `409` rather than
+    // being decided. The platform-wide sweep waits for the branch that actually writes a decision: a refused decision
+    // used to settle every other owner's lapsed card, request and spent link on the way to its answer.
     if (a.kind === "grant_request") {
       const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
       if (lapsed) this.expireApproval(lapsed);
@@ -3963,7 +3965,8 @@ export class Platform {
       const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
       if (lapsed) this.expireApproval(lapsed);
     } else {
-      this.expireStale();
+      const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
+      if (lapsed) this.expireApproval(lapsed);
     }
     a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     // #84 follow-up: a settled card stays as a record, never as a decision. Say why, so the owner is not left
@@ -4069,6 +4072,10 @@ export class Platform {
       this.cancelPendingFor("id = ?", [a.id], "draft_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", draftGone);
     }
+    // These three kinds have every refusal behind them now: the card's own state, a revoked sender or recipient, a
+    // conversation that closed, the share the line waited on, and the subject row a torn write left out. This is their
+    // delivery moment -- approving or rejecting both answer the caller -- and it is taken here, before the line moves.
+    if (a.kind === "outbound_message" || a.kind === "face_room_message" || a.kind === "action") this.expireStale();
     let result: any = {};
     if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
     else if (a.kind === "face_room_message") result = approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot);
@@ -4110,6 +4117,9 @@ export class Platform {
         this.cancelPendingFor("id = ?", [a.id], state === "revoked" ? "invite_revoked" : "invite_unavailable", { notify: true, actor: `owner:${ownerId}` });
         throw new ApiError(409, "invalid_state", `the invite is ${state}; this card can no longer be approved`);
       }
+      // The link's own state is the last refusal this card has: a revoked, expired or used link answers `409` above
+      // and writes nothing. Past this line the decision lands, so this is where the platform-wide sweep belongs.
+      this.expireStale();
       this.run("UPDATE invites SET status = ? WHERE id = ?", approve ? "active" : "rejected", a.subject_id);
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision, url: approve ? this.inviteUrl(this.get("SELECT code FROM invites WHERE id = ?", a.subject_id).code) : null });
       result = { invite_id: a.subject_id, status: approve ? "active" : "rejected" };
