@@ -3947,8 +3947,19 @@ export class Platform {
     // removal took down) is an answer about this card, not a delivery moment: the platform-wide sweep here used to
     // settle every other owner's cards, burn their links and tell their Bots on the way to that answer. A card that
     // lapsed under its own owner's hand is still settled here, so it still answers `409` rather than being decided.
-    // The other kinds keep the sweep at this point, unchanged; the `grant_request` branch below takes its own.
+    // The other kinds keep the sweep at this point, unchanged: `grant_request` settles its own card here and
+    // `relationship_request` its own request, and both doors take the platform-wide sweep in their branch below, once
+    // the decision has actually been taken.
     if (a.kind === "grant_request") {
+      const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
+      if (lapsed) this.expireApproval(lapsed);
+    } else if (a.kind === "relationship_request") {
+      // The request this card was written for is the one row this door may settle before it knows whether the call is
+      // the caller's. A lapsed request still settles itself, its own card and the invite use its join spent -- so the
+      // door still answers `409 invalid_state` rather than deciding a request that ran out -- and a card that lapsed
+      // under its own owner's hand is settled whether or not the row did. Both are this request's own rows: the sweep
+      // below used to take every other owner's lapsed card, lapsed request and spent link with them.
+      this.settlePendingRelationships(this.all("SELECT * FROM relationships WHERE id = ? AND status IN ('pending_requester_owner','pending_target') AND expires_at < ?", a.subject_id, nowIso()));
       const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
       if (lapsed) this.expireApproval(lapsed);
     } else {
@@ -4083,6 +4094,11 @@ export class Platform {
           return { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
         });
       }
+      // The decision is taken and every refusal of this kind is behind it -- the `409` for a request that was never
+      // written, the `403` the auto-accept gate answers for a stopped or removed end. This is the delivery moment, and
+      // it is the only thing that moved: the platform-wide sweep belongs here, not ahead of an answer the door may
+      // never give.
+      this.expireStale();
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: r.id, decision, note_to_bot: body.note_to_bot ?? null });
     } else if (a.kind === "invite") {
       // The stored invite state is the same witness here as in `inviteStatus` and the expiry sweep: a link that was
