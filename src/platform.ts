@@ -3172,8 +3172,17 @@ export class Platform {
   }
 
   private inviteUrl(code: string) { return `${this.publicBaseUrl.replace(/\/$/, "")}/i/${code}`; }
+  /** The joins this link produced, as its owner has to act on them: the relationship, the Bot that joined, that
+   *  relationship's status and when it was created, oldest first. `relationship_invites` holds one row per
+   *  relationship, so a link reused to regrant the same relationship (a second use, the same row) is named once.
+   *  Nothing is filtered by status: the link's owner is the counterparty of every request the link made, waiting,
+   *  accepted, declined or ended. Insertion order breaks a tie inside one millisecond. */
+  private inviteJoins(i: any) {
+    return this.all("SELECT r.id, r.status, r.created_at, r.requester_bot, r.target_bot FROM relationships r JOIN relationship_invites ri ON ri.relationship_id = r.id WHERE ri.invite_id = ? ORDER BY r.created_at, r.rowid", i.id)
+      .map((r: any) => ({ relationship_id: r.id, bot: "@" + this.bot(r.requester_bot === i.bot_id ? r.target_bot : r.requester_bot).handle, status: r.status, joined_at: r.created_at }));
+  }
   private inviteView(i: any) {
-    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.botCard(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
+    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.botCard(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at, joins: this.inviteJoins(i) };
   }
   private inviteStatus(i: any) {
     // Stored terminal states win over the clock: a revoked or rejected invite never flips back to expired.
