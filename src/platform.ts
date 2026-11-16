@@ -3913,6 +3913,23 @@ export class Platform {
     return this.idempotent(p, "decide_approval", key, { ...hashed, approval_id: aprId }, () => this.decideApprovalOnce(p, aprId, rest, actorOverride));
   }
 
+  /**
+   * The delivery moment: the platform-wide sweep and the write it settles, in one transaction.
+   *
+   * The delivery doors keep their own refusals -- `deliverMessage` a frozen or revoked recipient, a share the peer's
+   * owner took back, an attachment that died while the card waited; `deliverFaceRoomMessage` a room that closed and a
+   * sender who left; `executeAction` a peer that was removed and an edit that cannot run -- and every one of them is
+   * an answer about this card rather than a moment anything was delivered. A throw from inside the write therefore
+   * rolls the sweep back, so a refused call settles no other owner's card, request or invite use. `atomically` holds
+   * the events and the audit lines until the commit, so a settlement the rollback takes back is never announced.
+   */
+  private deliveryMoment<T>(write: () => T): T {
+    return this.atomically(() => {
+      this.expireStale();
+      return write();
+    });
+  }
+
   private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
     const ownerId = this.requireOwner(p);
     // Whether this card is the caller's to decide is answered before anything is settled: a 404 or a 403 must not be
@@ -4072,14 +4089,17 @@ export class Platform {
       this.cancelPendingFor("id = ?", [a.id], "draft_unavailable", { notify: true, actor: `owner:${ownerId}` });
       throw new ApiError(409, "invalid_state", draftGone);
     }
-    // These three kinds have every refusal behind them now: the card's own state, a revoked sender or recipient, a
-    // conversation that closed, the share the line waited on, and the subject row a torn write left out. This is their
-    // delivery moment -- approving or rejecting both answer the caller -- and it is taken here, before the line moves.
-    if (a.kind === "outbound_message" || a.kind === "face_room_message" || a.kind === "action") this.expireStale();
+    // These three kinds have every refusal this door makes behind them now: the card's own state, a revoked sender or
+    // recipient, a conversation that closed, the share the line waited on, and the subject row a torn write left out.
+    // What waits inside the delivery door is not a write but a refusal of its own -- a recipient a stop froze, a share
+    // the peer's owner took back, an attachment that died, a room that closed, an edit that cannot run -- and each of
+    // those is an answer about this card, never a delivery moment. So the sweep and the delivery are one transaction
+    // (`deliveryMoment`): a delivery refusal throws, the throw takes the sweep back with it, and the owner who was
+    // never part of this call keeps their card, their request and their invite use.
     let result: any = {};
-    if (a.kind === "outbound_message") result = approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot);
-    else if (a.kind === "face_room_message") result = approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot);
-    else if (a.kind === "action") result = approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot);
+    if (a.kind === "outbound_message") result = this.deliveryMoment(() => approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot));
+    else if (a.kind === "face_room_message") result = this.deliveryMoment(() => approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot));
+    else if (a.kind === "action") result = this.deliveryMoment(() => approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot));
     else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
       // A card can outlive the request it was written for: the peer's owner accepts through `consent`, and a row an
