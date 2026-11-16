@@ -6578,6 +6578,13 @@ export class Platform {
     // #318: starting ends the matching window for everyone and voids the number, so the caller needs a seat of its
     // own, not the wider membership that also admits a home which only brought a guest in.
     const viewer = this.faceRequireOwnSeat(p, roomId);
+    // Starting is the lead's outbound act for the whole room: it voids the number for everyone, pushes every member,
+    // writes a platform-trusted `room.started` line and leaves an audit row. A Bot that was stopped or removed is
+    // therefore refused here with the same answers every outbound door gives (#196), before the sweep and before the
+    // promotion, so a refused call leaves the room `candidate` with its `expires_at`, its code, its events and its
+    // chain untouched (#783). The door signs with `viewer.botIds[0]`, so that seat is the one judged: acting on a
+    // different seat of the same home would name a Bot the caller did not ask to act as.
+    this.assertInvitable(this.bot(viewer.botIds[0]));
     // The sweep is the room's own act, so it settles the one room this request names. Reading the seat first matters
     // here: `faceSeatRooms` also counts a home that only brought a guest, which `faceRequireOwnSeat` refuses, and
     // that refused caller used to settle the very room it was refused on.
