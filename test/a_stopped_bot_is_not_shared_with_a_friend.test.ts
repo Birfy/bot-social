@@ -1,10 +1,6 @@
-// The fourth write door for a Bot share is `POST /v1/bots/:id/grants` (`grantBotToFriend`, FlyBot
-// "Share with a friend"). #776 closed the other three — the owner route, the `grant_request` card, and
-// consent — with `assertInvitable`. This door still wrote a live share of a Bot that was already frozen
-// or removed, and an idempotent retry answered 2xx as if the share were freshly allowed.
-//
-// The same refusal covers a first-time share and a retry: 403 `bot_frozen` / `bot_revoked`, and no new
-// grant is written. A share that already existed is left as it was; this door does not revoke or migrate it.
+// Regression for the friend-share door closed upstream by #778 (and later idempotent far-end checks).
+// Exercise real HTTP refusals, removed home members, a live-share retry and the successful control.
+// Refusals must not create grants/audit claims or revoke/migrate a pre-existing share.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { OwnerClient } from "../src/client.js";
@@ -18,22 +14,13 @@ const createdViaDoor = (s: Server, grantedBot: string) =>
 
 const liveShares = (s: Server, grantorOwner: string, grantedBot: string, granteeBot: string) =>
   (s.platform.db.prepare(
-    `SELECT COUNT(*) n FROM grants g
-       JOIN relationships r ON r.id = g.relationship_id
-      WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.status = 'active'
-        AND g.reply_only = 0 AND r.status IN ('active','room')`,
+    `SELECT g.id, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner
+       FROM grants g JOIN relationships r ON r.id = g.relationship_id
+      WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.status = 'active' AND IFNULL(g.reply_only, 0) = 0
+        AND r.status IN ('active','room')`,
   ).all(grantorOwner, granteeBot) as any[])
-    // granted bot is not always a column; filter in JS via relationship endpoints
-    .length
-    ? (s.platform.db.prepare(
-        `SELECT g.id, r.requester_bot, r.target_bot, r.requester_owner, r.target_owner
-           FROM grants g JOIN relationships r ON r.id = g.relationship_id
-          WHERE g.grantor_owner = ? AND g.grantee_bot = ? AND g.status = 'active' AND IFNULL(g.reply_only, 0) = 0
-            AND r.status IN ('active','room')`,
-      ).all(grantorOwner, granteeBot) as any[])
-        .filter((g) => (g.requester_owner === grantorOwner ? g.requester_bot : g.target_bot) === grantedBot)
-        .length
-    : 0;
+    .filter((g) => (g.requester_owner === grantorOwner ? g.requester_bot : g.target_bot) === grantedBot)
+    .length;
 
 async function flyHome(base: string, name: string) {
   const onboard: any = await (await fetch(`${base}/v1/onboard/flybot`, {
