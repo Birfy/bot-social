@@ -2186,6 +2186,11 @@ export class Platform {
     // always taken: settle the platform's lapsed shares, requests and cards. This row is this owner's own and it is not
     // lapsed (the check above), so the sweep leaves it standing and `activateRelationship` writes it next.
     this.expireStale();
+    // The sweep is a clock too: this row's own expiry may have crossed now in the window since it was judged above, in
+    // which case the sweep already settled it `expired` -- with its audit line and the invite use its join spent (#792).
+    // Activating it would write a second outcome on the same row, so the settlement stands and this call refuses.
+    const live = this.get("SELECT status FROM relationships WHERE id = ?", relId);
+    assert(live.status === "pending_target", 409, "invalid_state", `relationship is ${live.status}`);
     this.activateRelationship(r, specs, `owner:${ownerId}`);
     return { relationship_id: relId, status: "active", grants: this.grantsFor(relId) };
   }
@@ -3937,11 +3942,27 @@ export class Platform {
    * rolls the sweep back, so a refused call settles no other owner's card, request or invite use. `atomically` holds
    * the events and the audit lines until the commit, so a settlement the rollback takes back is never announced.
    */
-  private deliveryMoment<T>(write: () => T): T {
-    return this.atomically(() => {
+  private deliveryMoment<T>(card: any, write: () => T): T {
+    const done = this.atomically((): { settled?: string; value?: T } => {
       this.expireStale();
-      return write();
+      // The sweep is a clock, and it can settle this very card: the card's own expiry may have crossed now in the
+      // window since the door read it (#792). That settlement is the one decision this call may leave, so the write is
+      // not taken. Returning rather than throwing inside the transaction commits the sweep and announces it once; the
+      // refusal is thrown below, outside, so the settled row is not rolled back either.
+      const live = this.get("SELECT status FROM approvals WHERE id = ?", card.id).status;
+      if (live !== "pending") return { settled: live };
+      return { value: write() };
     });
+    if (done.settled) throw new ApiError(409, "invalid_state", `approval is ${done.settled}`);
+    return done.value as T;
+  }
+
+  /** #792: a sweep that ran inside this call is a clock too. It can settle this very card (its own `expires_at`
+   *  crossed now since the door read it), and a settled card is a record, never a decision: the call answers with the
+   *  existing `409 invalid_state` and writes nothing more, so the sweep's settlement is the one outcome on the row. */
+  private assertStillPending(a: any) {
+    const live = this.get("SELECT status FROM approvals WHERE id = ?", a.id).status;
+    assert(live === "pending", 409, "invalid_state", `approval is ${live}`);
   }
 
   private decideApprovalOnce(p: Principal, aprId: string, body: { decision: "approved" | "approved_with_edits" | "rejected"; edited_payload?: any; edited_params?: any; note_to_bot?: string }, actorOverride?: string) {
@@ -4111,9 +4132,9 @@ export class Platform {
     // (`deliveryMoment`): a delivery refusal throws, the throw takes the sweep back with it, and the owner who was
     // never part of this call keeps their card, their request and their invite use.
     let result: any = {};
-    if (a.kind === "outbound_message") result = this.deliveryMoment(() => approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot));
-    else if (a.kind === "face_room_message") result = this.deliveryMoment(() => approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot));
-    else if (a.kind === "action") result = this.deliveryMoment(() => approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot));
+    if (a.kind === "outbound_message") result = this.deliveryMoment(a, () => approve ? this.deliverMessage(a, body) : this.rejectMessage(a, body.note_to_bot));
+    else if (a.kind === "face_room_message") result = this.deliveryMoment(a, () => approve ? this.deliverFaceRoomMessage(a, body) : this.rejectFaceRoomMessage(a, body.note_to_bot));
+    else if (a.kind === "action") result = this.deliveryMoment(a, () => approve ? this.executeAction(a, body) : this.rejectAction(a, body.note_to_bot));
     else if (a.kind === "relationship_request") {
       const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
       // A card can outlive the request it was written for: the peer's owner accepts through `consent`, and a row an
@@ -4122,24 +4143,27 @@ export class Platform {
       // `pending_target` re-activates it, superseding every grant the pair holds and announcing it a second time.
       if (r.status === "active") {
         result = { relationship_id: r.id, status: r.status };
+        // This path only answers with the row it found, so its sweep still runs before that answer: a card whose own
+        // clock crossed now is settled and the call refuses rather than reporting a decision it did not take.
+        this.expireStale();
+        this.assertStillPending(a);
       } else {
         // The row and the auto-accept gate are one write. `maybeAutoAcceptInvite` refuses a frozen or revoked Bot
         // from inside `autoAcceptSpecs` ("a refusal leaves the card pending"), and that refusal must leave no half
         // write behind: moving the row first let a 403 `bot_frozen` leave the pair at `pending_target`, the card
         // still waiting, and the peer's owner reading a request nobody announced. In one transaction the refusal
-        // takes the row back with it, and `atomically` holds the announcement until that commit.
-        result = this.atomically(() => {
+        // takes the row back with it, and `atomically` holds the announcement until that commit. The sweep runs on
+        // this same side of the write (`deliveryMoment`): a card that lapsed in this call's own window is settled
+        // there and the write is not taken at all -- `releaseInviteUse` never gives this join's slot back, so the
+        // request keeps reading `pending_*` with its use still spent -- and the refusal is thrown outside once the
+        // sweep has committed, so the sweep's settlement is the one outcome the call leaves.
+        result = this.deliveryMoment(a, () => this.atomically(() => {
           this.run("UPDATE relationships SET status = ?, updated_at = ? WHERE id = ?", approve ? "pending_target" : "cancelled", nowIso(), r.id);
           if (approve && !this.maybeAutoAcceptInvite(r.id)) this.notifyTarget(r.id);
           if (!approve) this.releaseInviteUse(r.id);
           return { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
-        });
+        }));
       }
-      // The decision is taken and every refusal of this kind is behind it -- the `409` for a request that was never
-      // written, the `403` the auto-accept gate answers for a stopped or removed end. This is the delivery moment, and
-      // it is the only thing that moved: the platform-wide sweep belongs here, not ahead of an answer the door may
-      // never give.
-      this.expireStale();
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: r.id, decision, note_to_bot: body.note_to_bot ?? null });
     } else if (a.kind === "invite") {
       // The stored invite state is the same witness here as in `inviteStatus` and the expiry sweep: a link that was
@@ -4154,6 +4178,7 @@ export class Platform {
       // The link's own state is the last refusal this card has: a revoked, expired or used link answers `409` above
       // and writes nothing. Past this line the decision lands, so this is where the platform-wide sweep belongs.
       this.expireStale();
+      this.assertStillPending(a);
       this.run("UPDATE invites SET status = ? WHERE id = ?", approve ? "active" : "rejected", a.subject_id);
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, invite_id: a.subject_id, decision, url: approve ? this.inviteUrl(this.get("SELECT code FROM invites WHERE id = ?", a.subject_id).code) : null });
       result = { invite_id: a.subject_id, status: approve ? "active" : "rejected" };
@@ -4183,10 +4208,12 @@ export class Platform {
         // queue. What is left is the answer, so this is the delivery moment this door has always taken before it writes.
         this.grantExpiry(edited?.expires_in_days);
         this.expireStale();
+        this.assertStillPending(a);
         result.grant_id = this.db.transaction(() => this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, scope, edited?.expires_in_days, `owner:${ownerId}`)).immediate();
       } else {
         // A rejection answers the card too, so the delivery moment stays on that path as well.
         this.expireStale();
+        this.assertStillPending(a);
       }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, capability: req.capability, decision, note_to_bot: body.note_to_bot ?? null });
     }
@@ -4199,7 +4226,10 @@ export class Platform {
     if (a.kind === "action" && approve && result?.status === "failed" && result?.reason === "calendar_conflict") {
       return { approval_id: a.id, decision, ...result };
     }
-    this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?", approve ? "approved" : "rejected", decision, nowIso(), a.id);
+    // Every branch above re-read the card after its sweep, so this lands only on a still-pending row; the condition
+    // keeps a settled row settled even if a future branch forgets its check (#792).
+    const landed = this.run("UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'", approve ? "approved" : "rejected", decision, nowIso(), a.id) as any;
+    assert(landed?.changes === 1, 409, "invalid_state", "approval is no longer pending");
     const flags = J(a.risk_flags, []);
     this.audit.append(actorOverride ?? `owner:${ownerId}`, "approval.decided", a.id, [ownerId], { kind: a.kind, subject_id: a.subject_id, decision, risk_flags: flags, known_risk_approved: approve && flags.length > 0, note_to_bot: body.note_to_bot ?? null });
     if (a.conversation_id) this.refreshConversationStatus(a.conversation_id);
