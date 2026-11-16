@@ -2560,6 +2560,15 @@ export class Platform {
       const friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
       if (myBot !== bot.id) continue;
       if (this.hasLiveGrant(ownerId, friendBot, rel.id)) {
+        // The answer below names this relationship's far end, so it takes the same check the chosen far end above
+        // took. The loop can answer from an older friendship than the one `chosenBase` reads (the newest one), and
+        // that older friendship's Bot may have been stopped after its share was written: without this read, a repeat
+        // naming only the owner would hand back `status: "active"` for a Bot this door refuses everywhere else, and
+        // the stop rule it enforces on both ends would be bypassed by a retry. A row that names a Bot no longer in
+        // `bots` keeps the answer it had, exactly as above; a Bot that is there and stopped is the stop's answer,
+        // and this sits before the sweep and before every write, so the refusal writes nothing.
+        const namedFarEnd = this.get("SELECT * FROM bots WHERE id = ?", friendBot);
+        if (namedFarEnd) this.assertInvitable(namedFarEnd);
         // This answer writes nothing, so it settles nothing: name the share from this one relationship. The read it
         // used to end with, `listBotGrants`, is a documented delivery moment of its own ("a read also settles lapsed
         // access"), so it ran the platform-wide sweep a second time from behind the door's -- and a repeat of a share
