@@ -4143,25 +4143,27 @@ export class Platform {
       // `pending_target` re-activates it, superseding every grant the pair holds and announcing it a second time.
       if (r.status === "active") {
         result = { relationship_id: r.id, status: r.status };
+        // This path only answers with the row it found, so its sweep still runs before that answer: a card whose own
+        // clock crossed now is settled and the call refuses rather than reporting a decision it did not take.
+        this.expireStale();
+        this.assertStillPending(a);
       } else {
         // The row and the auto-accept gate are one write. `maybeAutoAcceptInvite` refuses a frozen or revoked Bot
         // from inside `autoAcceptSpecs` ("a refusal leaves the card pending"), and that refusal must leave no half
         // write behind: moving the row first let a 403 `bot_frozen` leave the pair at `pending_target`, the card
         // still waiting, and the peer's owner reading a request nobody announced. In one transaction the refusal
-        // takes the row back with it, and `atomically` holds the announcement until that commit.
-        result = this.atomically(() => {
+        // takes the row back with it, and `atomically` holds the announcement until that commit. The sweep runs on
+        // this same side of the write (`deliveryMoment`): a card that lapsed in this call's own window is settled
+        // there and the write is not taken at all -- `releaseInviteUse` never gives this join's slot back, so the
+        // request keeps reading `pending_*` with its use still spent -- and the refusal is thrown outside once the
+        // sweep has committed, so the sweep's settlement is the one outcome the call leaves.
+        result = this.deliveryMoment(a, () => this.atomically(() => {
           this.run("UPDATE relationships SET status = ?, updated_at = ? WHERE id = ?", approve ? "pending_target" : "cancelled", nowIso(), r.id);
           if (approve && !this.maybeAutoAcceptInvite(r.id)) this.notifyTarget(r.id);
           if (!approve) this.releaseInviteUse(r.id);
           return { relationship_id: r.id, status: this.get("SELECT status FROM relationships WHERE id = ?", r.id).status };
-        });
+        }));
       }
-      // The decision is taken and every refusal of this kind is behind it -- the `409` for a request that was never
-      // written, the `403` the auto-accept gate answers for a stopped or removed end. This is the delivery moment, and
-      // it is the only thing that moved: the platform-wide sweep belongs here, not ahead of an answer the door may
-      // never give.
-      this.expireStale();
-      this.assertStillPending(a);
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, relationship_id: r.id, decision, note_to_bot: body.note_to_bot ?? null });
     } else if (a.kind === "invite") {
       // The stored invite state is the same witness here as in `inviteStatus` and the expiry sweep: a link that was
