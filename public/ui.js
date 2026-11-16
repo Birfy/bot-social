@@ -587,21 +587,35 @@ function bindApprovals(root, after) {
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch { toast(ERR.network); }
   }));
-  $$("[data-apr]", root).forEach((card) => $$("[data-dec]", card).forEach((b) => (b.onclick = async () => {
-    const id = card.dataset.apr, d = b.dataset.dec, body = { decision: d };
-    if (d === "approved_with_edits") body.edited_payload = { text: $(`[data-edit="${id}"]`, card).value };
-    if (d === "rejected") { const n = prompt("Tell the Bot why (optional)"); if (n === null) return; body.note_to_bot = n || undefined; }
-    $$("button", card).forEach((x) => (x.disabled = true));
-    try {
-      // The decision itself succeeds even when the action it approves does not: the body then carries
-      // `{status: "failed", reason}`, so "Approved" alone would tell the owner a booking happened when it did not.
-      const res = await api("POST", `/v1/approvals/${id}/decision`, body);
-      if (d === "rejected") toast("Rejected");
-      else if (res?.status === "failed") toast(`Approved, but the action ${actionFailLine(res.reason)}.`);
-      else toast("Approved");
-      card.style.opacity = ".4"; setTimeout(after, 250); refreshBadges();
-    } catch { $$("button", card).forEach((x) => (x.disabled = false)); }
-  })));
+  $$("[data-apr]", root).forEach((card) => {
+    // The line the card was drawn with. An owner who corrects it and then presses the plain Approve means the
+    // corrected line: the server applies an edit only for `approved_with_edits` (`editedPayloadOf`), so sending
+    // `approved` here would deliver the draft the owner just changed - a line already sent that cannot be recalled.
+    const drawn = $(`[data-edit="${card.dataset.apr}"]`, card);
+    const draft = drawn ? drawn.value : null;
+    $$("[data-dec]", card).forEach((b) => (b.onclick = async () => {
+      const id = card.dataset.apr;
+      const box = $(`[data-edit="${id}"]`, card);
+      let d = b.dataset.dec;
+      if (d === "approved" && box && box.value !== draft) {
+        if (!box.value.trim()) { toast("Write the line first, or reject the card."); return; }
+        d = "approved_with_edits";
+      }
+      const body = { decision: d };
+      if (d === "approved_with_edits") body.edited_payload = { text: box.value };
+      if (d === "rejected") { const n = prompt("Tell the Bot why (optional)"); if (n === null) return; body.note_to_bot = n || undefined; }
+      $$("button", card).forEach((x) => (x.disabled = true));
+      try {
+        // The decision itself succeeds even when the action it approves does not: the body then carries
+        // `{status: "failed", reason}`, so "Approved" alone would tell the owner a booking happened when it did not.
+        const res = await api("POST", `/v1/approvals/${id}/decision`, body);
+        if (d === "rejected") toast("Rejected");
+        else if (res?.status === "failed") toast(`Approved, but the action ${actionFailLine(res.reason)}.`);
+        else toast("Approved");
+        card.style.opacity = ".4"; setTimeout(after, 250); refreshBadges();
+      } catch { $$("button", card).forEach((x) => (x.disabled = false)); }
+    }));
+  });
 }
 // An approved action can still fail on the server, and the reason comes back as a code: in the decision body
 // (`{status: "failed", reason}`) and on the action row (`result: {error}`). A code is not something the owner can
