@@ -9,6 +9,11 @@
  * `approved` on the same card and a second `approval.decided` event. One row ends with two outcomes, and a Bot hears
  * two opposite decisions about one card.
  *
+ * The third case is the same window on the `relationship_request` door, which writes the request row and gives its
+ * invite use back before it sweeps: a call that loses there must not have written anything either -- the row stays
+ * `pending_requester_owner` with its use still spent, and the card carries only the sweep's settlement. Writing first
+ * and checking afterwards leaves the request `cancelled` behind a `409`, a decision nobody announced.
+ *
  * What must happen instead: the call loses. After the sweep, before any covering write or emit, the row is read again;
  * a row the sweep settled is answered with the door's existing `409 invalid_state` and nothing else is written, emitted
  * or audited. The sweep's settlement is the only decision the call leaves behind, and the sweep keeps its meaning for
@@ -71,6 +76,7 @@ test("an acceptance whose own request lapses during the call is not accepted", a
   const expired = count(platform.audit.db, "SELECT COUNT(*) n FROM audit_events WHERE action = 'relationship.expired' AND subject = ?", relId);
   const eventsAfter = count(platform.db, "SELECT COUNT(*) n FROM events WHERE bot_id IN (?,?)", A.bot.id, B.bot.id);
   const uses = (platform.db.prepare("SELECT uses FROM invites WHERE code = ?").get(inv.code) as any).uses;
+  const link = platform.db.prepare("SELECT * FROM invites WHERE code = ?").get(inv.code) as any;
 
   // The failure message carries the base's two outcomes, not only the missing 409.
   assert.ok(error, `a call whose own request lapsed before its sweep must refuse, not accept: it answered ${JSON.stringify(out)}; the row reads ${row.status}, audits expired=${expired} accepted=${accepted}, grants=${grants}, events added=${eventsAfter - eventsBefore}, invite uses=${uses}`);
@@ -82,6 +88,7 @@ test("an acceptance whose own request lapses during the call is not accepted", a
   assert.equal(expired, 1, "the sweep's expiry is the one settlement the call leaves");
   assert.equal(eventsAfter, eventsBefore, "neither Bot was told the friendship became active");
   assert.equal(uses, 0, "the one-use link stays spent: the join never became a friendship");
+  assert.equal(platform.inviteStatus(link), "active", "the request's own expiry is what gives the join's use back, and the link is not burnt");
 });
 
 test("an approval whose own card lapses during the call is not decided", async (t) => {
@@ -129,4 +136,56 @@ test("an approval whose own card lapses during the call is not decided", async (
   assert.equal(accepted, 0, "no approval.decided audit line was written by the call");
   assert.equal(expired, 1, "the sweep's expiry is the one settlement");
   assert.equal(message.status, "expired", "the swept draft is not delivered afterwards");
+});
+
+test("a rejected request whose own card lapses during the call is not rejected", async (t) => {
+  const s = await startServer(bulkAuth);
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "lapsedrequesta");
+  const B = await ownerWithBot(s.base, "lapsedrequestb");
+  // A one-use link whose Bot-signed join waits on its own owner: the card belongs to the joiner's owner, the row is
+  // `pending_requester_owner`, and the join has spent the link's only use.
+  const inv = (s.platform as any).createInvite({ kind: "owner", ownerId: A.owner_id }, { bot_id: A.bot.id, auto_accept: false, max_uses: 1 });
+  const joined: any = await B.bot.signed(`/v1/invites/${inv.code}/join`, "invite.join", { code: inv.code });
+  assert.equal(joined.status, "pending_requester_owner", JSON.stringify(joined));
+  const relId = joined.relationship_id as string;
+  const card = joined.approval_id as string;
+
+  // The window: this door's sweep is the step between its last check and its write, and the card's own clock crosses
+  // now exactly there. On the base the write already happened, so the sweep settles the card it was written for and
+  // the call then rejects it on top; here the sweep must run before the write.
+  const platform: any = s.platform;
+  const realSweep = platform.expireStale.bind(platform);
+  let armed = true;
+  platform.expireStale = () => {
+    if (armed) {
+      armed = false;
+      platform.db.prepare("UPDATE approvals SET expires_at = ? WHERE id = ?").run(past(), card);
+    }
+    return realSweep();
+  };
+  t.after(() => { platform.expireStale = realSweep; });
+
+  const { out, error } = await answered(B.owner.req("POST", `/v1/approvals/${card}/decision`, { decision: "rejected" }));
+
+  const row: any = platform.db.prepare("SELECT status, decision FROM approvals WHERE id = ?").get(card);
+  const rel: any = platform.db.prepare("SELECT status FROM relationships WHERE id = ?").get(relId);
+  const uses = (platform.db.prepare("SELECT uses FROM invites WHERE code = ?").get(inv.code) as any).uses;
+  const links = count(platform.db, "SELECT COUNT(*) n FROM relationship_invites WHERE relationship_id = ?", relId);
+  const decisions = (platform.db.prepare("SELECT data FROM events WHERE type = 'approval.decided' AND bot_id = ? ORDER BY seq").all(B.bot.id) as any[])
+    .map((e) => JSON.parse(e.data).decision);
+  const decided = count(platform.audit.db, "SELECT COUNT(*) n FROM audit_events WHERE action = 'approval.decided' AND subject = ?", card);
+  const expired = count(platform.audit.db, "SELECT COUNT(*) n FROM audit_events WHERE action = 'approval.expired' AND subject = ?", card);
+
+  assert.ok(error, `a call whose own card lapsed before its sweep must refuse, not reject: it answered ${JSON.stringify(out)}; the card reads ${row.status}/${row.decision}, the request reads ${rel.status}, the Bot heard ${JSON.stringify(decisions)}, audits expired=${expired} decided=${decided}, invite uses=${uses}`);
+  assert.equal(error.status, 409);
+  assert.equal(error.code, "invalid_state");
+  assert.equal(row.status, "expired", "the sweep's settlement is the only outcome on the card");
+  assert.equal(row.decision, null, "no decision was stamped on a settled card");
+  assert.equal(rel.status, "pending_requester_owner", "the refusal does not write the request it never decided");
+  assert.deepEqual(decisions, ["expired"], "the Bot hears the sweep's one decision, not a rejection it never received");
+  assert.equal(decided, 0, "no approval.decided audit line was written by the call");
+  assert.equal(expired, 1, "the sweep's expiry is the one settlement");
+  assert.equal(uses, 1, "the request still waits, so its join's use stays spent");
+  assert.equal(links, 1, "the link row that recorded the join is untouched");
 });
