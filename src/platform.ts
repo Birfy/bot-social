@@ -2522,6 +2522,38 @@ export class Platform {
     const usable = friendships.filter((r: any) => !blockedPair(pairBotOf(r)));
     assert(usable.length > 0, 403, "blocked", "relationship is blocked");
 
+    // A stopped Bot is not a place to start a share, and a stopped Bot is not a place to aim one: every other door
+    // that hands reach out answers a stopped identity through `assertInvitable` (`test/home_send_frozen.test.ts`: "every
+    // other owner-side door says so with `bot_frozen`"), and the invite path this door's docstring says it mirrors
+    // checks both ends. This is the share's own end, and it sits behind the refusals above -- a stranger is still
+    // `404 friend_not_found`, a blocked pair still `403 blocked` -- and ahead of the sweep and the idempotent answer
+    // below, so a stop is never swallowed by either: a frozen Bot's repeat is a 403, not `idempotent: true`. The far
+    // end is checked once the relationship this call would use is known, a few lines down.
+    this.assertInvitable(bot);
+
+    // Reads only, lifted above the sweep so the far end can be checked before anything settles or writes: which
+    // relationship this door would use, the friend Bot it names, and the pair that may already exist. `expireStale()`
+    // settles `pending_*` requests and lapsed shares and never touches an `active` relationship, so these answer what
+    // they answered from below it. The write that follows the sweep stays where it was: an `active` row must not exist
+    // for a call this door refuses.
+    let chosenRel = usable.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
+    let chosenFriendBot: string;
+    let existingPair: any;
+    if (chosenRel) {
+      chosenFriendBot = pairBotOf(chosenRel);
+    } else {
+      const chosenBase = usable[0];
+      chosenFriendBot = chosenBase.requester_owner === friendOwnerId ? chosenBase.requester_bot : chosenBase.target_bot;
+      existingPair = this.findActiveRelationship(bot.id, chosenFriendBot);
+    }
+    // The far end, from either way of naming it. When the friend named a Bot, the list above was narrowed to the
+    // relationships that touch it, so this read lands on that Bot from either branch (the relationship whose own end is
+    // the share, or the fallback pair); when only the owner was named, it lands on the Bot that pair names. A row that
+    // names a Bot no longer in `bots` keeps the answer it had (this door adds no 404 of its own); a Bot that is there
+    // and stopped is the stop's answer.
+    const farEnd = this.get("SELECT * FROM bots WHERE id = ?", chosenFriendBot);
+    if (farEnd) this.assertInvitable(farEnd);
+
     // Idempotent: already a live full share of this Bot to any of the friend's bots.
     for (const rel of usable) {
       const myBot = rel.requester_owner === ownerId ? rel.requester_bot : rel.target_bot;
@@ -2558,15 +2590,10 @@ export class Platform {
     this.expireStale();
 
     // Prefer an existing relationship whose endpoint on our side is this Bot; else open one with the friend's bot from the newest friendship.
-    let rel = usable.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
-    let friendBot: string;
+    let rel = chosenRel;
+    let friendBot: string = chosenFriendBot;
     let createdRel = false;
-    if (rel) {
-      friendBot = pairBotOf(rel);
-    } else {
-      const base = usable[0];
-      friendBot = base.requester_owner === friendOwnerId ? base.requester_bot : base.target_bot;
-      const existingPair = this.findActiveRelationship(bot.id, friendBot);
+    if (!rel) {
       if (existingPair) {
         rel = existingPair;
       } else {
