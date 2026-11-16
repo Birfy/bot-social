@@ -3181,8 +3181,13 @@ export class Platform {
     return this.all("SELECT r.id, r.status, r.created_at, r.requester_bot, r.target_bot FROM relationships r JOIN relationship_invites ri ON ri.relationship_id = r.id WHERE ri.invite_id = ? ORDER BY r.created_at, r.rowid", i.id)
       .map((r: any) => ({ relationship_id: r.id, bot: "@" + this.bot(r.requester_bot === i.bot_id ? r.target_bot : r.requester_bot).handle, status: r.status, joined_at: r.created_at }));
   }
+  /** Everything a link says about itself, without the joins. The public preview answers only these fields, so it
+   *  reads this layer: an anonymous request never walks `relationship_invites` for rows the whitelist would drop. */
+  private inviteCore(i: any) {
+    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.botCard(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at };
+  }
   private inviteView(i: any) {
-    return { invite_id: i.id, code: i.code, url: this.inviteUrl(i.code), bot: this.botCard(this.bot(i.bot_id)), scope: i.scope ?? null, status: this.inviteStatus(i), offered_capabilities: J(i.offered_caps, []), requested_capabilities: J(i.requested_caps, []), message: i.message, auto_accept: !!i.auto_accept, uses: i.uses, max_uses: i.max_uses, expires_at: i.expires_at, created_at: i.created_at, joins: this.inviteJoins(i) };
+    return { ...this.inviteCore(i), joins: this.inviteJoins(i) };
   }
   private inviteStatus(i: any) {
     // Stored terminal states win over the clock: a revoked or rejected invite never flips back to expired.
@@ -3316,7 +3321,7 @@ export class Platform {
   inviteInfo(code: string) {
     const i = this.get("SELECT * FROM invites WHERE code = ?", code);
     assert(i, 404, "invite_not_found");
-    const v = this.inviteView(i);
+    const v = this.inviteCore(i);
     // A link names one Bot, and an emergency stop closes that Bot's reach until it is resumed. The preview is the
     // first door a leaked link knocks on, and `public/invite.html` renders exactly this `active` answer as "tell your
     // assistant to join" — so a live link answers what the join answers (`assertInvitable`) instead of advertising a

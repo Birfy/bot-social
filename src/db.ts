@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS attachments_expiry ON attachments (expires_at);
 CREATE TABLE IF NOT EXISTS relationship_invites (relationship_id TEXT PRIMARY KEY, invite_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS relationship_invites_invite ON relationship_invites (invite_id);
 -- #47: a caller's idempotency key and the answer it first got. Scoped to the calling owner (home) and the
 -- tool, so two homes may use the same string; kept 24 hours and swept as new keys are written.
 CREATE TABLE IF NOT EXISTS idempotency_keys (
