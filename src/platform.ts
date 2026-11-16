@@ -2512,35 +2512,40 @@ export class Platform {
     const usable = friendships.filter((r: any) => !blockedPair(pairBotOf(r)));
     assert(usable.length > 0, 403, "blocked", "relationship is blocked");
 
-    // A delivery moment, not a gate. This door refuses a stranger and a blocked pair above it, and a refused share
-    // must not be the call that expires another owner's cards -- the rule `a_refused_write_settles_nothing_else` pins
-    // on the three doors before this one. The sweep used to stand in front of those refusals, so a 404 or a 403 here
-    // settled the whole platform: a third owner's waiting card, its `approval.expired` line, its Bot told, and the
-    // `pending_owner` invite the card was holding expired for good. Every refusal of this door is behind us now, so
-    // the queue is settled once, here, before the first write.
-    this.expireStale();
-
     // Idempotent: already a live full share of this Bot to any of the friend's bots.
     for (const rel of usable) {
       const myBot = rel.requester_owner === ownerId ? rel.requester_bot : rel.target_bot;
       const friendBot = rel.requester_owner === ownerId ? rel.target_bot : rel.requester_bot;
       if (myBot !== bot.id) continue;
       if (this.hasLiveGrant(ownerId, friendBot, rel.id)) {
-        const listed = this.listBotGrants(p, bot.id).grants.find((g: any) => g.relationship_id === rel.id && (g.grantee.bot_id === friendBot || handleKey(g.grantee.handle) === handleKey(this.bot(friendBot).handle)));
+        // This answer writes nothing, so it settles nothing: name the share from this one relationship. The read it
+        // used to end with, `listBotGrants`, is a documented delivery moment of its own ("a read also settles lapsed
+        // access"), so it ran the platform-wide sweep a second time from behind the door's -- and a repeat of a share
+        // is exactly the call a client makes on a retry. `findGrant` names the live `chat.public` row, the first row
+        // of this bundle as the writing path returns it, and `grantSummary` its capabilities: both answer from the
+        // relationship alone, without a sweep.
         const summary = this.grantSummary(rel.id).find((g: any) => g.granted_bot.bot_id === bot.id && g.grantee_bot.bot_id === friendBot && !g.reply_only);
         return {
-          grant_id: listed?.grant_id ?? summary?.grant_id ?? this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id,
+          grant_id: this.findGrant(ownerId, friendBot, "chat.public", bot.id)?.id ?? summary?.grant_id,
           bot_id: bot.id,
           friend_owner_id: friendOwnerId,
           grantee_bot: friendBot,
           relationship_id: rel.id,
           status: "active",
-          capabilities: listed?.capabilities ?? summary?.capabilities ?? ["chat.public", "profile.read"],
+          capabilities: summary?.capabilities ?? ["chat.public", "profile.read"],
           reply_only: false,
           idempotent: true,
         };
       }
     }
+
+    // A delivery moment, not a gate. Every refusal of this door is above it (`a_refused_write_settles_nothing_else`
+    // pins that a 404 or a 403 must not be the call that expires another owner's cards), and so is the answer that
+    // writes nothing: a repeat of a live share writes no byte, so it must settle nothing either
+    // (`an_idempotent_grant_settles_nothing_else`). The sweep used to stand in front of both, and the read the
+    // idempotent answer named its share with ran it again; the queue is settled once, here, right before the first
+    // write.
+    this.expireStale();
 
     // Prefer an existing relationship whose endpoint on our side is this Bot; else open one with the friend's bot from the newest friendship.
     let rel = usable.find((r: any) => (r.requester_owner === ownerId ? r.requester_bot : r.target_bot) === bot.id);
