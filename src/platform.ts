@@ -2130,9 +2130,13 @@ export class Platform {
     let r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     assert(r, 404, "relationship_not_found");
     assert(r.target_owner === ownerId, 403, "forbidden", "only the target owner can consent");
-    // The request is this owner's to answer, so this is the delivery moment: settle everything that has lapsed,
-    // including this row. Read it again afterwards, because the copy above may be the one that just lapsed.
-    this.expireStale();
+    // The request is this owner's to answer, so this door judges this row -- and it settles only this row. A refusal
+    // below (the `409` for a request that lapsed while it waited, a `403` after a stop or a removal) is an answer
+    // about this row, not a delivery moment: the platform-wide sweep here used to settle every other owner's lapsed
+    // cards, requests, events and webhook pushes on the way out, the same shape #712's refused writes settled. A pair
+    // is the whole of what this door settles, so a row of this pair that lapsed still answers `409`. Read it again
+    // afterwards, because the copy above may be the one that just lapsed.
+    this.expirePendingBetween(r.requester_bot, r.target_bot);
     r = this.get("SELECT * FROM relationships WHERE id = ?", relId);
     assert(r.status === "pending_target", 409, "invalid_state", `relationship is ${r.status}`);
     assert(["accept", "decline"].includes(body?.decision), 400, "invalid_request", "decision must be accept|decline");
@@ -2152,6 +2156,9 @@ export class Platform {
       400, "invalid_request", "grant_capabilities must be an array of strings",
     );
     if (body.decision === "decline") {
+      // Declining really answers the request, so the delivery moment is here, exactly as it always was: the queue is
+      // settled before the row is written. Only the refusals above (and the ones below) answer without it.
+      this.expireStale();
       this.run("UPDATE relationships SET status = 'declined', updated_at = ? WHERE id = ?", nowIso(), relId);
       // A declined join never became a friendship: give the invite slot back, exactly as `expireStale` and a
       // rejected approval do, so a 1-use link does not read "used" while no relationship exists (P9).
@@ -2175,6 +2182,10 @@ export class Platform {
     const specs = (body.grant_capabilities ?? []).map((g) => (typeof g === "string" ? { capability: g } : g));
     this.validCaps(specs.map((s) => s.capability));
     for (const s of specs) this.assertScope(s.capability, s.scope);
+    // Every refusal is behind us and this call really answers the request, so this is the delivery moment the door has
+    // always taken: settle the platform's lapsed shares, requests and cards. This row is this owner's own and it is not
+    // lapsed (the check above), so the sweep leaves it standing and `activateRelationship` writes it next.
+    this.expireStale();
     this.activateRelationship(r, specs, `owner:${ownerId}`);
     return { relationship_id: relId, status: "active", grants: this.grantsFor(relId) };
   }
@@ -3931,9 +3942,18 @@ export class Platform {
         throw new ApiError(403, "owner_must_decide", "this hold is the owner's to decide; a connector token can only decide a blanket outbound hold");
       }
     }
-    // The card is this owner's to decide, so this is the delivery moment: settle everything that has lapsed, including
-    // the card itself. Read it again afterwards, because the copy above may be the one that just lapsed.
-    this.expireStale();
+    // The card is this owner's to decide, so this door judges this card -- and a `grant_request` settles only this
+    // card. Every refusal below (the `409` for a card that lapsed or was cancelled, the `403` for a Bot a stop or a
+    // removal took down) is an answer about this card, not a delivery moment: the platform-wide sweep here used to
+    // settle every other owner's cards, burn their links and tell their Bots on the way to that answer. A card that
+    // lapsed under its own owner's hand is still settled here, so it still answers `409` rather than being decided.
+    // The other kinds keep the sweep at this point, unchanged; the `grant_request` branch below takes its own.
+    if (a.kind === "grant_request") {
+      const lapsed = this.get("SELECT * FROM approvals WHERE id = ? AND status = 'pending' AND expires_at < ?", aprId, nowIso());
+      if (lapsed) this.expireApproval(lapsed);
+    } else {
+      this.expireStale();
+    }
     a = this.get("SELECT * FROM approvals WHERE id = ?", aprId);
     // #84 follow-up: a settled card stays as a record, never as a decision. Say why, so the owner is not left
     // guessing at "approval is cancelled": a revoked sender and a revoked share have their own sentence, a share
@@ -4094,7 +4114,15 @@ export class Platform {
         // re-runs the same #211 guard before the transaction, so a bad edit leaves the card pending and writes nothing.
         const scope = body.edited_params?.scope ?? req.scope;
         this.assertScope(req.capability, scope);
+        // Every refusal this card has is behind us: both ends answer, the edited scope is accepted, and the value check
+        // the insert itself runs is asked here first, because a refusal is not the call that settles another owner's
+        // queue. What is left is the answer, so this is the delivery moment this door has always taken before it writes.
+        this.grantExpiry(body.edited_params?.expires_in_days);
+        this.expireStale();
         result.grant_id = this.db.transaction(() => this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, scope, body.edited_params?.expires_in_days, `owner:${ownerId}`)).immediate();
+      } else {
+        // A rejection answers the card too, so the delivery moment stays on that path as well.
+        this.expireStale();
       }
       this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: a.kind, capability: req.capability, decision, note_to_bot: body.note_to_bot ?? null });
     }
