@@ -2167,6 +2167,11 @@ export class Platform {
     for (const id of [r.requester_bot, r.target_bot]) {
       assert(this.bot(id).status !== "revoked", 403, "bot_revoked", "a Bot in this relationship was revoked");
     }
+    // A frozen Bot is the same refusal: the kill switch says the identity is down, and a consent that was sent
+    // before it cannot bring it back. `assertInvitable` is the one answer for both states (both ends, exactly as
+    // `autoAcceptSpecs` asks of the auto-accept half), and it comes before `activateRelationship` writes anything.
+    this.assertInvitable(this.bot(r.requester_bot));
+    this.assertInvitable(this.bot(r.target_bot));
     const specs = (body.grant_capabilities ?? []).map((g) => (typeof g === "string" ? { capability: g } : g));
     this.validCaps(specs.map((s) => s.capability));
     for (const s of specs) this.assertScope(s.capability, s.scope);
@@ -2358,6 +2363,11 @@ export class Platform {
     this.validCaps([body?.capability]);
     this.assertScope(body.capability, body.scope);
     const grantee = ownerId === r.requester_owner ? r.target_bot : r.requester_bot;
+    // Both ends of the share must be able to answer. The auto-accept invite path refuses a frozen or revoked Bot at
+    // the same point, and this door writes the same grants -- a stop must not be undone by a share that arrives
+    // later. The refusal comes before the transaction, so nothing is superseded and no row is written.
+    this.assertInvitable(this.bot(ownerId === r.requester_owner ? r.requester_bot : r.target_bot));
+    this.assertInvitable(this.bot(grantee));
     // The supersede and the insert are one write: a throw between them must not leave the old grant revoked.
     const id = this.db.transaction(() => this.insertGrant(relId, ownerId, grantee, body.capability, body.scope, body.expires_in_days, `owner:${ownerId}`)).immediate();
     this.emit(grantee, "grant.changed", { relationship_id: relId, capability: body.capability, status: "granted" });
@@ -4034,6 +4044,16 @@ export class Platform {
     } else if (a.kind === "grant_request") {
       const req = J(a.note, {});
       if (approve) {
+        // A share is a share wherever it is written: the owner route and the auto-accept invite both refuse a frozen
+        // or revoked Bot (`assertInvitable`), and a card decided later writes the same pair of rows. A stop that
+        // happened while the card waited is not undone by approving it -- the refusal leaves the card pending and
+        // writes neither the grant nor its `grant.created` line. Both ends are asked: the Bot this owner shares and
+        // the friend's Bot that asked for it.
+        const r = this.get("SELECT * FROM relationships WHERE id = ?", a.subject_id);
+        const shared = ownerId === r.requester_owner ? r.requester_bot : r.target_bot;
+        const asking = req.grantee_bot ?? (ownerId === r.requester_owner ? r.target_bot : r.requester_bot);
+        this.assertInvitable(this.bot(shared));
+        this.assertInvitable(this.bot(asking));
         // One write, like the owner route: the supersede cannot survive a throw from the insert. The edited scope
         // re-runs the same #211 guard before the transaction, so a bad edit leaves the card pending and writes nothing.
         const scope = body.edited_params?.scope ?? req.scope;
