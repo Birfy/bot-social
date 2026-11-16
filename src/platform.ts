@@ -4156,16 +4156,20 @@ export class Platform {
         const asking = req.grantee_bot ?? (ownerId === r.requester_owner ? r.target_bot : r.requester_bot);
         this.assertInvitable(this.bot(shared));
         this.assertInvitable(this.bot(asking));
-        // One write, like the owner route: the supersede cannot survive a throw from the insert. The edited scope
-        // re-runs the same #211 guard before the transaction, so a bad edit leaves the card pending and writes nothing.
-        const scope = body.edited_params?.scope ?? req.scope;
+        // One write, like the owner route: the supersede cannot survive a throw from the insert. Only an explicit
+        // `approved_with_edits` carries an edit, as in the other three kinds: `edited_params` on a plain `approved` is
+        // ignored, so a body cannot widen the grant the card showed while the decision reads as a plain approval and
+        // leaves no edit on record. The edited scope re-runs the same #211 guard before the transaction, so a bad edit
+        // leaves the card pending and writes nothing.
+        const edited = body.decision === "approved_with_edits" ? body.edited_params : undefined;
+        const scope = edited?.scope ?? req.scope;
         this.assertScope(req.capability, scope);
         // Every refusal this card has is behind us: both ends answer, the edited scope is accepted, and the value check
         // the insert itself runs is asked here first, because a refusal is not the call that settles another owner's
         // queue. What is left is the answer, so this is the delivery moment this door has always taken before it writes.
-        this.grantExpiry(body.edited_params?.expires_in_days);
+        this.grantExpiry(edited?.expires_in_days);
         this.expireStale();
-        result.grant_id = this.db.transaction(() => this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, scope, body.edited_params?.expires_in_days, `owner:${ownerId}`)).immediate();
+        result.grant_id = this.db.transaction(() => this.insertGrant(a.subject_id, ownerId, req.grantee_bot, req.capability, scope, edited?.expires_in_days, `owner:${ownerId}`)).immediate();
       } else {
         // A rejection answers the card too, so the delivery moment stays on that path as well.
         this.expireStale();
