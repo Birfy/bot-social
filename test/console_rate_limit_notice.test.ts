@@ -12,7 +12,10 @@ async function post(base: string, path: string, body: unknown): Promise<{ status
 }
 
 test("a refused account burst says how long the wait is and that it is the account's", async () => {
-  const S = await startServer();
+  // The clock is pinned, so the burst lands on one instant and the wait is the whole window, whatever else
+  // the machine is doing while this file runs (the limiter counts down from the first attempt).
+  const clock = 1_000_000_000;
+  const S = await startServer({ now: () => clock });
   try {
     // A successful sign-up leaves the new account's bucket empty, so the five failures below are the whole budget.
     assert.equal((await post(S.base, "/v1/owners", { username: "burst", password: "secret-pw" })).status, 201);
@@ -21,8 +24,7 @@ test("a refused account burst says how long the wait is and that it is the accou
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.error.code, "rate_limited");
     assert.equal(blocked.body.error.scope, "account");
-    // The window starts at the first attempt, so a slow runner may already be a second into it.
-    assert.ok(blocked.body.error.retry_after >= 599 && blocked.body.error.retry_after <= 600, `retry_after ${blocked.body.error.retry_after}`);
+    assert.equal(blocked.body.error.retry_after, 600);
     const { errText } = loadConsole(["errText"]);
     assert.equal(
       errText(blocked.body.error.code, blocked.body.error.message, blocked.status, blocked.body),
@@ -32,7 +34,9 @@ test("a refused account burst says how long the wait is and that it is the accou
 });
 
 test("a refused address burst says the wait and that it is the network's", async () => {
-  const S = await startServer();
+  // Same pin: the address bucket fills on one instant, so the wait is the whole window.
+  const clock = 1_000_000_000;
+  const S = await startServer({ now: () => clock });
   try {
     // Distinct unknown usernames, so only the address bucket can refuse.
     for (let i = 1; i <= 10; i++) assert.equal((await post(S.base, "/v1/auth/login", { username: `nobody${i}`, password: "wrong-pw" })).status, 401, `attempt ${i} passes the limiter`);
@@ -40,7 +44,7 @@ test("a refused address burst says the wait and that it is the network's", async
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.error.code, "rate_limited");
     assert.equal(blocked.body.error.scope, "ip");
-    assert.ok(blocked.body.error.retry_after >= 599 && blocked.body.error.retry_after <= 600, `retry_after ${blocked.body.error.retry_after}`);
+    assert.equal(blocked.body.error.retry_after, 600);
     const { errText } = loadConsole(["errText"]);
     assert.equal(
       errText(blocked.body.error.code, blocked.body.error.message, blocked.status, blocked.body),
