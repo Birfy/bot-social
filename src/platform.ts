@@ -5167,9 +5167,15 @@ export class Platform {
   }
 
   private rejectAction(a: any, note?: string) {
-    this.run("UPDATE actions SET status = 'rejected' WHERE id = ?", a.subject_id);
+    // The third door a kept card can settle through (#812 guarded the cancel and expiry paths): a #266 retryable
+    // failure already wrote the action's terminal `failed` with its reason in `result`, while the card stayed
+    // pending for another time. The owner's rejection settles the card, never the execution that already ended,
+    // so only a row still waiting for this card is refused; the answer reads the row's live status so it stays
+    // truthful rather than claiming a decision the row never took.
+    this.run("UPDATE actions SET status = 'rejected' WHERE id = ? AND status = 'pending_approval'", a.subject_id);
+    const live = (this.get("SELECT status FROM actions WHERE id = ?", a.subject_id) as any)?.status ?? "rejected";
     this.emit(a.bot_id, "approval.decided", { approval_id: a.id, kind: "action", action_id: a.subject_id, decision: "rejected", note_to_bot: note ?? null });
-    return { action_id: a.subject_id, status: "rejected" };
+    return { action_id: a.subject_id, status: live };
   }
 
   // ================================================================ calendar (built-in mock provider)
