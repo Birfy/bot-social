@@ -455,10 +455,12 @@ try {
       // answer through `actionFailLine`; this half says it as a failure an agent can act on.
       if (r?.status === "failed") {
         const reason = String(r.reason ?? "no reason given");
+        // Only a busy calendar leaves the card waiting (#266); every other failure is final and the decision
+        // above has already settled it, so the two read differently on purpose.
         const card = reason === "calendar_conflict"
           ? "the card is still pending, so another time can be approved"
-          : "the card was settled by this decision and the action was not carried out";
-        fail(`${cmd === "reject" ? "Rejected" : "Approved"}, but the action failed (${reason}): ${card}`, { reason, action: r.action_id });
+          : "the card was settled, but the action was not carried out";
+        fail(`${cmd === "reject" ? "Rejected" : "Approved"}, but the action failed (${reason}): ${card}`, { status: "failed", reason });
       }
       say(cmd === "reject" ? "✓ Rejected" : C.g("✓ Approved"));
       done(r);
