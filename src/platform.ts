@@ -2159,6 +2159,12 @@ export class Platform {
       // Declining really answers the request, so the delivery moment is here, exactly as it always was: the queue is
       // settled before the row is written. Only the refusals above (and the ones below) answer without it.
       this.expireStale();
+      // The sweep is a clock too: this row's own expiry may have crossed now in the window since it was judged above,
+      // in which case the sweep already settled it `expired` -- with its audit line and the invite use its join spent.
+      // Declining it afterwards would write a second terminal outcome on the same row, so the settlement stands and
+      // this call refuses, exactly as the `accept` half does after its own sweep (#792). A live row is untouched.
+      const live = this.get("SELECT status FROM relationships WHERE id = ?", relId);
+      assert(live.status === "pending_target", 409, "invalid_state", `relationship is ${live.status}`);
       this.run("UPDATE relationships SET status = 'declined', updated_at = ? WHERE id = ?", nowIso(), relId);
       // A declined join never became a friendship: give the invite slot back, exactly as `expireStale` and a
       // rejected approval do, so a 1-use link does not read "used" while no relationship exists (P9).
