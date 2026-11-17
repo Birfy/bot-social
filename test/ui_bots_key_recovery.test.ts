@@ -58,7 +58,7 @@ const buttonsIn = (html: string, attr: "data-rk" | "data-ak") =>
   });
 
 /** The console (public/ui.js) against a real server, with the confirmation recorded instead of auto-accepted. */
-async function openBotsPage(base: string, token: string, confirmAnswer = true) {
+async function openBotsPage(base: string, token: string, confirmAnswer = true, latencyMs = 0) {
   const html = elem("main");
   // One set of button objects per rendered page, so the handler PAGES.bots binds is the one the test clicks.
   let cacheHtml = "";
@@ -84,13 +84,21 @@ async function openBotsPage(base: string, token: string, confirmAnswer = true) {
   const requests: { method: string; path: string }[] = [];
   const toastEl = elem();
   dom.set("#toast", toastEl);
+  let inFlight = 0;
   const ctx: Fake = {
     localStorage: { getItem: (k: string) => (k === "bs_owner_token" ? token : null), setItem() {}, removeItem() {} },
     window: { addEventListener() {} },
     document,
     location: { hash: "#/bots", origin: "https://example.test", reload() {} },
     navigator: { clipboard: { writeText: async () => {} } },
-    fetch: (path: string, init?: any) => { requests.push({ method: init?.method || "GET", path }); return fetch(base + path, init); },
+    fetch: async (path: string, init?: any) => {
+      requests.push({ method: init?.method || "GET", path });
+      inFlight += 1;
+      try {
+        if (latencyMs > 0) await new Promise((r) => setTimeout(r, latencyMs));
+        return await fetch(base + path, init);
+      } finally { inFlight -= 1; }
+    },
     setInterval() {}, setTimeout, clearTimeout, URLSearchParams, Intl, Date, console,
     confirm: (msg: string) => { confirms.push(msg); return confirmAnswer; },
     prompt: () => null,
@@ -100,7 +108,22 @@ async function openBotsPage(base: string, token: string, confirmAnswer = true) {
   const page = {
     confirms, requests, toast: () => toastEl.textContent,
     html: () => html.innerHTML,
-    settle: () => new Promise((r) => setTimeout(r, 30)),
+    settle: async () => {
+      // The console paints only after the platform answers, so wait for the work itself instead of
+      // guessing a delay: return once no request is in flight and the render has stayed quiet.
+      const deadline = Date.now() + 5_000;
+      await new Promise((r) => setTimeout(r, 0)); // let the click handler reach its first await
+      let quiet = 0;
+      while (Date.now() < deadline) {
+        if (inFlight > 0) { quiet = 0; await new Promise((r) => setTimeout(r, 5)); continue; }
+        await new Promise((r) => setImmediate(r));
+        if (inFlight > 0) { quiet = 0; continue; }
+        quiet += 1;
+        if (quiet >= 3) return;
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      assert.fail("settle timed out after 5s: the page never finished rendering");
+    },
     load: async () => { await ctx.__ui.PAGES.bots(view); return page; },
     revoke: (rk: string) => buttons().rk.find((b) => b.dataset.rk === rk) ?? null,
     addKey: () => buttons().ak[0] ?? null,
@@ -232,4 +255,24 @@ test("a bad public key and an existing kid show inline errors and write nothing"
   const keys = await keysOf(s.base, ownerToken, A.bot.id);
   assert.equal(keys.length, 1, "no row is added");
   assert.equal(keys[0].expires_at, null, "and the rotation window is not started by the failed add");
+});
+
+test("the key card is rendered before settle returns, even when the platform answers slowly", async (t) => {
+  const s = await startServer();
+  t.after(s.stop);
+  const A = await ownerWithBot(s.base, "nora");
+  const ownerToken = A.owner.token;
+  const kp2 = generateEd25519();
+  assert.equal((await req(s.base, "POST", `/v1/bots/${A.bot.id}/keys`, ownerToken, { kid: "k2", value: kp2.publicKey })).status, 201);
+
+  // 120ms per round trip: a settle that guesses a fixed delay returns while the card still shows the old keys.
+  const page = await openBotsPage(s.base, ownerToken, true, 120);
+  const first = page.revoke(`${A.bot.id}|k1`);
+  assert.ok(first, "the rotation-window key offers Revoke");
+  await first.onclick();
+  await page.settle();
+  assert.ok(page.requests.some((r) => r.method === "DELETE" && r.path === `/v1/bots/${A.bot.id}/keys/k1`), "the revoke went out");
+
+  const last = page.revoke(`${A.bot.id}|k2`);
+  assert.ok(last, "the re-rendered card already offers Revoke on the only remaining key when settle returns");
 });
