@@ -66,6 +66,20 @@ async function bookableMeeting(s: any) {
   return { A, B, cid, approvalId: act.approval_id as string };
 }
 
+/** A drafts a booking for a window that starts soon, then the platform's clock steps past it: the action cannot run.
+ *  The clock is the server's own (`Platform.nowMs`), so this is the card outliving its window, not a sleep. */
+async function pastBooking(s: any) {
+  let clock = Date.now();
+  s.platform.nowMs = () => clock;
+  const { A, B } = await friends(s.base);
+  const cid = (await A.bot.startConversation(B.bot.id, meetingIntent())).conversation_id as string;
+  const start = new Date(clock + 20 * 60e3).toISOString();
+  const end = new Date(clock + 80 * 60e3).toISOString();
+  const act: any = await A.bot.draftAction(cid, "calendar.book", { title: "Sync", start, end, attendees: [B.bot.id] }, "plan");
+  clock += 30 * 60e3; // the owner approves after the window began, while the card's own 4h deadline still holds
+  return { A, approvalId: act.approval_id as string };
+}
+
 test("an action the server refused is not reported as a plain approval", async (t) => {
   const s = await startServer(); t.after(() => s.stop());
   const { A, approvalId } = await conflictingBooking(s);
@@ -89,6 +103,26 @@ test("an action the server refused is not reported as a plain approval", async (
     .find((a: any) => a.approval_id === id2);
   assert.ok(pending, "the refused booking leaves the CLI's own card pending so the owner can retry with another time");
   assert.equal((pending as any).status, "pending");
+});
+
+test("a failure that settles the card is not reported as one still waiting", async (t) => {
+  const s = await startServer(); t.after(() => s.stop());
+  const { A, approvalId } = await pastBooking(s);
+
+  // `meeting_in_past` is a final failure: `decideApproval` settles the card as approved (#266 leaves only
+  // `calendar_conflict` pending), so the CLI must not send the owner back to a card that is no longer waiting.
+  const out = await cliHome(s.base, A)("approve", "alice", approvalId);
+  assert.doesNotMatch(out.said, /✓ Approved/,
+    `an action that could not run must not be reported as a plain approval; the CLI printed:\n${out.said}`);
+  assert.notEqual(out.code, 0, `a failed action exits non-zero; the CLI printed:\n${out.said}`);
+  assert.match(out.said, /meeting_in_past/, `the CLI names the reason the server gave; it printed:\n${out.said}`);
+  assert.match(out.said, /settled/i, `and says the card was settled by this decision; it printed:\n${out.said}`);
+  assert.doesNotMatch(out.said, /still pending/i,
+    `this card is not waiting any more, so the CLI must not say it is; it printed:\n${out.said}`);
+
+  const card = (await A.owner.req("GET", "/v1/approvals?status=all")).approvals
+    .find((a: any) => a.approval_id === approvalId);
+  assert.equal((card as any)?.status, "approved", "the decision settled the card even though the action failed");
 });
 
 test("control: a booking that lands is still a plain approval", async (t) => {
