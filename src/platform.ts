@@ -3731,7 +3731,9 @@ export class Platform {
           // The line dies with the card; the files it held at draft time never reached the peer, so they are free.
           this.freeDraftAttachments(a.subject_id);
         }
-        if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ?", a.subject_id);
+        // Only a row still waiting for this card can be cancelled by it: a #266 retryable failure wrote `failed`
+        // while the card stayed pending, and that ending is the action's own, not the card's to rewrite.
+        if (a.kind === "action") this.run("UPDATE actions SET status = 'cancelled' WHERE id = ? AND status = 'pending_approval'", a.subject_id);
         if (a.kind === "face_room_message") this.run("UPDATE face_room_drafts SET status = 'cancelled' WHERE id = ?", a.subject_id);
         // A Bot-created invite waits at status `pending_owner` for this card, so settling only the card leaves a link
         // nobody can use: the owner's list keeps offering it, the decision door answers 409 and the join door reports
@@ -3815,7 +3817,9 @@ export class Platform {
         }
       }
       if (a.kind === "action") {
-        this.run("UPDATE actions SET status = 'expired' WHERE id = ?", a.subject_id);
+        // Same guard as the cancel path: the sweep settles the card, never an action that already ended `failed`
+        // (#266 keeps such cards pending for a retry, so `fail()`'s ending must survive the card's own clock).
+        this.run("UPDATE actions SET status = 'expired' WHERE id = ? AND status = 'pending_approval'", a.subject_id);
         tell(a.bot_id, { approval_id: a.id, kind: a.kind, action_id: a.subject_id, decision: "expired" });
       }
       if (a.kind === "face_room_message") {
