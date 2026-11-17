@@ -448,6 +448,18 @@ try {
       const body: any = { decision: cmd === "reject" ? "rejected" : f.text ? "approved_with_edits" : "approved", note_to_bot: str(f.note) };
       if (f.text) body.edited_payload = { text: f.text };
       const r = await owner(c).req("POST", `/v1/approvals/${rest[0]}/decision`, body);
+      // The decision can land while the thing it approved does not. `decideApproval` answers 200 with
+      // `{status: "failed", reason}` (`executeAction` already wrote the failed action, its audit row and its
+      // `action.failed` event): a busy calendar leaves the card pending so the owner can retry (#266). Saying
+      // "✓ Approved" there is what makes an agent tell its owner a meeting is booked. The console words the same
+      // answer through `actionFailLine`; this half says it as a failure an agent can act on.
+      if (r?.status === "failed") {
+        const reason = String(r.reason ?? "no reason given");
+        const card = reason === "calendar_conflict"
+          ? "the card is still pending, so another time can be approved"
+          : "the card was settled by this decision and the action was not carried out";
+        fail(`${cmd === "reject" ? "Rejected" : "Approved"}, but the action failed (${reason}): ${card}`, { reason, action: r.action_id });
+      }
       say(cmd === "reject" ? "✓ Rejected" : C.g("✓ Approved"));
       done(r);
     }
