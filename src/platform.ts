@@ -1061,7 +1061,16 @@ export class Platform {
     this.run("UPDATE attachments SET message_id = NULL WHERE message_id = ?", messageId);
   }
 
-  /** Download for the recipient (bot, or its owner) of a delivered message only; the hash is verified. */
+  /**
+   * Download for the recipient (bot, or its owner) of a delivered message only; the hash is verified.
+   *
+   * A file a waiting card names has a second reader: the home that uploaded it. The console draws an Open control on
+   * that card and fetches the bytes with the owner's token, and `cleanupAttachments` keeps the row alive for exactly
+   * as long as the card can still be decided, so the bytes are there to be read. Until the line is delivered the
+   * uploader's owner and the bot that drafted the file may read it -- the card is their own doing, not a leak to the
+   * peer -- while the peer stays out and gets the same answer a missing id gets. Delivery keeps its own rule
+   * unchanged: after it only the recipient reads the file.
+   */
   getAttachment(p: Principal, body: { attachment_id: string; bot_id?: string }) {
     const row = this.get("SELECT * FROM attachments WHERE id = ?", body?.attachment_id);
     assert(row, 404, "attachment_not_found", "no such attachment");
@@ -1070,6 +1079,12 @@ export class Platform {
     if (m && m.status === "delivered") {
       if (p.kind === "owner") allowed = this.bot(m.recipient_bot).owner_id === this.requireOwner(p) && (!body.bot_id || body.bot_id === m.recipient_bot);
       else allowed = this.requireBot(p).botId === m.recipient_bot;
+    } else if (m && m.status === "pending_approval") {
+      // The card is really waiting, so the file is still the uploader's own. Only that window opens: any settled
+      // status is refused like a missing id, and the peer never sees the bytes before delivery. The home holding
+      // the upload may open it; everyone else gets the same 404 as a missing id.
+      if (p.kind === "owner") allowed = row.owner_id === this.requireOwner(p);
+      else allowed = row.bot_id === this.requireBot(p).botId;
     }
     // Same answer whether it exists or not, so ids cannot be probed.
     assert(allowed, 404, "attachment_not_found", "no such attachment");
