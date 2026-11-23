@@ -41,6 +41,10 @@ const handleKey = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "").t
 const handleRef = (ref: unknown) => String(ref ?? "").trim().replace(/^@/, "");
 /** The owner's one-line card on a Bot: trimmed, 1-280 chars, null when unset. */
 const BOT_DESCRIPTION_MAX = 280;
+/** #819: a per-event claim is a lease. 300 s is the protocol default; longer than an hour is a client bug, not a
+ *  lease, so `ttl_seconds` above 3600 is refused rather than silently clamped. */
+const EVENT_CLAIM_TTL_S = 300;
+const EVENT_CLAIM_MAX_TTL_S = 3600;
 /** A reference that names rows differing only by case is refused, never guessed. */
 const ambiguous = (raw: string, n: number) => new ApiError(409, "ambiguous_handle", `"${raw}" matches ${n} Bots that differ only by case; name the exact handle`);
 /** In-memory version of the same rule: exact spelling wins, else the unique case-insensitive match. */
@@ -1245,6 +1249,64 @@ export class Platform {
   }
 
   setCustodyCursor(botId: string, cursor: number) { this.run("UPDATE bot_custody SET events_cursor = ? WHERE bot_id = ?", cursor, botId); }
+
+  // ---- Per-event claims (#819): two writable clients on one Bot must deliver an inbound event once, without
+  // relying on the inbox cursor (which `peek` leaves alone by design). Every decision is a single CAS statement
+  // (`INSERT ... ON CONFLICT ... WHERE` / `UPDATE ... WHERE`), never a read followed by a write, so callers racing
+  // on one event cannot both come back `claimed`. `events` and `bot_custody.events_cursor` are not touched.
+  /** Claim one inbox event for `holder`; the same holder calling again renews its lease. Returns
+   *  `claimed` (you have it), `held` (someone else's live lease) or `settled` (already replied / needs-human). */
+  claimEvent(p: Principal, body: { event_id: string; holder: string; ttl_seconds?: number; bot_id?: string }) {
+    const cb = this.custodialBot(p, body?.bot_id);
+    const eventId = String(body?.event_id ?? "").trim();
+    const holder = String(body?.holder ?? "").trim();
+    assert(eventId, 400, "invalid_request", "event_id is required");
+    assert(holder.length > 0 && holder.length <= 200, 400, "invalid_request", "holder must be 1-200 chars");
+    const ttl = body?.ttl_seconds ?? EVENT_CLAIM_TTL_S;
+    assert(Number.isInteger(ttl) && ttl >= 1 && ttl <= EVENT_CLAIM_MAX_TTL_S, 400, "invalid_request", `ttl_seconds must be an integer 1-${EVENT_CLAIM_MAX_TTL_S}`);
+    const now = this.nowMs();
+    const until = now + ttl * 1000;
+    const r = this.run(
+      `INSERT INTO event_claims (event_id, bot_id, holder, lease_until, status, updated_at) VALUES (?, ?, ?, ?, 'claimed', ?)
+       ON CONFLICT(event_id) DO UPDATE SET bot_id = excluded.bot_id, holder = excluded.holder,
+         lease_until = excluded.lease_until, status = 'claimed', updated_at = excluded.updated_at
+       WHERE event_claims.status = 'failed'
+          OR (event_claims.status = 'claimed' AND (event_claims.lease_until <= ? OR event_claims.holder = excluded.holder))`,
+      eventId, cb.botId, holder, until, now, now);
+    if (r.changes === 1) return { status: "claimed" as const, holder, lease_until: until };
+    // The CAS wrote nothing: the row is either a live lease or a terminal answer, and this read only names it.
+    const row = this.get("SELECT holder, lease_until, status FROM event_claims WHERE event_id = ?", eventId);
+    assert(row, 500, "claim_lost", "the claim row disappeared between the CAS and the read");
+    if (row.status === "replied" || row.status === "needs-human") return { status: "settled" as const };
+    return { status: "held" as const, holder: row.holder as string, lease_until: row.lease_until as number };
+  }
+
+  /** Report what became of a claimed event. Only the holder of a live lease may write: otherwise the answer is
+   *  `stale-holder` and nothing changes. `replied` / `needs-human` are terminal (later claims say `settled`);
+   *  `failed` releases the lease so another client may claim at once. Repeating the same ack is idempotent. */
+  ackEvent(p: Principal, body: { event_id: string; holder: string; outcome: "replied" | "failed" | "needs-human"; bot_id?: string }) {
+    this.custodialBot(p, body?.bot_id);
+    const eventId = String(body?.event_id ?? "").trim();
+    const holder = String(body?.holder ?? "").trim();
+    const outcome = body?.outcome;
+    assert(eventId, 400, "invalid_request", "event_id is required");
+    assert(holder.length > 0 && holder.length <= 200, 400, "invalid_request", "holder must be 1-200 chars");
+    assert(outcome === "replied" || outcome === "failed" || outcome === "needs-human", 400, "invalid_request", "outcome must be replied, failed or needs-human");
+    const now = this.nowMs();
+    // A released lease is stamped 0, so `failed` is immediately reclaimable; a terminal one keeps a live stamp but
+    // no claim path ever writes a terminal row, because the claim CAS only rewrites `claimed` (expired/same holder)
+    // or `failed`.
+    const r = this.run(
+      `UPDATE event_claims SET status = ?, lease_until = ?, updated_at = ?
+       WHERE event_id = ? AND holder = ? AND status = 'claimed' AND lease_until > ?`,
+      outcome, outcome === "failed" ? 0 : now, now, eventId, holder, now);
+    if (r.changes === 1) return { status: "acked" as const };
+    const row = this.get("SELECT holder, status FROM event_claims WHERE event_id = ?", eventId);
+    if (!row) return { status: "unknown" as const };
+    // The same holder repeating its own outcome is the ack that already landed: a retry, not a stale write.
+    if (row.holder === holder && row.status === outcome) return { status: "acked" as const };
+    return { status: "stale-holder" as const };
+  }
 
   changePassword(p: Principal, body: { current_password: string; new_password: string }) {
     const ownerId = this.requireOwner(p);

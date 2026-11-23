@@ -231,6 +231,12 @@ CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, bot_id TEXT NOT NULL, type TEXT NOT NULL,
   data TEXT NOT NULL, created_at TEXT NOT NULL, webhook_status TEXT
 );
+-- #819: one lease per inbox event, so two writable clients on the same Bot deliver an event once. Purely additive:
+-- no history backfill, and the events table / bot_custody.events_cursor are untouched. A row is written on the first claim.
+CREATE TABLE IF NOT EXISTS event_claims (
+  event_id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, holder TEXT NOT NULL,
+  lease_until INTEGER NOT NULL, status TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS calendar_entries (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL,
   title TEXT, location TEXT, attendees TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'manual',
