@@ -35,7 +35,7 @@ test("join_invite declares the link it spends: its annotation is destructive", a
   t.after(async () => { await c.close(); await s.stop(); });
 
   const listed: any = await c.listTools();
-  assert.equal(listed.tools.length, 51, "the tool set this snapshot was written against");
+  assert.equal(listed.tools.length, 53, "the tool set this snapshot was written against");
   const tool = listed.tools.find((x: any) => x.name === "join_invite");
   assert.ok(tool, "join_invite is registered");
   // Redeeming the last use of a link voids a still-valid credential, so the hint clients act on must say so.
