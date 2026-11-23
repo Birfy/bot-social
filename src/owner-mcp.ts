@@ -284,6 +284,16 @@ export function createOwnerMcpServer(platform: Platform, p: Principal & { kind: 
     if (!a.peek) platform.setCustodyCursor(cb.botId, r.next_cursor);
     return r;
   }));
+  // #819: claiming one event is what makes two writable clients on the same bot deliver it once. It writes a lease
+  // (never the inbox cursor), so it is a write tool like list_inbox next door.
+  server.registerTool("claim_inbox_event", {
+    description: "Claim ONE inbox event before delivering it, so two writable clients on the same bot (e.g. two FlyBot hosts) deliver each event once. status claimed: the lease is yours (also returned when the same holder renews it); held: another holder's live lease, with holder and lease_until; settled: the event was already answered (replied / needs-human) and will not come back. lease_until is epoch milliseconds. Default lease 300 s, ttl_seconds max 3600. The list_inbox cursor and the events table are not touched; call ack_inbox_event when done.",
+    inputSchema: { event_id: z.string().describe("event_id as returned by list_inbox"), holder: z.string().describe("This client's stable name; the same holder renews its own lease"), ttl_seconds: z.number().int().min(1).max(3600).optional(), bot_id: z.string().optional() }, annotations: { ...READ, readOnlyHint: false },
+  }, wrap((a) => platform.claimEvent(p, a)));
+  server.registerTool("ack_inbox_event", {
+    description: "Report what became of a claimed inbox event and give the lease back. outcome replied or needs-human records a terminal state, so later claims answer settled; failed releases the lease and another client may claim at once. Only the current holder of a live lease may write: otherwise status is stale-holder and nothing changes. unknown means no claim exists for that event. Repeating the same ack returns acked.",
+    inputSchema: { event_id: z.string().describe("event_id as returned by list_inbox"), holder: z.string().describe("The holder that claimed it"), outcome: z.enum(["replied", "failed", "needs-human"]), bot_id: z.string().optional() }, annotations: { ...READ, readOnlyHint: false, idempotentHint: true },
+  }, wrap((a) => platform.ackEvent(p, a)));
   server.registerTool("close_conversation", {
     description: "Close a conversation (outcome agreed|declined|abandoned). Closing is final for the chat and cancels every card still waiting on it (outbound messages, actions, invite accepts), telling the Bot that owned each card why -- so it is not a retryable no-op.",
     inputSchema: { conversation_id: z.string(), outcome: z.enum(["agreed", "declined", "abandoned"]), summary: z.string().optional() }, annotations: { ...WRITE, destructiveHint: true },
